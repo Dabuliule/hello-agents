@@ -6,6 +6,7 @@ from typing import Any, Iterable, Literal
 
 from core.exceptions import ToolException
 from .base import Tool
+from .builtin import CalculatorTool
 
 ConflictPolicy = Literal["error", "overwrite", "ignore"]
 
@@ -13,8 +14,15 @@ ConflictPolicy = Literal["error", "overwrite", "ignore"]
 class ToolRegistry:
     """管理 Tool 的注册、查找和执行。"""
 
-    def __init__(self, tools: Iterable[Tool] | None = None, conflict: ConflictPolicy = "error"):
+    def __init__(
+            self,
+            tools: Iterable[Tool] | None = None,
+            conflict: ConflictPolicy = "error",
+            include_builtin: bool = True,
+    ):
         self._tools: dict[str, Tool] = {}
+        if include_builtin:
+            self.register_many([CalculatorTool()], conflict="error")
         if tools:
             self.register_many(tools, conflict=conflict)
 
