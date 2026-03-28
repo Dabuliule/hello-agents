@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -15,22 +16,38 @@ class MemoryRecord:
 
     record_id: str
     content: str
+    importance: float = 0.0
     metadata: Dict[str, Any] = field(default_factory=dict)
     created_at: datetime = field(default_factory=lambda: datetime.now(ZoneInfo("Asia/Shanghai")))
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.record_id, str) or not self.record_id.strip():
+            raise ValueError("record_id 不能为空")
+        if not isinstance(self.content, str) or not self.content.strip():
+            raise ValueError("content 不能为空")
+        if not isinstance(self.importance, (int, float)):
+            raise ValueError("importance 必须是数字")
+        if not math.isfinite(float(self.importance)):
+            raise ValueError("importance 必须是有限数值")
 
 
 class MemoryBase(ABC):
     """记忆基类，定义统一接口。"""
 
     @abstractmethod
-    def add(self, content: str, metadata: Optional[Dict[str, Any]] = None) -> MemoryRecord:
+    def add(
+            self,
+            content: str,
+            importance: float = 0.0,
+            metadata: Optional[Dict[str, Any]] = None,
+    ) -> MemoryRecord:
         """新增一条记忆并返回记录。"""
 
-    def add_many(self, items: Iterable[tuple[str, Optional[Dict[str, Any]]]]) -> List[MemoryRecord]:
+    def add_many(self, items: Iterable[tuple[str, float, Optional[Dict[str, Any]]]]) -> List[MemoryRecord]:
         """批量新增记忆。"""
         records: List[MemoryRecord] = []
-        for content, metadata in items:
-            records.append(self.add(content, metadata))
+        for content, importance, metadata in items:
+            records.append(self.add(content, importance, metadata))
         return records
 
     @abstractmethod
