@@ -15,7 +15,6 @@ class MemoryRecord:
     """记忆条目。"""
 
     record_id: str
-    user_id: str
     content: str
     importance: float = 0.0
     metadata: Dict[str, Any] = field(default_factory=dict)
@@ -25,8 +24,6 @@ class MemoryRecord:
     def __post_init__(self) -> None:
         if not isinstance(self.record_id, str) or not self.record_id.strip():
             raise ValueError("record_id 不能为空")
-        if not isinstance(self.user_id, str) or not self.user_id.strip():
-            raise ValueError("user_id 不能为空")
         if not isinstance(self.content, str) or not self.content.strip():
             raise ValueError("content 不能为空")
         if not isinstance(self.importance, (int, float)):
@@ -45,18 +42,17 @@ class MemoryBase(ABC):
     @abstractmethod
     def add(
             self,
-            user_id: str,
             content: str,
             importance: float = 0.0,
             metadata: Optional[Dict[str, Any]] = None,
     ) -> MemoryRecord:
         """新增一条记忆并返回记录。"""
 
-    def add_many(self, items: Iterable[tuple[str, str, float, Optional[Dict[str, Any]]]]) -> List[MemoryRecord]:
+    def add_many(self, items: Iterable[tuple[str, float, Optional[Dict[str, Any]]]]) -> List[MemoryRecord]:
         """批量新增记忆。"""
         records: List[MemoryRecord] = []
-        for user_id, content, importance, metadata in items:
-            records.append(self.add(user_id, content, importance, metadata))
+        for content, importance, metadata in items:
+            records.append(self.add(content, importance, metadata))
         return records
 
     @abstractmethod

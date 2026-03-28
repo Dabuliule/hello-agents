@@ -26,7 +26,6 @@ class WorkingMemory(MemoryBase):
 
     def add(
             self,
-            user_id: str,
             content: str,
             importance: float = 0.5,
             metadata: Optional[Dict[str, Any]] = None,
@@ -35,7 +34,6 @@ class WorkingMemory(MemoryBase):
         record_id = f"wm_{uuid.uuid4().hex}"
         record = MemoryRecord(
             record_id=record_id,
-            user_id=user_id,
             content=content,
             importance=importance,
             metadata=metadata or {},
@@ -192,7 +190,6 @@ class WorkingMemory(MemoryBase):
 
         updated = MemoryRecord(
             record_id=record.record_id,
-            user_id=record.user_id,
             content=record.content,
             importance=record.importance,
             metadata=record.metadata,
