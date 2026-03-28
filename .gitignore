@@ -180,3 +180,8 @@ debug/
 # poetry.lock
 # Pipfile.lock
 
+# =========================
+# examples
+# =========================
+examples/
+
