@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from typing import Any, List, Optional, Tuple
 
@@ -9,7 +10,11 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 
+from .embedding_service import EmbeddingService
 from .models import Action, Episode
+from .qdrant_episode_vector_store import QdrantEpisodeVectorStore
+
+logger = logging.getLogger(__name__)
 
 # 向量数据不在本库持久化，统一交由外部向量系统（如 Qdrant）管理。
 CREATE_EPISODES_SQL = """
@@ -67,8 +72,12 @@ class PostgresEpisodeStore:
         min_size: int = 1,
         max_size: int = 10,
         timeout: float = 30.0,
+        embedding_service: Optional[EmbeddingService] = None,
+        vector_store: Optional[QdrantEpisodeVectorStore] = None,
     ):
         self._dsn = dsn
+        self._embedding_service = embedding_service
+        self._vector_store = vector_store
         self.pool = ConnectionPool(
             conninfo=self._dsn,
             min_size=min_size,
@@ -113,6 +122,7 @@ class PostgresEpisodeStore:
                     self._execute_upsert_episode(cur=cur, episode=episode)
                     if actions:
                         self._execute_upsert_actions(cur=cur, episode_id=episode.episode_id, actions=actions)
+        self._try_upsert_vector(episode)
 
     def touch_episode(self, episode_id: str) -> None:
         sql = """
@@ -380,3 +390,20 @@ class PostgresEpisodeStore:
             tool_input=dict(row["tool_input"] or {}),
             tool_output=dict(row["tool_output"] or {}),
         )
+
+    def _try_upsert_vector(self, episode: Episode) -> None:
+        if self._embedding_service is None or self._vector_store is None:
+            return
+        try:
+            text = self._build_embedding_text(episode)
+            embedding = self._embedding_service.embed(text)
+            self._vector_store.upsert(episode_id=episode.episode_id, embedding=embedding)
+        except Exception as exc:
+            # 向量写入失败不影响 PostgreSQL 主流程。
+            logger.warning("Qdrant 向量写入失败，已忽略: episode_id=%s, error=%s", episode.episode_id, exc)
+
+    @staticmethod
+    def _build_embedding_text(episode: Episode) -> str:
+        reflection = episode.reflection or ""
+        return "\n".join([episode.query, episode.result, reflection]).strip()
+
