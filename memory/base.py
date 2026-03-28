@@ -19,6 +19,7 @@ class MemoryRecord:
     importance: float = 0.0
     metadata: Dict[str, Any] = field(default_factory=dict)
     created_at: datetime = field(default_factory=lambda: datetime.now(ZoneInfo("Asia/Shanghai")))
+    last_accessed_at: Optional[datetime] = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.record_id, str) or not self.record_id.strip():
@@ -29,6 +30,10 @@ class MemoryRecord:
             raise ValueError("importance 必须是数字")
         if not math.isfinite(float(self.importance)):
             raise ValueError("importance 必须是有限数值")
+        if self.last_accessed_at is None:
+            object.__setattr__(self, "last_accessed_at", self.created_at)
+        if self.last_accessed_at.tzinfo is None:
+            raise ValueError("last_accessed_at 必须包含时区信息")
 
 
 class MemoryBase(ABC):
