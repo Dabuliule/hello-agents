@@ -5,7 +5,6 @@ from typing import Any, Iterable, Optional
 
 from tools.base import Tool
 from tools.registry import ConflictPolicy, ToolRegistry
-from .config import Config
 from .llm import HelloAgentsLLM
 from .message import Message
 
@@ -18,7 +17,7 @@ class Agent(ABC):
             name: str,
             llm: HelloAgentsLLM,
             system_prompt: Optional[str] = None,
-            config: Optional[Config] = None,
+            history_limit: int = 100,
             tools: Iterable[Tool] | None = None,
             tool_registry: ToolRegistry | None = None,
     ):
@@ -31,7 +30,9 @@ class Agent(ABC):
         self.name = normalized_name
         self.llm = llm
         self.system_prompt = normalized_system_prompt or None
-        self.config = config or Config()
+        if history_limit < 1:
+            raise ValueError("history_limit 必须大于 0")
+        self.history_limit = history_limit
         self.tool_registry = tool_registry or ToolRegistry(tools)
         self._history: list[Message] = []
 
@@ -43,10 +44,9 @@ class Agent(ABC):
     def add_message(self, message: Message) -> None:
         """添加消息到历史记录"""
         self._history.append(message)
-        max_history = self.config.max_history_length
-        if len(self._history) > max_history:
+        if len(self._history) > self.history_limit:
             # 只保留最新 N 条，避免历史无限增长
-            self._history = self._history[-max_history:]
+            self._history = self._history[-self.history_limit:]
 
     def clear_history(self) -> None:
         """清空历史记录"""
