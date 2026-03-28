@@ -68,8 +68,13 @@ class MemoryBase(ABC):
         """列出记忆。"""
 
     @abstractmethod
-    def search(self, query: str, limit: Optional[int] = None) -> List[MemoryRecord]:
-        """搜索记忆。"""
+    def retrieve(
+            self,
+            query: Optional[str] = None,
+            limit: int = 10,
+            half_life_seconds: float = 450.0,
+    ) -> List[MemoryRecord]:
+        """按统一评分返回 Top-K 记忆。"""
 
     @abstractmethod
     def delete(self, record_id: str) -> bool:
