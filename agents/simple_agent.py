@@ -18,7 +18,7 @@ class SimpleAgent(Agent):
             name: str,
             llm,
             system_prompt: str | None = None,
-            config=None,
+            history_limit: int = 100,
             tools: Iterable[Tool] | None = None,
             tool_registry: ToolRegistry | None = None,
     ):
@@ -26,7 +26,7 @@ class SimpleAgent(Agent):
             name=name,
             llm=llm,
             system_prompt=system_prompt,
-            config=config,
+            history_limit=history_limit,
             tools=tools,
             tool_registry=tool_registry,
         )
