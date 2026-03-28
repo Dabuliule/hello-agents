@@ -102,20 +102,69 @@ class WorkingMemory(MemoryBase):
         return 0.8 * priority + 0.2 * relevance
 
     @staticmethod
-    def _keyword_score(text: str, query: Optional[str]) -> float:
-        """轻量 token overlap，避免 substring 硬过滤导致 recall 丢失。"""
+    def _tokenize(text: str) -> List[str]:
+        """轻量中英文通用分词。
+
+        - 英文/数字按连续片段组成 token
+        - 中文按单字符切分
+        - 忽略空白与常见分隔符
+        """
+        if not text:
+            return []
+
+        tokens: List[str] = []
+        buffer: List[str] = []
+
+        def flush_buffer() -> None:
+            if buffer:
+                tokens.append("".join(buffer))
+                buffer.clear()
+
+        for ch in text.strip().lower():
+            if ch.isspace() or ch in {",", ".", "!", "?", ";", ":", "，", "。", "！", "？", "；", "：", "、", "（", "）", "(",
+                                      ")", "[", "]", "{", "}", "\"", "'", "`", "~", "@", "#", "$", "%", "^", "&", "*",
+                                      "-", "_", "+", "=", "|", "\\", "/", "<", ">"}:
+                flush_buffer()
+                continue
+
+            # 中文字符按单字切分
+            if "\u4e00" <= ch <= "\u9fff":
+                flush_buffer()
+                tokens.append(ch)
+                continue
+
+            # 英文/数字继续拼接
+            if ch.isascii() and ch.isalnum():
+                buffer.append(ch)
+                continue
+
+            # 其他字符作为分隔处理
+            flush_buffer()
+
+        flush_buffer()
+        return tokens
+
+    def _keyword_score(self, text: str, query: Optional[str]) -> float:
+        """轻量关键词相关性：substring 强匹配 + token overlap。"""
         if not query:
             return 0.0
-        q = query.strip().lower()
-        if not q:
+
+        normalized_query = query.strip().lower()
+        if not normalized_query:
             return 0.0
 
-        text_tokens = set(text.strip().lower().split())
-        query_tokens = set(q.split())
+        normalized_text = (text or "").strip().lower()
+
+        # 强匹配优先：子串命中直接最高分
+        if normalized_query in normalized_text:
+            return 1.0
+
+        text_tokens = set(self._tokenize(normalized_text))
+        query_tokens = self._tokenize(normalized_query)
         if not text_tokens or not query_tokens:
             return 0.0
 
-        overlap = len(text_tokens & query_tokens)
+        overlap = sum(1 for token in query_tokens if token in text_tokens)
         return overlap / len(query_tokens)
 
     @staticmethod
