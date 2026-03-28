@@ -109,10 +109,6 @@ class ReActAgent(Agent):
 
         system_blocks.append(self._react_format_hint())
 
-        tool_hint = self._build_tool_hint()
-        if tool_hint:
-            system_blocks.append(tool_hint)
-
         if system_blocks:
             messages.append({"role": "system", "content": "\n\n".join(system_blocks)})
 
@@ -125,15 +121,49 @@ class ReActAgent(Agent):
 
         return messages
 
-    @staticmethod
-    def _react_format_hint() -> str:
+    def _react_format_hint(self) -> str:
+        tool_section = f"\n\n【可用工具】\n{self._build_tool_hint()}\n"
         return (
-            "严格遵守以下格式，除非给出 Final Answer，否则必须同时输出 Thought、Action 和 Action Input:\n"
-            "Thought: ...\n"
-            "Action: <工具名>\n"
-            "Action Input: {\"参数\": \"值\"}\n\n"
-            "当你完成时:\n"
-            "Final Answer: ..."
+            "你必须严格按照 ReAct 规范进行推理与工具调用，所有输出必须遵循以下规则：\n\n"
+
+            "【基本规则】\n"
+            "1. 每一轮输出只能包含以下两种结构之一：\n"
+            "   (A) Thought + Action + Action Input\n"
+            "   (B) Final Answer\n"
+            "2. 除 Final Answer 外，必须同时包含 Thought、Action 和 Action Input，缺一不可\n"
+            "3. 严禁输出多余字段（如 Observation、Explanation 等）\n"
+            "4. 严禁在同一轮中调用多个工具（只能有一个 Action）\n"
+            f"{tool_section}\n"
+            "【格式要求】\n"
+            "严格按照以下格式输出（大小写敏感，字段名不可更改）：\n\n"
+            "Thought: <你的思考过程，简洁但清晰>\n"
+            "Action: <工具名称，必须是已提供的工具之一>\n"
+            "Action Input: <JSON字符串，必须是合法JSON>\n\n"
+
+            "示例：\n"
+            "Thought: 需要查询用户信息\n"
+            "Action: get_user_info\n"
+            "Action Input: {\"user_id\": \"123\"}\n\n"
+
+            "【Final Answer 规则】\n"
+            "当你已经获得足够信息，可以直接回答用户问题时，必须输出：\n\n"
+            "Final Answer: <最终答案>\n\n"
+
+            "注意：\n"
+            "- 输出 Final Answer 时，不得再包含 Thought / Action / Action Input\n"
+            "- Final Answer 应直接回答用户问题，不要包含额外格式\n\n"
+
+            "【JSON 规范】\n"
+            "- Action Input 必须是严格合法的 JSON（使用双引号）\n"
+            "- 不允许使用单引号、注释或 trailing comma\n"
+            "- 参数必须与工具定义完全匹配\n\n"
+
+            "【错误处理】\n"
+            "- 如果你不确定使用哪个工具，请先在 Thought 中分析，再选择最合适的工具\n"
+            "- 如果上一步工具结果不正确，请重新思考并调用工具\n"
+            "- 不要假造工具结果，必须依赖真实 Observation（系统返回）\n\n"
+
+            "请严格遵守以上规则进行输出。"
         )
 
     @staticmethod
