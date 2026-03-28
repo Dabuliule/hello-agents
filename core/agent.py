@@ -73,13 +73,15 @@ class Agent(ABC):
         return result
 
     def _build_tool_hint(self) -> str:
-        """构造简洁工具说明，帮助模型知道可用工具。"""
-        rows = [f"- {tool.name}: {tool.description}" for tool in self.tool_registry.list_tools()]
-        return (
-                "你可以建议用户使用以下工具（用户可通过 /tool 调用）：\n"
-                + "\n".join(rows)
-                + "\n/tool 用法: /tool <工具名> <JSON参数>"
-        )
+        """构造工具说明，包含名称、描述和参数 schema。"""
+        tools = self.tool_registry.list_tools()
+        if not tools:
+            return "当前没有可用工具。"
+        rows = [
+            f"- {tool.name}: {tool.description}\n  schema: {tool.params_model.model_json_schema()}"
+            for tool in tools
+        ]
+        return "可用工具如下：\n" + "\n".join(rows)
 
     def get_history(self) -> list[Message]:
         """获取历史记录"""
