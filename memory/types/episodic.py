@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass, field
-from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from memory.base import MemoryBase, MemoryRecord
@@ -34,8 +32,6 @@ class EpisodicMemoryRecord(MemoryRecord):
 
 class EpisodicMemory(MemoryBase):
     """情景记忆：基于 PostgreSQL 持久化，向量写入由 store 内部链路处理。"""
-
-    _RETRIEVE_HALF_LIFE_SECONDS = 86400.0
 
     def __init__(
             self,
@@ -71,20 +67,10 @@ class EpisodicMemory(MemoryBase):
         if limit <= 0:
             return []
 
-        candidates = self._store.query_episodes(limit=max(self._retrieve_window, limit * 5))
-        scored: List[tuple[float, Episode]] = []
-        for episode in candidates:
-            score = self._retrieve_score(
-                episode=episode,
-                query=query,
-                half_life_seconds=self._RETRIEVE_HALF_LIFE_SECONDS,
-            )
-            if score > 0.0:
-                scored.append((score, episode))
-
-        scored.sort(key=lambda item: item[0], reverse=True)
-        top_episodes = [episode for _, episode in scored[:limit]]
-        return [self._episode_to_record(episode=ep, actions=[]) for ep in top_episodes]
+        # 先保留最小检索行为：按存储层默认排序返回前 limit 条。
+        _ = query
+        episodes = self._store.query_episodes(limit=limit)
+        return [self._episode_to_record(episode=ep, actions=[]) for ep in episodes]
 
     def delete(self, record_id: str) -> bool:
         return self._store.delete_episode(record_id)
@@ -136,110 +122,3 @@ class EpisodicMemory(MemoryBase):
             actions=action_items,
             tags=episode.tags or [],
         )
-
-    @staticmethod
-    def _retrieve_score(episode: Episode, query: Optional[str], half_life_seconds: float) -> float:
-        priority = EpisodicMemory._compute_priority(episode=episode, half_life_seconds=half_life_seconds)
-        relevance = EpisodicMemory._keyword_score(text=episode.query, query=query)
-        return 0.8 * priority + 0.2 * relevance
-
-    @staticmethod
-    def _compute_priority(episode: Episode, half_life_seconds: float) -> float:
-        if half_life_seconds <= 0:
-            raise ValueError("half_life_seconds 必须大于 0")
-        anchor = episode.last_accessed_at or episode.created_at
-        now = datetime.now(anchor.tzinfo)
-        age_seconds = max(0.0, (now - anchor).total_seconds())
-        decay = math.exp(-math.log(2) * age_seconds / half_life_seconds)
-        return max(float(episode.importance), 0.01) * decay
-
-    @staticmethod
-    def _tokenize(text: str) -> List[str]:
-        if not text:
-            return []
-
-        tokens: List[str] = []
-        buffer: List[str] = []
-
-        def flush_buffer() -> None:
-            if buffer:
-                tokens.append("".join(buffer))
-                buffer.clear()
-
-        for ch in text.strip().lower():
-            if ch.isspace() or ch in {
-                ",",
-                ".",
-                "!",
-                "?",
-                ";",
-                ":",
-                "，",
-                "。",
-                "！",
-                "？",
-                "；",
-                "：",
-                "、",
-                "（",
-                "）",
-                "(",
-                ")",
-                "[",
-                "]",
-                "{",
-                "}",
-                '"',
-                "'",
-                "`",
-                "~",
-                "@",
-                "#",
-                "$",
-                "%",
-                "^",
-                "&",
-                "*",
-                "-",
-                "_",
-                "+",
-                "=",
-                "|",
-                "\\",
-                "/",
-                "<",
-                ">",
-            }:
-                flush_buffer()
-                continue
-            if "\u4e00" <= ch <= "\u9fff":
-                flush_buffer()
-                tokens.append(ch)
-                continue
-            if ch.isascii() and ch.isalnum():
-                buffer.append(ch)
-                continue
-            flush_buffer()
-
-        flush_buffer()
-        return tokens
-
-    @staticmethod
-    def _keyword_score(text: str, query: Optional[str]) -> float:
-        if not query:
-            return 0.0
-        normalized_query = query.strip().lower()
-        if not normalized_query:
-            return 0.0
-
-        normalized_text = (text or "").strip().lower()
-        if normalized_query in normalized_text:
-            return 1.0
-
-        text_tokens = set(EpisodicMemory._tokenize(normalized_text))
-        query_tokens = EpisodicMemory._tokenize(normalized_query)
-        if not text_tokens or not query_tokens:
-            return 0.0
-
-        overlap = sum(1 for token in query_tokens if token in text_tokens)
-        return overlap / len(query_tokens)
