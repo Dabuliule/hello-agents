@@ -92,7 +92,7 @@ class EpisodicMemory(MemoryBase):
     def clear(self) -> None:
         self._store.clear_episodes()
 
-    def add_episode(self, episode: Episode, actions: Optional[List[Action]] = None) -> str:
+    def add(self, episode: Episode, actions: Optional[List[Action]] = None) -> str:
         action_list = actions or []
         self._store.insert_full_episode(episode=episode, actions=action_list)
         return episode.episode_id
