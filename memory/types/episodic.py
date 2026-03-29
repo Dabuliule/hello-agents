@@ -3,11 +3,9 @@
 from __future__ import annotations
 
 import math
-import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional
-from zoneinfo import ZoneInfo
 
 from memory.base import MemoryBase, MemoryRecord
 from memory.storage import Action, Episode, EpisodeNotFoundError, PostgresEpisodeStore
@@ -54,13 +52,6 @@ class EpisodicMemory(MemoryBase):
         self._default_session_id = default_session_id
         self._retrieve_window = retrieve_window
 
-    def add(self, content: str, importance: float = 0.5, metadata: Optional[Dict[str, Any]] = None) -> MemoryRecord:
-        metadata_value = metadata or {}
-        episode = self._build_episode(content=content, importance=importance, metadata=metadata_value)
-        actions = self._build_actions(metadata_value.get("actions"))
-        self._store.insert_full_episode(episode=episode, actions=actions)
-        return self._episode_to_record(episode=episode, actions=actions)
-
     def get(self, record_id: str) -> Optional[MemoryRecord]:
         try:
             self._store.touch_episode(record_id)
@@ -105,58 +96,6 @@ class EpisodicMemory(MemoryBase):
         action_list = actions or []
         self._store.insert_full_episode(episode=episode, actions=action_list)
         return episode.episode_id
-
-    def _build_episode(self, content: str, importance: float, metadata: Dict[str, Any]) -> Episode:
-        tz = ZoneInfo("Asia/Shanghai")
-        created_at = metadata.get("created_at")
-        if isinstance(created_at, datetime):
-            episode_created_at = created_at
-        else:
-            episode_created_at = datetime.now(tz)
-
-        return Episode(
-            episode_id=str(metadata.get("episode_id") or f"ep_{uuid.uuid4().hex}"),
-            session_id=str(metadata.get("session_id") or self._default_session_id),
-            query=content,
-            result=str(metadata.get("result") or ""),
-            success=bool(metadata.get("success", True)),
-            score=float(metadata.get("score", 0.0)),
-            reflection=self._normalize_optional_str(metadata.get("reflection")),
-            importance=float(importance),
-            created_at=episode_created_at,
-            last_accessed_at=metadata.get("last_accessed_at") if isinstance(metadata.get("last_accessed_at"),
-                                                                            datetime) else None,
-            access_count=int(metadata.get("access_count", 0)),
-            user_id=self._normalize_optional_str(metadata.get("user_id")),
-            tags=self._normalize_tags(metadata.get("tags")),
-        )
-
-    @staticmethod
-    def _build_actions(raw_actions: Any) -> List[Action]:
-        if not isinstance(raw_actions, list):
-            return []
-
-        actions: List[Action] = []
-        for index, item in enumerate(raw_actions, start=1):
-            if not isinstance(item, dict):
-                continue
-            tool_name = item.get("tool_name") or item.get("tool") or "unknown"
-            tool_input = item.get("tool_input")
-            if not isinstance(tool_input, dict):
-                tool_input = item.get("args") if isinstance(item.get("args"), dict) else {}
-            tool_output = item.get("tool_output")
-            if not isinstance(tool_output, dict):
-                tool_output = {}
-
-            actions.append(
-                Action(
-                    step=int(item.get("step", index)),
-                    tool_name=str(tool_name),
-                    tool_input=tool_input,
-                    tool_output=tool_output,
-                )
-            )
-        return actions
 
     @staticmethod
     def _episode_to_record(episode: Episode, actions: List[Action]) -> EpisodicMemoryRecord:
@@ -304,16 +243,3 @@ class EpisodicMemory(MemoryBase):
 
         overlap = sum(1 for token in query_tokens if token in text_tokens)
         return overlap / len(query_tokens)
-
-    @staticmethod
-    def _normalize_tags(value: Any) -> List[str]:
-        if not isinstance(value, list):
-            return []
-        return [str(item) for item in value]
-
-    @staticmethod
-    def _normalize_optional_str(value: Any) -> Optional[str]:
-        if value is None:
-            return None
-        text = str(value).strip()
-        return text if text else None

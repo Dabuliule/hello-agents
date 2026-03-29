@@ -6,7 +6,7 @@ import math
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
 
@@ -38,16 +38,6 @@ class MemoryRecord:
 class MemoryBase(ABC):
     """记忆基类，定义统一接口。"""
 
-    @abstractmethod
-    def add(self, content: str, importance: float = 0.0, metadata: Optional[Dict[str, Any]] = None) -> MemoryRecord:
-        """新增一条记忆并返回记录。"""
-
-    def add_many(self, items: Iterable[tuple[str, float, Optional[Dict[str, Any]]]]) -> List[MemoryRecord]:
-        """批量新增记忆。"""
-        records: List[MemoryRecord] = []
-        for content, importance, metadata in items:
-            records.append(self.add(content, importance, metadata))
-        return records
 
     @abstractmethod
     def get(self, record_id: str) -> Optional[MemoryRecord]:
