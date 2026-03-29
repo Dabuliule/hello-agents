@@ -35,17 +35,11 @@ class MemoryRecord:
             raise ValueError("last_accessed_at 必须包含时区信息")
 
 
-
 class MemoryBase(ABC):
     """记忆基类，定义统一接口。"""
 
     @abstractmethod
-    def add(
-            self,
-            content: str,
-            importance: float = 0.0,
-            metadata: Optional[Dict[str, Any]] = None,
-    ) -> MemoryRecord:
+    def add(self, content: str, importance: float = 0.0, metadata: Optional[Dict[str, Any]] = None) -> MemoryRecord:
         """新增一条记忆并返回记录。"""
 
     def add_many(self, items: Iterable[tuple[str, float, Optional[Dict[str, Any]]]]) -> List[MemoryRecord]:
@@ -64,12 +58,7 @@ class MemoryBase(ABC):
         """列出记忆。"""
 
     @abstractmethod
-    def retrieve(
-            self,
-            query: Optional[str] = None,
-            limit: int = 10,
-            half_life_seconds: float = 450.0,
-    ) -> List[MemoryRecord]:
+    def retrieve(self, query: Optional[str] = None, limit: int = 10) -> List[MemoryRecord]:
         """按统一评分返回 Top-K 记忆。"""
 
     @abstractmethod

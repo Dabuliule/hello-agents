@@ -26,6 +26,8 @@ class WorkingMemoryRecord(MemoryRecord):
 class WorkingMemory(MemoryBase):
     """短期工作记忆：返回“最值得进入上下文”的 Top-K 记忆。"""
 
+    _RETRIEVE_HALF_LIFE_SECONDS = 450.0
+
     def __init__(self, capacity: int = 500, ttl_seconds: int = 900):
         if capacity < 1:
             raise ValueError("capacity 必须大于 0")
@@ -37,12 +39,7 @@ class WorkingMemory(MemoryBase):
         # 简化存储：WorkingMemory 只维护当前会话内存，不维护复杂索引。
         self._records: Dict[str, WorkingMemoryRecord] = {}
 
-    def add(
-            self,
-            content: str,
-            importance: float = 0.5,
-            metadata: Optional[Dict[str, Any]] = None,
-    ) -> MemoryRecord:
+    def add(self, content: str, importance: float = 0.5, metadata: Optional[Dict[str, Any]] = None) -> MemoryRecord:
         self._cleanup_expired()
         record_id = f"wm_{uuid.uuid4().hex}"
         record = WorkingMemoryRecord(
@@ -77,7 +74,6 @@ class WorkingMemory(MemoryBase):
             self,
             query: Optional[str] = None,
             limit: int = 10,
-            half_life_seconds: float = 450.0,
     ) -> List[MemoryRecord]:
         self._cleanup_expired()
         if limit < 1:
@@ -85,7 +81,11 @@ class WorkingMemory(MemoryBase):
 
         scored: List[tuple[float, WorkingMemoryRecord]] = []
         for record in self._records.values():
-            score = self._retrieve_score(record, query=query, half_life_seconds=half_life_seconds)
+            score = self._retrieve_score(
+                record,
+                query=query,
+                half_life_seconds=self._RETRIEVE_HALF_LIFE_SECONDS,
+            )
             if score > 0:
                 scored.append((score, record))
 

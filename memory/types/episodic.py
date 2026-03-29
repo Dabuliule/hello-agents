@@ -37,6 +37,8 @@ class EpisodicMemoryRecord(MemoryRecord):
 class EpisodicMemory(MemoryBase):
     """情景记忆：基于 PostgreSQL 持久化，向量写入由 store 内部链路处理。"""
 
+    _RETRIEVE_HALF_LIFE_SECONDS = 86400.0
+
     def __init__(
             self,
             store: PostgresEpisodeStore,
@@ -52,12 +54,7 @@ class EpisodicMemory(MemoryBase):
         self._default_session_id = default_session_id
         self._retrieve_window = retrieve_window
 
-    def add(
-            self,
-            content: str,
-            importance: float = 0.5,
-            metadata: Optional[Dict[str, Any]] = None,
-    ) -> MemoryRecord:
+    def add(self, content: str, importance: float = 0.5, metadata: Optional[Dict[str, Any]] = None) -> MemoryRecord:
         metadata_value = metadata or {}
         episode = self._build_episode(content=content, importance=importance, metadata=metadata_value)
         actions = self._build_actions(metadata_value.get("actions"))
@@ -79,19 +76,18 @@ class EpisodicMemory(MemoryBase):
         episodes = self._store.query_episodes(limit=fetch_limit)
         return [self._episode_to_record(episode=ep, actions=[]) for ep in episodes]
 
-    def retrieve(
-            self,
-            query: Optional[str] = None,
-            limit: int = 10,
-            half_life_seconds: float = 86400.0,
-    ) -> List[MemoryRecord]:
+    def retrieve(self, query: Optional[str] = None, limit: int = 10) -> List[MemoryRecord]:
         if limit <= 0:
             return []
 
         candidates = self._store.query_episodes(limit=max(self._retrieve_window, limit * 5))
         scored: List[tuple[float, Episode]] = []
         for episode in candidates:
-            score = self._retrieve_score(episode=episode, query=query, half_life_seconds=half_life_seconds)
+            score = self._retrieve_score(
+                episode=episode,
+                query=query,
+                half_life_seconds=self._RETRIEVE_HALF_LIFE_SECONDS,
+            )
             if score > 0.0:
                 scored.append((score, episode))
 
