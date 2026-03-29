@@ -252,6 +252,28 @@ class PostgresEpisodeStore:
         actions = [self._action_from_row(row) for row in action_rows]
         return episode, actions
 
+    def delete_episode(self, episode_id: str) -> bool:
+        sql = "DELETE FROM episodes WHERE episode_id = %s"
+        with self.pool.connection() as conn:
+            with conn.transaction():
+                with conn.cursor() as cur:
+                    cur.execute(sql, (episode_id,))
+                    return cur.rowcount > 0
+
+    def clear_episodes(self, session_id: Optional[str] = None) -> int:
+        if session_id is None:
+            sql = "DELETE FROM episodes"
+            params: tuple[Any, ...] = ()
+        else:
+            sql = "DELETE FROM episodes WHERE session_id = %s"
+            params = (session_id,)
+
+        with self.pool.connection() as conn:
+            with conn.transaction():
+                with conn.cursor() as cur:
+                    cur.execute(sql, params)
+                    return cur.rowcount
+
     def update_importance(self, episode_id: str) -> None:
         # 按 7 天半衰期计算时间衰减：exp(-ln(2) * 经过天数 / 7)
         sql = """
