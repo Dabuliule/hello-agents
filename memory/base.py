@@ -12,10 +12,9 @@ from zoneinfo import ZoneInfo
 
 @dataclass(frozen=True)
 class MemoryRecord:
-    """记忆条目。"""
+    """基础记忆条目：仅包含通用字段。"""
 
     record_id: str
-    content: str
     importance: float = 0.0
     metadata: Dict[str, Any] = field(default_factory=dict)
     created_at: datetime = field(default_factory=lambda: datetime.now(ZoneInfo("Asia/Shanghai")))
@@ -24,16 +23,17 @@ class MemoryRecord:
     def __post_init__(self) -> None:
         if not isinstance(self.record_id, str) or not self.record_id.strip():
             raise ValueError("record_id 不能为空")
-        if not isinstance(self.content, str) or not self.content.strip():
-            raise ValueError("content 不能为空")
         if not isinstance(self.importance, (int, float)):
             raise ValueError("importance 必须是数字")
         if not math.isfinite(float(self.importance)):
             raise ValueError("importance 必须是有限数值")
+        if self.created_at.tzinfo is None:
+            raise ValueError("created_at 必须包含时区信息")
         if self.last_accessed_at is None:
             object.__setattr__(self, "last_accessed_at", self.created_at)
         if self.last_accessed_at.tzinfo is None:
             raise ValueError("last_accessed_at 必须包含时区信息")
+
 
 
 class MemoryBase(ABC):

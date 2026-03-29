@@ -4,12 +4,34 @@ from __future__ import annotations
 
 import math
 import uuid
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
 from memory.base import MemoryBase, MemoryRecord
 from memory.storage import Action, Episode, EpisodeNotFoundError, PostgresEpisodeStore
+
+
+@dataclass(frozen=True)
+class EpisodicMemoryRecord(MemoryRecord):
+    """情景记忆记录：使用结构化字段表达经验，不复用文本 content 字段。"""
+
+    session_id: str = ""
+    query: str = ""
+    result: str = ""
+    success: bool = False
+    score: float = 0.0
+    reflection: Optional[str] = None
+    actions: List[Dict[str, Any]] = field(default_factory=list)
+    tags: List[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if not isinstance(self.session_id, str) or not self.session_id.strip():
+            raise ValueError("session_id 不能为空")
+        if not isinstance(self.query, str) or not self.query.strip():
+            raise ValueError("query 不能为空")
 
 
 class EpisodicMemory(MemoryBase):
@@ -141,7 +163,7 @@ class EpisodicMemory(MemoryBase):
         return actions
 
     @staticmethod
-    def _episode_to_record(episode: Episode, actions: List[Action]) -> MemoryRecord:
+    def _episode_to_record(episode: Episode, actions: List[Action]) -> EpisodicMemoryRecord:
         metadata: Dict[str, Any] = {
             "session_id": episode.session_id,
             "result": episode.result,
@@ -151,8 +173,9 @@ class EpisodicMemory(MemoryBase):
             "access_count": episode.access_count,
             "tags": episode.tags or [],
         }
+        action_items: List[Dict[str, Any]] = []
         if actions:
-            metadata["actions"] = [
+            action_items = [
                 {
                     "step": action.step,
                     "tool_name": action.tool_name,
@@ -161,14 +184,22 @@ class EpisodicMemory(MemoryBase):
                 }
                 for action in actions
             ]
+            metadata["actions"] = action_items
 
-        return MemoryRecord(
+        return EpisodicMemoryRecord(
             record_id=episode.episode_id,
-            content=episode.query,
             importance=episode.importance,
             metadata=metadata,
             created_at=episode.created_at,
             last_accessed_at=episode.last_accessed_at or episode.created_at,
+            session_id=episode.session_id,
+            query=episode.query,
+            result=episode.result,
+            success=episode.success,
+            score=episode.score,
+            reflection=episode.reflection,
+            actions=action_items,
+            tags=episode.tags or [],
         )
 
     @staticmethod
