@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import math
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional, Tuple
 
 from memory.base import MemoryBase, MemoryRecord
 from memory.storage import Action, Episode, EpisodeNotFoundError, PostgresEpisodeStore
@@ -69,10 +71,20 @@ class EpisodicMemory(MemoryBase):
         if limit <= 0:
             return []
 
-        # 先保留最小检索行为：按存储层默认排序返回前 limit 条。
-        _ = query
-        episodes = self._store.query_episodes(limit=limit)
-        return [self._episode_to_record(episode=ep, actions=[]) for ep in episodes]
+        normalized_query = (query or "").strip()
+        if not normalized_query:
+            episodes = self._store.query_episodes(limit=limit)
+            return self._build_records_with_actions(episodes)
+
+        recall_limit = max(limit * 3, 20)
+        recalled = self._store.search_similar_episodes(query=normalized_query, limit=recall_limit)
+        scored = [(self._score_episode(item), item) for item in recalled]
+        scored.sort(key=lambda x: x[0], reverse=True)
+
+        records: List[MemoryRecord] = []
+        for _, (episode, actions, _) in scored[:limit]:
+            records.append(self._episode_to_record(episode=episode, actions=actions))
+        return records
 
     def delete(self, record_id: str) -> bool:
         return self._store.delete_episode(record_id)
@@ -86,6 +98,46 @@ class EpisodicMemory(MemoryBase):
         action_list = actions or []
         self._store.insert_full_episode(episode=episode, actions=action_list)
         return episode.episode_id
+
+    def _build_records_with_actions(self, episodes: List[Episode]) -> List[MemoryRecord]:
+        records: List[MemoryRecord] = []
+        for episode in episodes:
+            try:
+                full_episode, actions = self._store.get_episode_with_actions(episode.episode_id)
+            except EpisodeNotFoundError:
+                continue
+            records.append(self._episode_to_record(episode=full_episode, actions=actions))
+        return records
+
+    @staticmethod
+    def _score_episode(item: Tuple[Episode, List[Action], float]) -> float:
+        try:
+            episode, _, semantic_score = item
+            safe_semantic = min(max(float(semantic_score), 0.0), 1.0)
+            safe_episode_score = min(max(float(episode.score), 0.0), 1.0)
+
+            created_at = getattr(episode, "created_at", None)
+            if isinstance(created_at, datetime):
+                safe_created_at = created_at if created_at.tzinfo is not None else created_at.replace(
+                    tzinfo=timezone.utc)
+                age_days = max(0.0, (datetime.now(timezone.utc) - safe_created_at).total_seconds() / 86400.0)
+            else:
+                age_days = 365.0
+            recency_score = math.exp(-age_days / 30.0)
+
+            success_bonus = 0.15 if bool(episode.success) else -0.1
+            access_count = max(int(getattr(episode, "access_count", 0) or 0), 0)
+            reuse_bonus = min(math.log1p(access_count) * 0.05, 0.15)
+
+            return (
+                    safe_semantic * 0.65
+                    + safe_episode_score * 0.2
+                    + recency_score * 0.1
+                    + reuse_bonus
+                    + success_bonus
+            )
+        except (TypeError, ValueError, ArithmeticError):
+            return 0.0
 
     @staticmethod
     def _episode_to_record(episode: Episode, actions: List[Action]) -> EpisodicMemoryRecord:

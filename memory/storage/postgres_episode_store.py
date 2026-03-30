@@ -208,6 +208,38 @@ class PostgresEpisodeStore:
 
         return [self._episode_from_row(row) for row in rows]
 
+    def search_similar_episodes(
+        self,
+        query: str,
+        limit: int = 20,
+    ) -> List[Tuple[Episode, List[Action], float]]:
+        """语义召回接口：返回 episode + actions + semantic_score。"""
+        normalized_query = query.strip()
+        if not normalized_query or limit <= 0:
+            return []
+
+        if self._embedding_service is None or self._vector_store is None:
+            logger.warning("语义检索未启用，缺少 embedding_service 或 vector_store")
+            return []
+
+        try:
+            query_embedding = self._embedding_service.embed(normalized_query)
+            hits = self._vector_store.search(embedding=query_embedding, limit=limit)
+        except Exception as exc:
+            logger.warning("语义检索失败: query=%s, error=%s", normalized_query, exc)
+            return []
+
+        results: List[Tuple[Episode, List[Action], float]] = []
+        for episode_id, semantic_score in hits:
+            try:
+                episode, actions = self.get_episode_with_actions(episode_id)
+            except EpisodeNotFoundError:
+                continue
+            safe_score = min(max(float(semantic_score), 0.0), 1.0)
+            results.append((episode, actions, safe_score))
+
+        return results
+
     def get_episode_with_actions(self, episode_id: str) -> Tuple[Episode, List[Action]]:
         episode_sql = """
         SELECT
@@ -426,6 +458,14 @@ class PostgresEpisodeStore:
 
     @staticmethod
     def _build_embedding_text(episode: Episode) -> str:
-        reflection = episode.reflection or ""
-        return "\n".join([episode.query, episode.result, reflection]).strip()
-
+        reflection = (episode.reflection or "").strip()
+        result_preview = (episode.result or "")[:500]
+        tags_text = " ".join(episode.tags or [])
+        return "\n".join(
+            [
+                f"query: {episode.query}",
+                f"reflection: {reflection}",
+                f"result: {result_preview}",
+                f"tags: {tags_text}",
+            ]
+        ).strip()

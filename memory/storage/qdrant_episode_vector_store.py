@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import hashlib
-from typing import List
+from typing import List, Tuple
 
 from qdrant_client import QdrantClient
 from qdrant_client.http import models as qdrant_models
@@ -41,6 +41,33 @@ class QdrantEpisodeVectorStore:
             points=[point],
             wait=True,
         )
+
+    def search(self, embedding: List[float], limit: int = 20) -> List[Tuple[str, float]]:
+        if limit <= 0:
+            return []
+        if len(embedding) != self._vector_size:
+            raise ValueError(
+                f"embedding 维度不匹配: 期望 {self._vector_size}, 实际 {len(embedding)}"
+            )
+
+        response = self._client.query_points(
+            collection_name=self._collection_name,
+            query=embedding,
+            limit=limit,
+            with_payload=True,
+            with_vectors=False,
+        )
+        points = getattr(response, "points", response)
+
+        results: List[Tuple[str, float]] = []
+        for point in points:
+            payload = getattr(point, "payload", {}) or {}
+            episode_id = payload.get("episode_id")
+            if not episode_id:
+                continue
+            score = float(getattr(point, "score", 0.0) or 0.0)
+            results.append((str(episode_id), score))
+        return results
 
     def _ensure_collection(self) -> None:
         if self._client.collection_exists(self._collection_name):
