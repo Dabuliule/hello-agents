@@ -4,14 +4,30 @@ from __future__ import annotations
 
 import math
 import uuid
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 from memory.base import MemoryBase, MemoryRecord
 
 
+@dataclass(frozen=True)
+class WorkingMemoryRecord(MemoryRecord):
+    """工作记忆记录：在通用字段基础上补充文本内容。"""
+
+    content: str = ""
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if not isinstance(self.content, str) or not self.content.strip():
+            raise ValueError("content 不能为空")
+
+
 class WorkingMemory(MemoryBase):
     """短期工作记忆：返回“最值得进入上下文”的 Top-K 记忆。"""
+
+    _RETRIEVE_HALF_LIFE_SECONDS = 450.0
 
     def __init__(self, capacity: int = 500, ttl_seconds: int = 900):
         if capacity < 1:
@@ -22,17 +38,12 @@ class WorkingMemory(MemoryBase):
         self.capacity = capacity
         self.ttl_seconds = ttl_seconds
         # 简化存储：WorkingMemory 只维护当前会话内存，不维护复杂索引。
-        self._records: Dict[str, MemoryRecord] = {}
+        self._records: Dict[str, WorkingMemoryRecord] = {}
 
-    def add(
-            self,
-            content: str,
-            importance: float = 0.5,
-            metadata: Optional[Dict[str, Any]] = None,
-    ) -> MemoryRecord:
+    def add(self, content: str, importance: float = 0.5, metadata: Optional[Dict[str, Any]] = None) -> MemoryRecord:
         self._cleanup_expired()
         record_id = f"wm_{uuid.uuid4().hex}"
-        record = MemoryRecord(
+        record = WorkingMemoryRecord(
             record_id=record_id,
             content=content,
             importance=importance,
@@ -64,15 +75,18 @@ class WorkingMemory(MemoryBase):
             self,
             query: Optional[str] = None,
             limit: int = 10,
-            half_life_seconds: float = 450.0,
     ) -> List[MemoryRecord]:
         self._cleanup_expired()
         if limit < 1:
             return []
 
-        scored: List[tuple[float, MemoryRecord]] = []
+        scored: List[tuple[float, WorkingMemoryRecord]] = []
         for record in self._records.values():
-            score = self._retrieve_score(record, query=query, half_life_seconds=half_life_seconds)
+            score = self._retrieve_score(
+                record,
+                query=query,
+                half_life_seconds=self._RETRIEVE_HALF_LIFE_SECONDS,
+            )
             if score > 0:
                 scored.append((score, record))
 
@@ -90,7 +104,7 @@ class WorkingMemory(MemoryBase):
 
     def _retrieve_score(
             self,
-            record: MemoryRecord,
+            record: WorkingMemoryRecord,
             query: Optional[str],
             half_life_seconds: float,
     ) -> float:
@@ -183,12 +197,12 @@ class WorkingMemory(MemoryBase):
         effective_importance = max(float(record.importance), 0.01)
         return effective_importance * decay
 
-    def _touch_access(self, record_id: str, record: MemoryRecord) -> MemoryRecord:
+    def _touch_access(self, record_id: str, record: WorkingMemoryRecord) -> WorkingMemoryRecord:
         now = datetime.now(record.created_at.tzinfo)
         if record.last_accessed_at and record.last_accessed_at >= now:
             return record
 
-        updated = MemoryRecord(
+        updated = WorkingMemoryRecord(
             record_id=record.record_id,
             content=record.content,
             importance=record.importance,
@@ -238,6 +252,6 @@ class WorkingMemory(MemoryBase):
     def _delete_record(self, record_id: str) -> None:
         self._records.pop(record_id, None)
 
-    def _is_expired(self, record: MemoryRecord) -> bool:
+    def _is_expired(self, record: WorkingMemoryRecord) -> bool:
         anchor = record.last_accessed_at or record.created_at
         return datetime.now(anchor.tzinfo) >= anchor + timedelta(seconds=self.ttl_seconds)
