@@ -6,7 +6,7 @@ import math
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import List, Optional
 from zoneinfo import ZoneInfo
 
 
@@ -16,7 +16,6 @@ class MemoryRecord:
 
     record_id: str
     importance: float = 0.0
-    metadata: Dict[str, Any] = field(default_factory=dict)
     created_at: datetime = field(default_factory=lambda: datetime.now(ZoneInfo("Asia/Shanghai")))
     last_accessed_at: Optional[datetime] = None
 

@@ -19,6 +19,7 @@ class EpisodicMemoryRecord(MemoryRecord):
     success: bool = False
     score: float = 0.0
     reflection: Optional[str] = None
+    access_count: int = 0
     actions: List[Dict[str, Any]] = field(default_factory=list)
     tags: List[str] = field(default_factory=list)
 
@@ -85,15 +86,6 @@ class EpisodicMemory(MemoryBase):
 
     @staticmethod
     def _episode_to_record(episode: Episode, actions: List[Action]) -> EpisodicMemoryRecord:
-        metadata: Dict[str, Any] = {
-            "session_id": episode.session_id,
-            "result": episode.result,
-            "success": episode.success,
-            "score": episode.score,
-            "reflection": episode.reflection,
-            "access_count": episode.access_count,
-            "tags": episode.tags or [],
-        }
         action_items: List[Dict[str, Any]] = []
         if actions:
             action_items = [
@@ -105,12 +97,10 @@ class EpisodicMemory(MemoryBase):
                 }
                 for action in actions
             ]
-            metadata["actions"] = action_items
 
         return EpisodicMemoryRecord(
             record_id=episode.episode_id,
             importance=episode.importance,
-            metadata=metadata,
             created_at=episode.created_at,
             last_accessed_at=episode.last_accessed_at or episode.created_at,
             session_id=episode.session_id,
@@ -119,6 +109,7 @@ class EpisodicMemory(MemoryBase):
             success=episode.success,
             score=episode.score,
             reflection=episode.reflection,
+            access_count=episode.access_count,
             actions=action_items,
             tags=episode.tags or [],
         )

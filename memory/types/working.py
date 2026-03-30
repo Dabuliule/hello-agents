@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
@@ -16,6 +16,7 @@ class WorkingMemoryRecord(MemoryRecord):
     """工作记忆记录：在通用字段基础上补充文本内容。"""
 
     content: str = ""
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         super().__post_init__()
