@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
@@ -80,6 +81,8 @@ class EpisodicMemory(MemoryBase):
         self._store.clear_episodes()
 
     def add(self, episode: Episode, actions: Optional[List[Action]] = None) -> str:
+        # 统一由内部生成主键，忽略外部传入的 episode_id。
+        episode.episode_id = f"ep_{uuid.uuid4().hex}"
         action_list = actions or []
         self._store.insert_full_episode(episode=episode, actions=action_list)
         return episode.episode_id
