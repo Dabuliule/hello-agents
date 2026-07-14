@@ -1,158 +1,217 @@
 Screen {
-    background: #111315;
-    color: #d9dde3;
+    background: #0e0f11;
+    color: #d8dbe0;
 }
 
-Header {
-    background: #181b1f;
-    color: #f4f6f8;
-}
-
-#main {
+#app-shell {
+    width: 100%;
     height: 1fr;
+    align-horizontal: center;
+}
+
+#header-frame {
+    width: 100%;
+    height: 3;
+}
+
+#session-header {
+    width: 100%;
+    max-width: 108;
+    height: 3;
+    padding: 1 3 0 3;
+    color: #a5abb3;
+    text-wrap: nowrap;
+    text-overflow: ellipsis;
 }
 
 #conversation-pane {
-    width: 1fr;
+    width: 100%;
     height: 1fr;
-    padding: 1 2;
-    scrollbar-color: #4ec9b0;
-    scrollbar-background: #181b1f;
+    padding: 0 2 1 2;
+    align-horizontal: center;
+    scrollbar-size-vertical: 1;
+    scrollbar-color: #3a3f46;
+    scrollbar-background: #0e0f11;
+}
+
+MessageBlock,
+ActivityBlock {
+    width: 100%;
+    max-width: 104;
+    height: auto;
 }
 
 MessageBlock {
-    width: 1fr;
-    height: auto;
-    min-height: 3;
-    padding: 1 2;
-    margin-bottom: 1;
-    background: #181b1f;
-    border-left: thick #d7a95b;
+    margin-top: 1;
+    padding: 0 3;
 }
 
 MessageBlock.user {
-    background: #171d21;
-    border-left: thick #4eb6c2;
+    color: #f1f3f5;
 }
 
 MessageBlock.assistant {
-    background: #171c19;
-    border-left: thick #4eaf78;
+    padding-left: 5;
+    padding-right: 5;
+    color: #d8dbe0;
 }
 
 MessageBlock.error {
-    background: #211719;
-    border-left: thick #ef6b73;
+    padding-left: 5;
+    padding-right: 5;
 }
 
-#side-panel {
-    width: 38;
-    min-width: 30;
-    height: 1fr;
-    background: #16191c;
-    border-left: solid #3a4148;
+ActivityBlock {
+    padding: 0 5;
+    color: #a5abb3;
 }
 
-.panel-title {
-    height: 2;
-    padding: 0 1;
-    color: #d7a95b;
-    text-style: bold;
-    content-align-vertical: middle;
-}
-
-#runtime-heading {
-    height: 3;
-}
-
-#runtime-heading .panel-title {
-    width: 1fr;
-    height: 3;
-}
-
-#open-trace {
-    width: 9;
-    min-width: 9;
-    height: 3;
-    border: none;
-    background: #263138;
-    color: #7bdff2;
-}
-
-#open-trace:focus, #open-trace:hover {
-    background: #28535a;
-    color: #f4f6f8;
-}
-
-#runtime-status {
-    height: auto;
-    min-height: 9;
-    padding: 0 1 1 1;
-    border-bottom: solid #3a4148;
-}
-
-#tool-log {
-    height: 1fr;
-    min-width: 1;
-    padding: 0 1;
-    scrollbar-color: #d7a95b;
-    scrollbar-background: #181b1f;
-}
-
-#prompt {
-    dock: bottom;
-    height: 3;
-    padding: 0 1;
-    border: tall #4eaf78;
-    background: #181b1f;
-    color: #f4f6f8;
-}
-
-#prompt:focus {
-    border: tall #7bdff2;
-}
-
-ApprovalScreen {
-    align: center middle;
-    background: #000000 55%;
-}
-
-#approval-dialog {
-    width: 72;
-    max-width: 92%;
-    height: auto;
-    max-height: 82%;
-    padding: 1 2;
-    background: #1c1b18;
-    border: solid #d7a95b;
-}
-
-#approval-title {
-    height: 2;
-    color: #f0c674;
-    text-style: bold;
-}
-
-#approval-details {
-    height: auto;
-    max-height: 20;
-    overflow-y: auto;
-}
-
-#approval-actions {
-    height: 3;
-    align-horizontal: right;
+ActivityBlock.activity-group-start {
     margin-top: 1;
 }
 
-#approval-actions Button {
-    width: 14;
-    margin-left: 1;
+#composer-frame {
+    width: 100%;
+    height: 5;
 }
 
-SessionBrowserScreen {
+#composer {
+    width: 100%;
+    max-width: 108;
+    height: 5;
+    padding: 0 2 1 2;
+}
+
+#composer-frame.approval-active,
+#composer.approval-active {
+    height: 8;
+}
+
+#approval-prompt {
+    display: none;
+    width: 100%;
+    height: 6;
+    padding: 0 1;
+    border-top: solid #34383f;
+    background: #121417;
+}
+
+#approval-inline-title {
+    width: 100%;
+    height: 1;
+    text-wrap: nowrap;
+    text-overflow: ellipsis;
+}
+
+#approval-inline-detail {
+    width: 100%;
+    height: 2;
+    color: #8b919a;
+}
+
+#approval-options {
+    width: 100%;
+    height: 2;
+    max-height: 2;
+    padding: 0;
+    border: none;
+    background: transparent;
+}
+
+#approval-options:focus {
+    border: none;
+    background: transparent;
+}
+
+#approval-options > .option-list--option {
+    padding: 0 1;
+    color: #a5abb3;
+}
+
+#approval-options > .option-list--option-highlighted,
+#approval-options:focus > .option-list--option-highlighted {
+    background: #293044;
+    color: #f1f3f5;
+    text-style: bold;
+}
+
+#prompt-shell {
+    width: 100%;
+    height: 3;
+    border: solid #34383f;
+    background: #16181b;
+}
+
+#prompt-prefix {
+    width: 3;
+    height: 1;
+    color: #8da2fb;
+    text-style: bold;
+    content-align: center middle;
+}
+
+#prompt {
+    width: 1fr;
+    height: 1;
+    padding: 0;
+    border: none;
+    background: transparent;
+    color: #f1f3f5;
+}
+
+#prompt:focus {
+    border: none;
+}
+
+#prompt:disabled {
+    color: #777e87;
+}
+
+#prompt > .input--placeholder {
+    color: #666c74;
+}
+
+#prompt > .input--cursor {
+    background: #8da2fb;
+    color: #0e0f11;
+}
+
+#runtime-status {
+    width: 100%;
+    height: 1;
+    padding: 0 1;
+    color: #777e87;
+    text-wrap: nowrap;
+    text-overflow: ellipsis;
+}
+
+SessionBrowserScreen,
+TraceScreen {
     align: center middle;
-    background: #000000 55%;
+    background: #000000 62%;
+}
+
+#session-dialog,
+#trace-dialog {
+    padding: 1 2;
+    background: #15171a;
+    border: solid #34383f;
+}
+
+#session-title,
+#trace-title {
+    color: #f1f3f5;
+    text-style: bold;
+}
+
+#session-title {
+    height: 2;
+}
+
+#session-actions {
+    height: 2;
+    align-horizontal: right;
+    margin-top: 1;
 }
 
 #session-dialog {
@@ -160,38 +219,29 @@ SessionBrowserScreen {
     max-width: 94%;
     height: 75%;
     min-height: 16;
-    padding: 1 2;
-    background: #181b1f;
-    border: solid #4eb6c2;
 }
 
-#session-title {
-    height: 2;
-    color: #7bdff2;
-    text-style: bold;
+#session-table,
+#trace-events {
+    background: #111315;
+    color: #d8dbe0;
 }
 
 #session-table {
     height: 1fr;
-    background: #14171a;
-    color: #d9dde3;
 }
 
-#session-table > .datatable--header {
-    background: #20252a;
-    color: #f0c674;
+#session-table > .datatable--header,
+#trace-events > .datatable--header {
+    background: #1c1f23;
+    color: #a5abb3;
     text-style: bold;
 }
 
-#session-table > .datatable--cursor {
-    background: #28535a;
-    color: #f4f6f8;
-}
-
-#session-actions {
-    height: 3;
-    align-horizontal: right;
-    margin-top: 1;
+#session-table > .datatable--cursor,
+#trace-events > .datatable--cursor {
+    background: #293044;
+    color: #f1f3f5;
 }
 
 #session-actions Button {
@@ -199,17 +249,33 @@ SessionBrowserScreen {
     margin-left: 1;
 }
 
-TraceScreen {
-    align: center middle;
-    background: #000000 55%;
+Button.-style-flat {
+    min-width: 0;
+    height: 1;
+    padding: 0 1;
+    border: none;
+    background: transparent;
+    color: #a5abb3;
+    text-style: none;
+}
+
+Button.-style-flat:focus,
+Button.-style-flat:hover {
+    border: none;
+    background: #343b4e;
+    color: #f1f3f5;
+    text-style: bold;
+}
+
+Button.-style-flat.-success {
+    border: none;
+    background: transparent;
+    color: #79c99e;
 }
 
 #trace-dialog {
     width: 96%;
     height: 92%;
-    padding: 1 2;
-    background: #181b1f;
-    border: solid #4eb6c2;
 }
 
 #trace-heading {
@@ -219,44 +285,29 @@ TraceScreen {
 #trace-title {
     width: 1fr;
     height: 3;
-    color: #7bdff2;
-    text-style: bold;
     content-align-vertical: middle;
 }
 
 #close-trace {
-    width: 12;
+    width: 8;
 }
 
 #trace-metrics {
     height: 3;
     padding: 0 1;
-    background: #20252a;
+    color: #a5abb3;
 }
 
 #trace-events {
     height: 1fr;
     min-height: 6;
     margin-top: 1;
-    background: #14171a;
-    color: #d9dde3;
-}
-
-#trace-events > .datatable--header {
-    background: #20252a;
-    color: #f0c674;
-    text-style: bold;
-}
-
-#trace-events > .datatable--cursor {
-    background: #28535a;
-    color: #f4f6f8;
 }
 
 #trace-payload-title {
     height: 2;
     padding-top: 1;
-    color: #d7a95b;
+    color: #a5abb3;
     text-style: bold;
 }
 
@@ -264,5 +315,5 @@ TraceScreen {
     height: 9;
     padding: 0 1;
     overflow-y: auto;
-    background: #111315;
+    background: #0e0f11;
 }

@@ -1,9 +1,9 @@
 from codecraft.tui.app import CodeCraftTUI
-from codecraft.tui.screens import ApprovalScreen, SessionBrowserScreen, TraceScreen
-from codecraft.tui.widgets import MessageBlock
+from codecraft.tui.screens import SessionBrowserScreen, TraceScreen
+from codecraft.tui.widgets import ActivityBlock, MessageBlock
 
 __all__ = [
-    "ApprovalScreen",
+    "ActivityBlock",
     "CodeCraftTUI",
     "MessageBlock",
     "SessionBrowserScreen",

@@ -23,7 +23,7 @@ from codecraft.schema.event import RuntimeEvent, RuntimeEventType
 from codecraft.schema.session import SessionConfig, SessionSource
 from codecraft.tool import ToolRegistry, WriteFileTool
 from codecraft.tui import (
-    ApprovalScreen,
+    ActivityBlock,
     CodeCraftTUI,
     MessageBlock,
     SessionBrowserScreen,
@@ -183,11 +183,63 @@ def test_tui_streams_messages_and_updates_runtime_status(tmp_path):
             }
             assert prompt.disabled is False
             conversation = tui.query_one("#conversation-pane")
-            side_panel = tui.query_one("#side-panel")
-            main = tui.query_one("#main")
-            assert conversation.region.right <= side_panel.region.x
-            assert main.region.bottom <= prompt.region.y
-            assert conversation.region.width >= 30
+            header = tui.query_one("#session-header")
+            composer = tui.query_one("#composer")
+            assert header.region.bottom <= conversation.region.y
+            assert conversation.region.bottom <= composer.region.y
+            assert conversation.region.width == tui.screen.region.width
+            assert not list(tui.query("#side-panel"))
+
+    asyncio.run(run_test())
+
+
+def test_tui_single_column_layout_fits_narrow_terminal(tmp_path):
+    async def run_test():
+        config = _config(tmp_path)
+        runtime = AgentRuntime(
+            session_store=SessionStore(config.codecraft_home),
+            llm_providers=LLMProviderRegistry([MockProvider()]),
+            tool_registry=ToolRegistry(),
+        )
+        tui = CodeCraftTUI(config, runtime, browse_sessions=False)
+
+        async with tui.run_test(size=(50, 18)) as pilot:
+            await _wait_until(pilot, lambda: tui.turn_status == "idle")
+            await tui._append_message(
+                "User",
+                "Inspect the session lifecycle on a narrow terminal.",
+            )
+            await tui._render_tool_started(
+                {
+                    "call_id": "call_narrow",
+                    "name": "read_file",
+                    "arguments": {
+                        "path": "src/codecraft/core/session.py",
+                    },
+                }
+            )
+            await pilot.pause()
+
+            screen = tui.screen.region
+            header = tui.query_one("#session-header")
+            conversation = tui.query_one("#conversation-pane")
+            composer = tui.query_one("#composer")
+            prompt_shell = tui.query_one("#prompt-shell")
+            message = list(tui.query(MessageBlock))[-1]
+            activity = list(tui.query(ActivityBlock))[-1]
+
+            for widget in (
+                header,
+                conversation,
+                composer,
+                prompt_shell,
+                message,
+                activity,
+            ):
+                assert widget.region.x >= screen.x
+                assert widget.region.right <= screen.right
+            assert conversation.region.bottom <= composer.region.y
+            assert message.region.width == activity.region.width
 
     asyncio.run(run_test())
 
@@ -261,22 +313,26 @@ def test_tui_renders_tool_payloads_as_plain_text_and_disables_closed_session(
 
         async with tui.run_test(size=(80, 24)) as pilot:
             await _wait_until(pilot, lambda: tui.turn_status == "idle")
-            tui._render_tool_started(
+            await tui._render_tool_started(
                 {
-                    "name": "[red]spoof[/red]",
+                    "call_id": "call_markup",
+                    "name": "[red]spoof[/red] [link=https://example.test]tool[/link]",
                     "arguments": {"path": "[bold]README.md[/bold]"},
                 }
             )
-            tui._render_tool_finished(
+            await tui._render_tool_finished(
                 {
-                    "name": "[link=https://example.test]tool[/link]",
+                    "call_id": "call_markup",
+                    "name": "[red]spoof[/red] [link=https://example.test]tool[/link]",
                     "result": {"success": True},
                 }
             )
             await pilot.pause()
 
-            log = tui.query_one("#tool-log")
-            rendered = "".join(line.text for line in log.lines)
+            activities = list(tui.query(ActivityBlock))
+            assert len(activities) == 1
+            assert activities[0].status == "completed"
+            rendered = activities[0].render().plain
             assert "[red]spoof[/red]" in rendered
             assert "[bold]README.md[/bold]" in rendered
             assert "[link=https://example.test]tool[/link]" in rendered
@@ -308,7 +364,7 @@ def test_tui_renders_tool_payloads_as_plain_text_and_disables_closed_session(
     asyncio.run(run_test())
 
 
-def test_tui_approval_modal_controls_side_effect(tmp_path):
+def test_tui_inline_approval_controls_side_effect(tmp_path):
     async def run_test():
         config = _config(tmp_path, approval_policy=ApprovalPolicy.ON_REQUEST)
         provider = MockProvider(
@@ -347,13 +403,21 @@ def test_tui_approval_modal_controls_side_effect(tmp_path):
             prompt = tui.query_one("#prompt")
             prompt.value = "create a file"
             await pilot.press("enter")
-            await _wait_until(pilot, lambda: isinstance(tui.screen, ApprovalScreen))
+            await _wait_until(
+                pilot,
+                lambda: (
+                    tui.turn_status == "approval"
+                    and tui.query_one("#approval-prompt").display
+                ),
+            )
 
             assert not (tmp_path / "approved.txt").exists()
-            assert tui.screen.focused is not None
-            assert tui.screen.focused.id == "reject"
-            clicked = await pilot.click("#approve")
-            assert clicked is True
+            options = tui.query_one("#approval-options")
+            assert tui.focused is options
+            assert options.highlighted == 0
+            await pilot.press("down")
+            assert options.highlighted == 1
+            await pilot.press("enter")
 
             await _wait_until(
                 pilot,
@@ -365,6 +429,44 @@ def test_tui_approval_modal_controls_side_effect(tmp_path):
                 "approved by TUI\n"
             )
             assert list(tui.query(MessageBlock))[-1].text == "File created."
+            assert tui.query_one("#approval-prompt").display is False
+            assert tui.query_one("#prompt-shell").display is True
+
+    asyncio.run(run_test())
+
+
+def test_tui_inline_approval_defaults_to_reject_and_escape_closes_it(tmp_path):
+    async def run_test():
+        config = _config(tmp_path)
+        runtime = AgentRuntime(
+            session_store=SessionStore(config.codecraft_home),
+            llm_providers=LLMProviderRegistry([MockProvider()]),
+            tool_registry=ToolRegistry(),
+        )
+        tui = CodeCraftTUI(config, runtime, browse_sessions=False)
+
+        async with tui.run_test(size=(60, 24)) as pilot:
+            await _wait_until(pilot, lambda: tui.turn_status == "idle")
+            decision = asyncio.create_task(
+                tui._show_inline_approval(
+                    {
+                        "tool_name": "write_file",
+                        "risk": "writes workspace files",
+                        "reason": "The tool will modify a file.",
+                    }
+                )
+            )
+            await _wait_until(
+                pilot,
+                lambda: tui.query_one("#approval-prompt").display,
+            )
+
+            options = tui.query_one("#approval-options")
+            assert options.highlighted == 0
+            await pilot.press("escape")
+            assert await decision is False
+            assert tui.query_one("#approval-prompt").display is False
+            assert tui.query_one("#prompt-shell").display is True
 
     asyncio.run(run_test())
 
@@ -395,7 +497,7 @@ def test_tui_trace_screen_inspects_persisted_events(tmp_path):
             await pilot.press("enter")
             await _wait_until(pilot, lambda: tui.turn_status == "idle")
 
-            assert await pilot.click("#open-trace") is True
+            await pilot.press("ctrl+t")
             await _wait_until(pilot, lambda: isinstance(tui.screen, TraceScreen))
             trace_screen = tui.screen
             report = trace_screen.report

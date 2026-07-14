@@ -84,7 +84,7 @@ uv run codecraft exec "总结一下这个仓库"
 uv run codecraft
 ```
 
-TUI 会同时显示对话、runtime 状态、Token 用量和工具活动。Assistant Markdown 在流式输出时原位更新，高风险工具调用会打开审批弹窗，当前 turn 结束前输入框保持锁定。它消费与 CLI 相同的 `RuntimeEvent`，没有实现第二套 Agent loop。
+TUI 使用以对话为中心的单列布局。工具调用在对话流中原位更新，精简后的 runtime 和 Token 状态显示在输入区下方。Assistant Markdown 在流式输出时原位更新。高风险工具调用会将输入区替换为内联选项，可以使用方向键选择操作并按回车确认。当前 turn 结束前输入框保持锁定。TUI 消费与 CLI 相同的 `RuntimeEvent`，没有实现第二套 Agent loop。
 
 当前仓库存在历史 session 时，TUI 启动后会打开 session 浏览器，可以选择恢复原有配置和对话，也可以新建 session。还可以直接恢复：
 
@@ -95,7 +95,7 @@ uv run codecraft --resume <session_id>
 
 为了让长 session 的终端渲染保持流畅，恢复时只显示有限数量的历史消息；Runtime 仍会从事件日志重建全部可用模型上下文。
 
-通过 Runtime 面板中的 `Trace` 命令，可以直接在 TUI 中检查当前持久化 trace。Trace 界面复用标准报告模型，展示汇总指标、虚拟化事件表和结构化 payload。
+按下 `Ctrl+T` 可以直接在 TUI 中检查当前持久化 trace。Trace 界面复用标准报告模型，展示汇总指标、虚拟化事件表和结构化 payload。
 
 列出有效 session：
 

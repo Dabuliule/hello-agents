@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import json
+import asyncio
 from collections.abc import Callable
 from typing import Any
 
@@ -8,8 +8,9 @@ from rich.text import Text
 from textual import on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.widgets import Button, Header, Input, Label, RichLog, Static
+from textual.containers import Center, Horizontal, Vertical, VerticalScroll
+from textual.widgets import Input, OptionList, Static
+from textual.widgets.option_list import Option
 
 from codecraft.cli.runtime_runner import shutdown_thread
 from codecraft.core.errors import CodecraftError
@@ -20,9 +21,13 @@ from codecraft.core.trace_report import build_trace_report
 from codecraft.schema.event import RuntimeEvent, RuntimeEventType
 from codecraft.schema.input import SessionInput
 from codecraft.schema.session import SessionConfig
-from codecraft.tui.rendering import runtime_status
-from codecraft.tui.screens import ApprovalScreen, SessionBrowserScreen, TraceScreen
-from codecraft.tui.widgets import MessageBlock
+from codecraft.tui.screens import SessionBrowserScreen, TraceScreen
+from codecraft.tui.widgets import (
+    ActivityBlock,
+    MessageBlock,
+    RuntimeStatusLine,
+    SessionHeader,
+)
 
 
 MAX_RESTORED_MESSAGES = 100
@@ -34,6 +39,8 @@ class CodeCraftTUI(App[None]):
     BINDINGS = [
         Binding("ctrl+q", "quit", show=False, priority=True),
         Binding("ctrl+c", "quit", show=False, priority=True),
+        Binding("ctrl+t", "trace", show=False),
+        Binding("escape", "reject_approval", show=False),
     ]
 
     CSS_PATH = "codecraft.tcss"
@@ -64,27 +71,36 @@ class CodeCraftTUI(App[None]):
         }
         self._assistant_block: MessageBlock | None = None
         self._assistant_buffer = ""
+        self._activity_blocks: dict[str, ActivityBlock] = {}
+        self._approval_result: asyncio.Future[bool] | None = None
         self._last_error_turn_id: str | None = None
         self._closed = False
 
     def compose(self) -> ComposeResult:
-        yield Header(show_clock=True)
-        with Horizontal(id="main"):
+        with Vertical(id="app-shell"):
+            with Center(id="header-frame"):
+                yield SessionHeader(self.config, id="session-header")
             yield VerticalScroll(id="conversation-pane")
-            with Vertical(id="side-panel"):
-                with Horizontal(id="runtime-heading"):
-                    yield Label("Runtime", classes="panel-title")
-                    yield Button("Trace", id="open-trace", disabled=True)
-                yield Static(id="runtime-status")
-                yield Label("Tool activity", classes="panel-title")
-                yield RichLog(
-                    id="tool-log",
-                    min_width=1,
-                    wrap=True,
-                    markup=True,
-                    auto_scroll=True,
-                )
-        yield Input(placeholder="Message CodeCraft", id="prompt", disabled=True)
+            with Center(id="composer-frame"):
+                with Vertical(id="composer"):
+                    with Vertical(id="approval-prompt"):
+                        yield Static(id="approval-inline-title")
+                        yield Static(id="approval-inline-detail")
+                        yield OptionList(
+                            Option("Reject", id="reject"),
+                            Option("Approve once", id="approve"),
+                            id="approval-options",
+                            markup=False,
+                            compact=True,
+                        )
+                    with Horizontal(id="prompt-shell"):
+                        yield Static("›", id="prompt-prefix")
+                        yield Input(
+                            placeholder="Ask CodeCraft",
+                            id="prompt",
+                            disabled=True,
+                        )
+                    yield RuntimeStatusLine(self.config, id="runtime-status")
 
     async def on_mount(self) -> None:
         self.sub_title = f"{self.config.model_provider}/{self.config.model}"
@@ -116,7 +132,6 @@ class CodeCraftTUI(App[None]):
         prompt = self.query_one("#prompt", Input)
         prompt.disabled = False
         prompt.focus()
-        self.query_one("#open-trace", Button).disabled = False
         self._refresh_status()
         self.run_worker(
             self._consume_events(),
@@ -182,8 +197,8 @@ class CodeCraftTUI(App[None]):
         }
         omitted_tools = len(tool_events) - len(visible_tool_seqs)
         if omitted_tools:
-            self._tool_log().write(
-                f"[dim]{omitted_tools} earlier tool results omitted[/dim]"
+            await self._append_activity(
+                ActivityBlock.notice(f"{omitted_tools} earlier tool results omitted")
             )
 
         for event in events:
@@ -197,7 +212,7 @@ class CodeCraftTUI(App[None]):
                     )
                     await self._append_message(role, text)
             elif event.seq in visible_tool_seqs:
-                self._render_tool_finished(event.payload)
+                await self._render_tool_finished(event.payload)
             elif event.type == RuntimeEventType.TOKEN_COUNT:
                 self._accumulate_token_usage(event.payload)
         self._refresh_status()
@@ -217,19 +232,31 @@ class CodeCraftTUI(App[None]):
             await self._append_message("Error", f"Could not submit message: {exc}")
             self._finish_turn("failed")
 
-    @on(Button.Pressed, "#open-trace")
-    async def on_trace_pressed(self) -> None:
+    async def action_trace(self) -> None:
         try:
             events = await self.runtime.session_store.load_events(
                 self.config.session_id
             )
         except CodecraftError as exc:
-            self._tool_log().write(
-                Text(f"trace unavailable: {exc.message}", style="red")
+            await self._append_activity(
+                ActivityBlock.notice(
+                    f"Trace unavailable: {exc.message}",
+                    failed=True,
+                )
             )
             return
         report = build_trace_report(self.config.session_id, events)
         self.push_screen(TraceScreen(report))
+
+    def action_reject_approval(self) -> None:
+        if self._approval_result is not None and not self._approval_result.done():
+            self._approval_result.set_result(False)
+
+    @on(OptionList.OptionSelected, "#approval-options")
+    def on_approval_selected(self, event: OptionList.OptionSelected) -> None:
+        if self._approval_result is None or self._approval_result.done():
+            return
+        self._approval_result.set_result(event.option.id == "approve")
 
     async def action_quit(self) -> None:
         await self._shutdown_runtime()
@@ -288,17 +315,17 @@ class CodeCraftTUI(App[None]):
                 self._assistant_buffer = ""
                 self._scroll_conversation()
         elif event.type == RuntimeEventType.TOOL_CALL_STARTED:
-            self._render_tool_started(payload)
+            await self._render_tool_started(payload)
         elif event.type == RuntimeEventType.TOOL_CALL_FINISHED:
-            self._render_tool_finished(payload)
+            await self._render_tool_finished(payload)
         elif event.type == RuntimeEventType.APPROVAL_REQUESTED:
             await self._request_approval(payload)
         elif event.type == RuntimeEventType.TOKEN_COUNT:
             self._add_token_usage(payload)
         elif event.type == RuntimeEventType.CONTEXT_COMPACTED:
-            self._tool_log().write("[yellow]context compacted[/yellow]")
+            await self._append_activity(ActivityBlock.notice("Context compacted"))
         elif event.type == RuntimeEventType.SESSION_RESTORED:
-            self._tool_log().write("[cyan]session restored[/cyan]")
+            await self._append_activity(ActivityBlock.notice("Session restored"))
         elif event.type == RuntimeEventType.ERROR:
             message = str(payload.get("message") or payload.get("code") or "Error")
             if event.turn_id is None or event.turn_id != self._last_error_turn_id:
@@ -320,9 +347,12 @@ class CodeCraftTUI(App[None]):
     async def _request_approval(self, payload: dict[str, Any]) -> None:
         if self.thread is None:
             return
+        activity = self._activity_for_payload(payload)
+        if activity is not None:
+            activity.mark_waiting()
         self.turn_status = "approval"
         self._refresh_status()
-        approved = await self.push_screen_wait(ApprovalScreen(payload))
+        approved = await self._show_inline_approval(payload)
         try:
             approval_id = payload.get("approval_id")
             if not isinstance(approval_id, str) or not approval_id:
@@ -344,11 +374,40 @@ class CodeCraftTUI(App[None]):
             except Exception:
                 self._finish_turn("failed")
             return
-        label = "approved" if approved else "rejected"
-        style = "green" if approved else "red"
-        self._tool_log().write(f"[{style}]approval {label}[/{style}]")
+        if activity is not None:
+            activity.mark_running()
         self.turn_status = "running"
         self._refresh_status()
+
+    async def _show_inline_approval(self, payload: dict[str, Any]) -> bool:
+        if self._approval_result is not None:
+            raise RuntimeError("another approval decision is already active")
+
+        title = Text("Approval required", style="bold #f1f3f5")
+        tool_name = str(payload.get("tool_name") or "tool")
+        title.append("  ·  ", style="#4f555d")
+        title.append(tool_name, style="#d8b56d")
+        reason = str(payload.get("reason") or payload.get("risk") or "")
+
+        self.query_one("#approval-inline-title", Static).update(title)
+        self.query_one("#approval-inline-detail", Static).update(Text(reason))
+        self.query_one("#prompt-shell").display = False
+        self.query_one("#approval-prompt").display = True
+        self.query_one("#composer-frame").add_class("approval-active")
+        self.query_one("#composer").add_class("approval-active")
+
+        options = self.query_one("#approval-options", OptionList)
+        options.highlighted = 0
+        options.focus()
+        self._approval_result = asyncio.get_running_loop().create_future()
+        try:
+            return await self._approval_result
+        finally:
+            self._approval_result = None
+            self.query_one("#approval-prompt").display = False
+            self.query_one("#prompt-shell").display = True
+            self.query_one("#composer-frame").remove_class("approval-active")
+            self.query_one("#composer").remove_class("approval-active")
 
     async def _append_message(self, role: str, text: str) -> MessageBlock:
         block = MessageBlock(role, text)
@@ -359,34 +418,57 @@ class CodeCraftTUI(App[None]):
     def _scroll_conversation(self) -> None:
         self.query_one("#conversation-pane", VerticalScroll).scroll_end(animate=False)
 
-    def _render_tool_started(self, payload: dict[str, Any]) -> None:
+    async def _append_activity(self, block: ActivityBlock) -> ActivityBlock:
+        conversation = self.query_one("#conversation-pane", VerticalScroll)
+        if not conversation.children or not isinstance(
+            conversation.children[-1], ActivityBlock
+        ):
+            block.add_class("activity-group-start")
+        await conversation.mount(block)
+        self._scroll_conversation()
+        return block
+
+    async def _render_tool_started(self, payload: dict[str, Any]) -> None:
+        call_id_value = payload.get("call_id")
+        call_id = call_id_value if isinstance(call_id_value, str) else None
         name = str(payload.get("name") or "tool")
         arguments = payload.get("arguments")
-        suffix = ""
-        if isinstance(arguments, dict) and arguments:
-            compact = json.dumps(arguments, ensure_ascii=False, sort_keys=True)
-            suffix = f" {compact[:180]}"
-        line = Text()
-        line.append("[running]", style="yellow")
-        line.append(f" {name}{suffix}")
-        self._tool_log().write(line)
+        block = await self._append_activity(
+            ActivityBlock(
+                name,
+                call_id=call_id,
+                arguments=arguments if isinstance(arguments, dict) else None,
+            )
+        )
+        if call_id is not None:
+            self._activity_blocks[call_id] = block
 
-    def _render_tool_finished(self, payload: dict[str, Any]) -> None:
+    async def _render_tool_finished(self, payload: dict[str, Any]) -> None:
+        call_id_value = payload.get("call_id")
+        call_id = call_id_value if isinstance(call_id_value, str) else None
         name = str(payload.get("name") or "tool")
-        duration = payload.get("duration_ms")
-        result = payload.get("result")
-        success = isinstance(result, dict) and result.get("success") is True
-        status = "ok" if success else "failed"
-        style = "green" if success else "red"
-        elapsed = f" {duration}ms" if isinstance(duration, int) else ""
-        line = Text()
-        line.append(f"[{status}]", style=style)
-        line.append(f" {name}{elapsed}")
-        self._tool_log().write(line)
-        if not success and isinstance(result, dict):
-            content = str(result.get("content") or result.get("error") or "")
-            if content:
-                self._tool_log().write(Text(content[:500], style="#ef9a9a"))
+        block = self._activity_blocks.pop(call_id, None) if call_id else None
+        if block is None:
+            block = self._latest_running_activity(name)
+        if block is None:
+            block = await self._append_activity(ActivityBlock(name, call_id=call_id))
+        block.finish(payload)
+        self._scroll_conversation()
+
+    def _activity_for_payload(self, payload: dict[str, Any]) -> ActivityBlock | None:
+        call_id = payload.get("call_id")
+        if not isinstance(call_id, str):
+            return None
+        return self._activity_blocks.get(call_id)
+
+    def _latest_running_activity(self, name: str) -> ActivityBlock | None:
+        blocks = list(self.query(ActivityBlock))
+        for block in reversed(blocks):
+            if block.tool_name == name and block.status in {"running", "waiting"}:
+                if block.call_id is not None:
+                    self._activity_blocks.pop(block.call_id, None)
+                return block
+        return None
 
     def _add_token_usage(self, payload: dict[str, Any]) -> None:
         self._accumulate_token_usage(payload)
@@ -401,6 +483,9 @@ class CodeCraftTUI(App[None]):
     def _finish_turn(self, status: str) -> None:
         self._assistant_block = None
         self._assistant_buffer = ""
+        for block in self._activity_blocks.values():
+            block.mark_stopped()
+        self._activity_blocks.clear()
         self.turn_status = status
         prompt = self.query_one("#prompt", Input)
         prompt.disabled = self._closed or status != "idle"
@@ -409,11 +494,12 @@ class CodeCraftTUI(App[None]):
         self._refresh_status()
 
     def _refresh_status(self) -> None:
-        status = self.query_one("#runtime-status", Static)
-        status.update(runtime_status(self.config, self.turn_status, self.token_usage))
-
-    def _tool_log(self) -> RichLog:
-        return self.query_one("#tool-log", RichLog)
+        self.query_one("#session-header", SessionHeader).set_config(self.config)
+        self.query_one("#runtime-status", RuntimeStatusLine).set_state(
+            self.config,
+            self.turn_status,
+            self.token_usage,
+        )
 
     async def _show_startup_error(self, message: str, suggestion: str | None) -> None:
         self.turn_status = "failed"

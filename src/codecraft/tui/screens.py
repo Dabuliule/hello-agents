@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from rich.console import Group
 from rich.syntax import Syntax
 from rich.table import Table
 from rich.text import Text
@@ -15,32 +14,6 @@ from textual.screen import ModalScreen
 from textual.widgets import Button, DataTable, Label, Static
 
 from codecraft.schema.session import SessionSummary
-
-
-class ApprovalScreen(ModalScreen[bool]):
-    BINDINGS = [Binding("escape", "reject", show=False)]
-
-    def __init__(self, payload: dict[str, Any]) -> None:
-        super().__init__()
-        self.payload = payload
-
-    def compose(self) -> ComposeResult:
-        with Vertical(id="approval-dialog"):
-            yield Label("Approval required", id="approval-title")
-            yield Static(_approval_details(self.payload), id="approval-details")
-            with Horizontal(id="approval-actions"):
-                yield Button("Reject", variant="error", id="reject")
-                yield Button("Approve", variant="success", id="approve")
-
-    def on_mount(self) -> None:
-        self.query_one("#reject", Button).focus()
-
-    @on(Button.Pressed)
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        self.dismiss(event.button.id == "approve")
-
-    def action_reject(self) -> None:
-        self.dismiss(False)
 
 
 class SessionBrowserScreen(ModalScreen[str | None]):
@@ -59,8 +32,19 @@ class SessionBrowserScreen(ModalScreen[str | None]):
                 zebra_stripes=True,
             )
             with Horizontal(id="session-actions"):
-                yield Button("New session", id="new-session")
-                yield Button("Resume", variant="success", id="resume-session")
+                yield Button(
+                    "New session",
+                    id="new-session",
+                    compact=True,
+                    flat=True,
+                )
+                yield Button(
+                    "Resume",
+                    variant="success",
+                    id="resume-session",
+                    compact=True,
+                    flat=True,
+                )
 
     def on_mount(self) -> None:
         table = self.query_one("#session-table", DataTable)
@@ -110,7 +94,12 @@ class TraceScreen(ModalScreen[None]):
         with Vertical(id="trace-dialog"):
             with Horizontal(id="trace-heading"):
                 yield Label("Trace", id="trace-title")
-                yield Button("Close", id="close-trace")
+                yield Button(
+                    "Close",
+                    id="close-trace",
+                    compact=True,
+                    flat=True,
+                )
             yield Static(_trace_metrics(self.report), id="trace-metrics")
             yield DataTable(
                 id="trace-events",
@@ -200,19 +189,3 @@ def _trace_metrics(report: dict[str, Any]) -> Table:
         str(metrics.get("final_status", "unknown")),
     )
     return table
-
-
-def _approval_details(payload: dict[str, Any]) -> Group:
-    table = Table.grid(padding=(0, 2), expand=True)
-    table.add_column(style="#9ca3ad", width=10)
-    table.add_column(ratio=1)
-    table.add_row("tool", Text(str(payload.get("tool_name") or "-")))
-    table.add_row("risk", Text(str(payload.get("risk") or "-")))
-    table.add_row("reason", Text(str(payload.get("reason") or "-")))
-    arguments = payload.get("arguments")
-    details = ""
-    if isinstance(arguments, dict) and arguments:
-        details = json.dumps(arguments, ensure_ascii=False, indent=2, sort_keys=True)
-        if len(details) > 2_000:
-            details = details[:2_000] + "\n[truncated]"
-    return Group(table, Text(details, style="#d9dde3"))

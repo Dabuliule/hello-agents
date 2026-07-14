@@ -85,7 +85,7 @@ Start the full-screen terminal UI:
 uv run codecraft
 ```
 
-The TUI keeps conversation, runtime status, token usage, and tool activity visible at the same time. Assistant Markdown updates in place while streaming, risky tool calls open an approval modal, and the input remains locked until the active turn finishes. It consumes the same `RuntimeEvent` stream as the CLI and does not implement a separate agent loop.
+The TUI uses a single conversation-focused layout. Tool calls update in place inside the conversation flow, while compact runtime and token status stays below the composer. Assistant Markdown updates in place while streaming. Risky tool calls replace the composer with an inline choice: use the arrow keys to select an action and Enter to confirm. The input remains locked until the active turn finishes. The TUI consumes the same `RuntimeEvent` stream as the CLI and does not implement a separate agent loop.
 
 When the current repository has previous sessions, startup opens a session browser. Select one to restore its persisted configuration and conversation, or start a new session. Direct resume is also available:
 
@@ -96,7 +96,7 @@ uv run codecraft --resume <session_id>
 
 The restored visual history is bounded to keep long-running terminal sessions responsive; the runtime still reconstructs the full available model context from the event log.
 
-Use the `Trace` command in the runtime panel to inspect the current persisted trace without leaving the TUI. The trace screen reuses the normal report model for aggregate metrics, a virtualized event table, and structured payload inspection.
+Press `Ctrl+T` to inspect the current persisted trace without leaving the TUI. The trace screen reuses the normal report model for aggregate metrics, a virtualized event table, and structured payload inspection.
 
 List valid sessions:
 
