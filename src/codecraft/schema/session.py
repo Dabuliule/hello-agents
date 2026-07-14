@@ -47,6 +47,12 @@ class SessionConfig(BaseModel):
     model_provider: str = Field(min_length=1)
     model_api_key_env: str | None = None
     model_base_url: str | None = None
+    model_context_window_tokens: int = Field(
+        default=131_072,
+        ge=4096,
+        le=10_000_000,
+    )
+    model_max_output_tokens: int = Field(default=8192, ge=1, le=1_000_000)
 
     approval_policy: ApprovalPolicy
     sandbox_mode: SandboxMode
@@ -57,15 +63,15 @@ class SessionConfig(BaseModel):
     mcp_servers: dict[str, MCPServerSettings] = Field(default_factory=dict)
 
     base_instructions: str | None = None
-    project_instructions: str | None = None
     user_instructions: str | None = None
 
     max_tool_calls: int = Field(default=30, ge=1, le=1000)
     max_tool_output_chars: int = Field(default=80_000, ge=1, le=10_000_000)
+    max_tool_output_tokens: int = Field(default=16_384, ge=32, le=1_000_000)
     turn_timeout_seconds: int = Field(default=1800, ge=1, le=7200)
     tool_timeout_seconds: int = Field(default=300, ge=1, le=3600)
     approval_timeout_seconds: int = Field(default=300, ge=1, le=3600)
-    max_context_chars: int = Field(default=400_000, ge=1000, le=20_000_000)
+    context_safety_margin_tokens: int = Field(default=2048, ge=0, le=1_000_000)
     context_keep_recent_items: int = Field(default=12, ge=1, le=100)
     max_parallel_read_tools: int = Field(default=4, ge=1, le=32)
 
@@ -136,6 +142,12 @@ class SessionConfig(BaseModel):
             for root in self.workspace_roots
         ):
             raise ValueError("cwd must be inside a workspace root")
+        reserved = self.model_max_output_tokens + self.context_safety_margin_tokens
+        if reserved >= self.model_context_window_tokens:
+            raise ValueError(
+                "model output tokens plus context safety margin must be smaller "
+                "than the model context window"
+            )
         return self
 
 

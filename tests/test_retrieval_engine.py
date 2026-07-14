@@ -111,6 +111,8 @@ def test_query_router_builds_deterministic_sequential_plans(tmp_path):
         "lexical",
         "scan",
     )
+    assert route("权限在哪里检查").retrievers == ("lexical", "scan")
+    assert route("权限在哪里检查").reason == "natural_language"
     assert route("retry budget exhausted").retrievers == ("scan", "lexical")
     assert route("src/auth/service.py").retrievers == ("scan", "lexical")
     assert route("service.py").reason == "path_hint"

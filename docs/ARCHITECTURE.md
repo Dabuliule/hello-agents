@@ -126,12 +126,15 @@ Resume reconstructs conversation from existing runtime events instead of replayi
 
 This keeps historical side effects from running twice.
 
-Before each provider request, `Turn` measures the serialized provider-neutral
-message and tool payload against `max_context_chars`. It replaces older complete
-turns with a deterministic summary while retaining the current user turn and its
-complete function-call protocol. `context_compacted` persists both the summary
-and exact compacted conversation snapshot, so resume reconstructs the context
-that was actually sent rather than regenerating a summary.
+Before each provider request, `Turn` conservatively estimates tokens for messages
+and tool schemas against the configured model context window. It reserves the
+maximum output and a safety margin, then replaces older complete turns with a
+deterministic, untrusted user-level summary while retaining the current user turn
+and its complete function-call protocol. `context_compacted` persists both the
+summary and exact compacted conversation snapshot, so resume reconstructs the
+context that was actually sent rather than regenerating a summary. Tool-result
+limits are reduced dynamically when the remaining input budget is smaller than
+the configured per-tool ceiling.
 
 ## LLM Providers
 
@@ -210,7 +213,15 @@ This keeps side-effect governance in one place.
 
 `WorkspaceGuard` prevents filesystem path escape for workspace tools and bash cwd.
 
-`ToolRunner` applies `max_tool_output_chars` to model-facing content, structured data, metadata, and tool-emitted event payloads after observers run and before persistence. `ToolResult.model_content()` adds stable failure codes, recovery suggestions, and explicit truncation markers to the text returned to the model; reconstruction uses the same method. Tool execution and approval use independent deadlines. Every `tool_call_finished` event includes governance, approval wait, execution, observer, and total phase timings. Independent observers run concurrently but finish before the result is persisted, preserving event-log consistency.
+`ToolRunner` applies both character and token limits to model-facing content, plus
+character limits to structured data, metadata, and tool-emitted event payloads
+after observers run and before persistence. `ToolResult.model_content()` adds
+stable failure codes, recovery suggestions, and explicit truncation markers to
+the text returned to the model; reconstruction uses the same method. Tool
+execution and approval use independent deadlines. Every `tool_call_finished`
+event includes governance, approval wait, execution, observer, and total phase
+timings. Independent observers run concurrently but finish before the result is
+persisted, preserving event-log consistency.
 
 ## Approval And Sandbox
 
@@ -275,7 +286,12 @@ user_instructions
 turn_context
 ```
 
-Project instructions come from `AGENTS.md` and `CODECRAFT.md`, searched upward from the cwd without crossing the workspace root. Bootstrap resolves them once into `SessionConfig`; `PromptBuilder` performs no filesystem I/O, so resumed sessions retain the original instruction snapshot. Tool schemas are not written into the prompt; providers receive them as structured `tools`.
+Project instructions come from `AGENTS.md` and `CODECRAFT.md`. `Turn` reloads the
+cwd chain and scopes discovered through previously accessed paths before each
+provider request. Real paths must remain inside a workspace, reads are bounded,
+root rules appear before deeper scoped rules, and escaped symlinks are ignored.
+`PromptBuilder` only assembles the resolved text. Tool schemas are not written
+into the prompt; providers receive them as structured `tools`.
 
 ## CLI Layer
 
@@ -351,7 +367,8 @@ while retrieval implementation and routing evolve independently.
 `~/.codecraft/indexes/<workspace-id>/index.sqlite3`. Sync compares file metadata and
 content digests, reparses only changed files, and removes deleted files. Index
 queries validate the current size and modification time of matched files; an absent
-or stale-only result falls back to `ScanRetriever`. Explicit indexing keeps full
+result or any stale indexed hit falls back to `ScanRetriever`, because a partially
+stale result cannot guarantee recall. Explicit indexing keeps full
 repository walks out of foreground search latency. Successful `write_file` and
 `apply_patch` executions pass through a `ToolResultObserver` that refreshes only the
 reported changed paths; observer failures are diagnostic metadata and never change
@@ -359,7 +376,8 @@ the already-completed tool result.
 
 `QueryRouter` maps query shape to a sequential plan: path queries prefer indexed
 path lookup, identifier-shaped queries try symbol then lexical retrieval, natural
-language prefers lexical retrieval, and short exact phrases prefer scan. The engine
+language, including CJK text without whitespace, prefers lexical retrieval, and
+short exact phrases prefer scan. The engine
 stops at the first non-empty response and records both the route reason and attempted
 retrievers. This avoids unconditional fan-out while retaining deterministic scan
 fallbacks.
@@ -380,7 +398,6 @@ cost baseline rather than assumed to be improvements.
 - Stdio MCP server processes are not automatically containerized.
 - The TUI runs one active session at a time.
 - No Web/GitHub/cloud tools in v1.0 scope.
-- Context compaction is represented in event/reconstruction paths, but full automatic compaction is v1.1 work.
 - There is no automatic pruning or repair for invalid session logs yet.
 - Agent file writes refresh an existing index automatically. External edits are
   detected for returned indexed hits, but newly added external files require

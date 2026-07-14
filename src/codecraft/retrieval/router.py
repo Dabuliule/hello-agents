@@ -25,6 +25,7 @@ _FILE_SUFFIXES = frozenset(
 _QUESTION_WORDS = frozenset(
     {"find", "how", "locate", "what", "when", "where", "which", "who", "why"}
 )
+_CJK = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]")
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,7 +53,7 @@ class QueryRouter:
 
         terms = query.split()
         first = terms[0].casefold() if terms else ""
-        if len(terms) >= 4 or first in _QUESTION_WORDS:
+        if _CJK.search(query) or len(terms) >= 4 or first in _QUESTION_WORDS:
             retrievers = ("scan",) if request.case_sensitive else ("lexical", "scan")
             return RetrievalPlan(retrievers, "natural_language")
         retrievers = ("scan",) if request.case_sensitive else ("scan", "lexical")

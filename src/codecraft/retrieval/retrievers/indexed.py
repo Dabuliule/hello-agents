@@ -31,8 +31,8 @@ class LexicalRetriever(Retriever):
             case_sensitive=request.case_sensitive,
             max_results=request.max_results,
         )
-        if result.stale_file_count and not result.matches:
-            raise RetrievalUnavailableError("all indexed matches are stale")
+        if result.stale_file_count:
+            raise RetrievalUnavailableError("indexed matches include stale files")
         match_type = "path" if request.mode == "path" else "content"
         return RetrievalResponse(
             matches=tuple(
@@ -70,8 +70,8 @@ class SymbolRetriever(Retriever):
             case_sensitive=request.case_sensitive,
             max_results=request.max_results,
         )
-        if result.stale_file_count and not result.matches:
-            raise RetrievalUnavailableError("all indexed symbols are stale")
+        if result.stale_file_count:
+            raise RetrievalUnavailableError("indexed symbols include stale files")
         return RetrievalResponse(
             matches=tuple(
                 RetrievalMatch(

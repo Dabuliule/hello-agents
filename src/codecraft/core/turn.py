@@ -3,12 +3,13 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime
 from enum import StrEnum
-import json
+from pathlib import Path
 from time import monotonic
 from typing import TYPE_CHECKING, Any
 
 from codecraft.core.conversation import Conversation
 from codecraft.core.errors import CodecraftError
+from codecraft.core.token_budget import estimate_serialized_tokens
 from codecraft.core.turn_context import TurnContext
 from codecraft.llm.base import LLMProtocolError
 from codecraft.llm.base import ModelRequest
@@ -17,8 +18,8 @@ from codecraft.llm.events import (
     ModelTextPayload,
     ModelTokenCountPayload,
 )
-from codecraft.llm.messages import ModelMessage
-from codecraft.prompt import PromptBuilder
+from codecraft.llm.messages import ModelMessage, ModelMessageType
+from codecraft.prompt import InstructionLoader, PromptBuilder
 from codecraft.schema.event import RuntimeEventType
 from codecraft.schema.input import SessionInput, UserMessagePayload
 from codecraft.schema.tool import ToolCall, ToolEffect, ToolResult
@@ -42,6 +43,9 @@ class Turn:
     session event 发出去。
     """
 
+    _TOOL_RESULT_OVERHEAD_TOKENS = 64
+    _MIN_TOOL_RESULT_TOKENS = 32
+
     def __init__(
         self,
         *,
@@ -54,6 +58,7 @@ class Turn:
         self.status = TurnStatus.CREATED
         self.tool_call_count = 0
         self.prompt_builder = PromptBuilder()
+        self.instruction_loader = InstructionLoader()
         self._started_at: float | None = None
 
     async def run(self, user_input: SessionInput) -> None:
@@ -95,6 +100,7 @@ class Turn:
                 model=self.context.model,
                 messages=tuple(model_messages),
                 tools=tuple(self.context.available_tools),
+                max_output_tokens=self.context.model_max_output_tokens,
             )
             async for model_event in self.session.llm_provider.stream(request):
                 if model_event.type == ModelEventType.MESSAGE_DELTA:
@@ -174,7 +180,8 @@ class Turn:
                     )
                     return
                 await self._record_tool_calls(tool_calls)
-                await self._run_tool_batch(tool_calls)
+                if not await self._run_tool_batch(tool_calls):
+                    return
                 continue
 
             if completed_message is None:
@@ -239,19 +246,27 @@ class Turn:
             )
         self.session.conversation.append_model_tool_calls(calls)
 
-    async def _run_tool_batch(self, calls: list[ToolCall]) -> None:
+    async def _run_tool_batch(self, calls: list[ToolCall]) -> bool:
         """Execute a provider batch and append results in provider order."""
         self.tool_call_count += len(calls)
+        output_tokens = await self._tool_result_token_limit(len(calls))
+        if output_tokens is None:
+            return False
+        tool_context = self.context.model_copy(
+            update={"max_tool_output_tokens": output_tokens}
+        )
         if self._can_parallelize(calls):
             semaphore = asyncio.Semaphore(self.context.max_parallel_read_tools)
 
             async def run(call: ToolCall) -> ToolResult:
                 async with semaphore:
-                    return await self._run_tool_call(call)
+                    return await self._run_tool_call(call, context=tool_context)
 
             results = await asyncio.gather(*(run(call) for call in calls))
         else:
-            results = [await self._run_tool_call(call) for call in calls]
+            results = [
+                await self._run_tool_call(call, context=tool_context) for call in calls
+            ]
 
         for call, result in zip(calls, results, strict=True):
             self.session.conversation.append_tool_result(
@@ -259,6 +274,7 @@ class Turn:
                 call.name,
                 result.model_content(),
             )
+        return True
 
     def _can_parallelize(self, calls: list[ToolCall]) -> bool:
         if len(calls) < 2 or self.context.max_parallel_read_tools < 2:
@@ -272,11 +288,16 @@ class Turn:
                 return False
         return True
 
-    async def _run_tool_call(self, call: ToolCall) -> ToolResult:
+    async def _run_tool_call(
+        self,
+        call: ToolCall,
+        *,
+        context: TurnContext,
+    ) -> ToolResult:
         """执行模型发起的 tool call，并把调用和结果写回 conversation。"""
         started_at = monotonic()
         result: ToolResult | None = None
-        async for runner_event in self.session.tool_runner.run(call, self.context):
+        async for runner_event in self.session.tool_runner.run(call, context):
             await self.session.emit(
                 runner_event.type,
                 runner_event.payload,
@@ -305,70 +326,141 @@ class Turn:
         return result
 
     async def _prepare_model_messages(self) -> list[ModelMessage] | None:
-        messages = self.prompt_builder.build(
-            config=self.session.config,
-            conversation=self.session.conversation,
-            context=self.context,
-        )
-        before_chars = self._model_input_chars(messages)
-        if before_chars <= self.context.max_context_chars:
+        project_instructions = self._project_instructions()
+        messages = self._build_model_messages(project_instructions)
+        input_budget = self._model_input_budget_tokens()
+        before_tokens = self._model_input_tokens(messages)
+        if before_tokens <= input_budget:
             return messages
 
-        fixed_messages = self.prompt_builder.build(
-            config=self.session.config,
-            conversation=Conversation(),
-            context=self.context,
+        messages, compaction = self._compact_model_context(
+            project_instructions=project_instructions,
+            input_budget=input_budget,
         )
-        history_budget = self.context.max_context_chars - self._model_input_chars(
-            fixed_messages
-        )
-        compaction = None
-        if history_budget > 0:
-            compaction = self.session.conversation.compact(
-                max_chars=history_budget,
-                keep_recent_items=self.context.context_keep_recent_items,
-            )
-
         if compaction is not None:
             await self.session.emit(
                 RuntimeEventType.CONTEXT_COMPACTED,
                 compaction,
                 turn_id=self.turn_id,
             )
-            messages = self.prompt_builder.build(
-                config=self.session.config,
-                conversation=self.session.conversation,
-                context=self.context,
-            )
 
-        after_chars = self._model_input_chars(messages)
-        if after_chars <= self.context.max_context_chars:
+        after_tokens = self._model_input_tokens(messages)
+        if after_tokens <= input_budget:
             return messages
 
         await self.abort(
             "context_limit_exceeded",
             "Model input exceeds the configured context budget.",
             metadata={
-                "max_context_chars": self.context.max_context_chars,
-                "input_chars": after_chars,
+                "context_window_tokens": self.context.model_context_window_tokens,
+                "input_budget_tokens": input_budget,
+                "input_tokens": after_tokens,
                 "compaction_attempted": compaction is not None,
             },
         )
         return None
 
-    def _model_input_chars(self, messages: list[ModelMessage]) -> int:
+    async def _tool_result_token_limit(self, call_count: int) -> int | None:
+        project_instructions = self._project_instructions()
+        messages = self._build_model_messages(project_instructions)
+        input_budget = self._model_input_budget_tokens()
+        current_tokens = self._model_input_tokens(messages)
+
+        if current_tokens > input_budget:
+            messages, compaction = self._compact_model_context(
+                project_instructions=project_instructions,
+                input_budget=input_budget,
+            )
+            if compaction is not None:
+                await self.session.emit(
+                    RuntimeEventType.CONTEXT_COMPACTED,
+                    compaction,
+                    turn_id=self.turn_id,
+                )
+            current_tokens = self._model_input_tokens(messages)
+
+        overhead = self._TOOL_RESULT_OVERHEAD_TOKENS * call_count
+        remaining = input_budget - current_tokens - overhead
+        if remaining < self._MIN_TOOL_RESULT_TOKENS * call_count:
+            await self.abort(
+                "context_limit_exceeded",
+                "Model input has no room for tool results and a follow-up response.",
+                metadata={
+                    "input_budget_tokens": input_budget,
+                    "input_tokens": current_tokens,
+                    "tool_calls": call_count,
+                },
+            )
+            return None
+        return min(self.context.max_tool_output_tokens, remaining // call_count)
+
+    def _project_instructions(self) -> str | None:
+        return self.instruction_loader.load_project_instructions(
+            cwd=self.context.cwd,
+            workspace_roots=self.context.workspace_roots,
+            target_paths=self._instruction_target_paths(),
+        )
+
+    def _build_model_messages(
+        self,
+        project_instructions: str | None,
+        *,
+        conversation: Conversation | None = None,
+    ) -> list[ModelMessage]:
+        return self.prompt_builder.build(
+            config=self.session.config,
+            conversation=(
+                conversation if conversation is not None else self.session.conversation
+            ),
+            context=self.context,
+            project_instructions=project_instructions,
+        )
+
+    def _compact_model_context(
+        self,
+        *,
+        project_instructions: str | None,
+        input_budget: int,
+    ) -> tuple[list[ModelMessage], dict[str, Any] | None]:
+        fixed_messages = self._build_model_messages(
+            project_instructions,
+            conversation=Conversation(),
+        )
+        history_budget = input_budget - self._model_input_tokens(fixed_messages)
+        compaction = None
+        if history_budget > 0:
+            compaction = self.session.conversation.compact(
+                max_tokens=history_budget,
+                keep_recent_items=self.context.context_keep_recent_items,
+            )
+        return self._build_model_messages(project_instructions), compaction
+
+    def _instruction_target_paths(self) -> list[Path]:
+        """提取已访问路径，让后续模型调用获得对应目录的作用域指令。"""
+        targets: list[Path] = []
+        for item in self.session.conversation.items:
+            if item.metadata.get("type") != ModelMessageType.TOOL_CALL.value:
+                continue
+            arguments = item.arguments or {}
+            path = arguments.get("path")
+            if isinstance(path, str) and path.strip():
+                targets.append(Path(path))
+        return targets
+
+    def _model_input_tokens(self, messages: list[ModelMessage]) -> int:
         payload = {
             "messages": [message.model_dump(mode="json") for message in messages],
             "tools": [
                 tool.model_dump(mode="json") for tool in self.context.available_tools
             ],
         }
-        return len(
-            json.dumps(
-                payload,
-                ensure_ascii=False,
-                separators=(",", ":"),
-            )
+        return estimate_serialized_tokens(payload)
+
+    def _model_input_budget_tokens(self) -> int:
+        return (
+            self.context.model_context_window_tokens
+            - self.context.model_max_output_tokens
+            - self.context.context_safety_margin_tokens
         )
 
     def _build_context(self) -> TurnContext:
@@ -387,10 +479,13 @@ class Turn:
             available_tools=self.session.tool_registry.specs(),
             max_tool_calls=config.max_tool_calls,
             max_tool_output_chars=config.max_tool_output_chars,
+            max_tool_output_tokens=config.max_tool_output_tokens,
             turn_timeout_seconds=config.turn_timeout_seconds,
             tool_timeout_seconds=config.tool_timeout_seconds,
             approval_timeout_seconds=config.approval_timeout_seconds,
-            max_context_chars=config.max_context_chars,
+            model_context_window_tokens=config.model_context_window_tokens,
+            model_max_output_tokens=config.model_max_output_tokens,
+            context_safety_margin_tokens=config.context_safety_margin_tokens,
             context_keep_recent_items=config.context_keep_recent_items,
             max_parallel_read_tools=config.max_parallel_read_tools,
             created_at=datetime.now(UTC),

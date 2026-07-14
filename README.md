@@ -212,6 +212,8 @@ provider = "qwen"
 name = "qwen-plus"
 api_key_env = "DASHSCOPE_API_KEY"
 base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+context_window_tokens = 131072
+max_output_tokens = 8192
 
 [approval]
 policy = "on_request"
@@ -228,19 +230,21 @@ user = "Answer concisely."
 [turn]
 max_tool_calls = 30
 max_tool_output_chars = 80000
+max_tool_output_tokens = 16384
 turn_timeout_seconds = 1800
 tool_timeout_seconds = 300
 approval_timeout_seconds = 300
-max_context_chars = 400000
+context_safety_margin_tokens = 2048
 context_keep_recent_items = 12
 max_parallel_read_tools = 4
 ```
 
 The runtime applies separate deadlines to the whole turn, each tool execution,
-and interactive approval. `max_context_chars` is a provider-neutral guardrail:
-older complete turns are compacted into a persisted summary while the current
-tool protocol remains intact. Only batches made entirely of approval-free,
-read-only tools use bounded parallel execution.
+and interactive approval. It estimates model input tokens against the configured
+context window, reserves output plus a safety margin, and compacts older complete
+turns into an untrusted persisted summary while keeping the current tool protocol
+intact. Tool results are capped by both their configured limit and the remaining
+input budget. Only approval-free, read-only batches use bounded parallel execution.
 
 Then set the API key through the environment:
 
@@ -303,14 +307,16 @@ turn_context
 conversation
 ```
 
-Project instructions are loaded from these files inside the workspace:
+Project instructions are loaded safely from these files inside the workspace:
 
 ```text
 AGENTS.md
 CODECRAFT.md
 ```
 
-CodeCraft searches upward from the current working directory within the workspace root. Nearby instruction files have higher priority. The resolved content is stored in `SessionConfig` when the session is created, so resume and later turns use the same instruction snapshot.
+They are reloaded for every turn. Root rules apply first; instructions discovered
+for accessed nested paths carry directory scopes, and deeper scopes take precedence.
+Symlinks that resolve outside the workspace are ignored.
 
 Tool schemas are not embedded in the prompt. They are passed through the provider `tools` parameter as structured schemas.
 
@@ -546,7 +552,6 @@ Current test coverage includes runtime events, session store, resume, config loa
 - The TUI runs one active session at a time.
 - No automatic pruning of invalid sessions yet.
 - No web/GitHub/cloud tools in v1.0 scope.
-- Full automatic context compaction is v1.1 scope.
 
 ## Runtime Shape
 

@@ -31,10 +31,13 @@ class TurnContext(BaseModel):
 
     max_tool_calls: int
     max_tool_output_chars: int
+    max_tool_output_tokens: int = Field(default=16_384, ge=32)
     turn_timeout_seconds: int = 1800
     tool_timeout_seconds: int = 300
     approval_timeout_seconds: int = 300
-    max_context_chars: int = 400_000
+    model_context_window_tokens: int = 131_072
+    model_max_output_tokens: int = 8192
+    context_safety_margin_tokens: int = 2048
     context_keep_recent_items: int = 12
     max_parallel_read_tools: int = 4
 

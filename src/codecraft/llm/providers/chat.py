@@ -34,6 +34,7 @@ class ChatCompletionsProvider(OpenAIClientProvider):
             "model": request.model,
             "messages": self._messages_to_chat(request.messages),
             "stream": True,
+            "max_tokens": request.max_output_tokens,
         }
         tools = self._tools_to_chat(request.tools)
         if tools:

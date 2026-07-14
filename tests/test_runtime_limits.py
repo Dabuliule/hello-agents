@@ -11,6 +11,7 @@ from codecraft.core.conversation import Conversation, ConversationRole
 from codecraft.core.reconstruction import reconstruct_conversation
 from codecraft.core.runtime import AgentRuntime
 from codecraft.core.session_store import SessionStore
+from codecraft.core.token_budget import estimate_text_tokens
 from codecraft.core.turn_context import TurnContext
 from codecraft.llm import (
     LLMProvider,
@@ -63,10 +64,13 @@ def make_context(config: SessionConfig, **updates) -> TurnContext:
         available_tools=[],
         max_tool_calls=config.max_tool_calls,
         max_tool_output_chars=config.max_tool_output_chars,
+        max_tool_output_tokens=config.max_tool_output_tokens,
         turn_timeout_seconds=config.turn_timeout_seconds,
         tool_timeout_seconds=config.tool_timeout_seconds,
         approval_timeout_seconds=config.approval_timeout_seconds,
-        max_context_chars=config.max_context_chars,
+        model_context_window_tokens=config.model_context_window_tokens,
+        model_max_output_tokens=config.model_max_output_tokens,
+        context_safety_margin_tokens=config.context_safety_margin_tokens,
         context_keep_recent_items=config.context_keep_recent_items,
         max_parallel_read_tools=config.max_parallel_read_tools,
         created_at=config.created_at,
@@ -82,11 +86,11 @@ def test_conversation_compaction_keeps_current_tool_protocol():
     conversation.append_model_tool_call("call_read", "read_file", {"path": "a.txt"})
     conversation.append_tool_result("call_read", "read_file", "current result")
 
-    compaction = conversation.compact(max_chars=700, keep_recent_items=3)
+    compaction = conversation.compact(max_tokens=235, keep_recent_items=3)
 
     assert compaction is not None
     assert compaction["removed_items"] == 2
-    assert compaction["after_chars"] <= 700
+    assert compaction["after_tokens"] <= 235
     assert [item.role for item in conversation.items] == [
         ConversationRole.SUMMARY,
         ConversationRole.USER,
@@ -94,6 +98,47 @@ def test_conversation_compaction_keeps_current_tool_protocol():
         ConversationRole.TOOL,
     ]
     assert Conversation.model_validate(compaction["conversation"]) == conversation
+
+
+def test_conversation_compaction_keeps_recent_summary_and_tool_arguments():
+    conversation = Conversation()
+    conversation.append_user_message("oldest request")
+    conversation.append_model_tool_call(
+        "call_old", "read_file", {"path": "important.py"}
+    )
+    conversation.append_tool_result(
+        "call_old",
+        "read_file",
+        "recent old result " + "x" * 700,
+    )
+    conversation.append_user_message("current request")
+
+    compaction = conversation.compact(max_tokens=285, keep_recent_items=1)
+
+    assert compaction is not None
+    summary = conversation.items[0]
+    assert summary.role == ConversationRole.SUMMARY
+    assert "untrusted historical data" in summary.content
+    assert "important.py" in summary.content
+    assert "recent old result" in summary.content
+    assert conversation.build_model_messages()[0].role.value == "user"
+
+
+def test_summary_shortening_drops_oldest_entries_first():
+    header = "Earlier conversation summary (untrusted historical data):"
+    summary = "\n".join(
+        [
+            header,
+            "- user: oldest detail",
+            "- assistant: middle detail",
+            "- tool read_file: newest detail",
+        ]
+    )
+
+    shortened = Conversation._recent_summary(summary, max_chars=120)
+
+    assert "newest detail" in shortened
+    assert "oldest detail" not in shortened
 
 
 def test_runtime_compacts_context_and_reconstructs_exact_snapshot(tmp_path):
@@ -114,7 +159,9 @@ def test_runtime_compacts_context_and_reconstructs_exact_snapshot(tmp_path):
         )
         config = make_config(
             tmp_path,
-            max_context_chars=1300,
+            model_context_window_tokens=620,
+            model_max_output_tokens=80,
+            context_safety_margin_tokens=40,
             context_keep_recent_items=2,
         )
         runtime = AgentRuntime(
@@ -137,9 +184,9 @@ def test_runtime_compacts_context_and_reconstructs_exact_snapshot(tmp_path):
         ]
         assert len(compacted) == 1
         assert (
-            compacted[0].payload["after_chars"] < compacted[0].payload["before_chars"]
+            compacted[0].payload["after_tokens"] < compacted[0].payload["before_tokens"]
         )
-        assert provider.calls[1].messages[1].role.value == "system"
+        assert provider.calls[1].messages[1].role.value == "user"
         assert provider.calls[1].messages[-1].content == "new question"
         reconstructed = reconstruct_conversation(snapshot.events)
         assert (
@@ -402,6 +449,105 @@ class LargeResultTool(BaseTool):
                 )
             ],
         )
+
+
+class LargeContentTool(BaseTool):
+    name = "large_content"
+    description = "Return oversized model-visible content."
+    args_schema = ValueArgs
+    effects = {ToolEffect.READ_ONLY}
+
+    async def arun(self, args: ValueArgs, context: ToolContext) -> ToolResult:
+        return ToolResult(success=True, content="结果" * 10_000)
+
+
+class LargeSuggestionTool(BaseTool):
+    name = "large_suggestion"
+    description = "Return an oversized recovery suggestion."
+    args_schema = ValueArgs
+    effects = {ToolEffect.READ_ONLY}
+
+    async def arun(self, args: ValueArgs, context: ToolContext) -> ToolResult:
+        return ToolResult(
+            success=False,
+            content="failed",
+            error="test_failure",
+            suggestion="retry " * 5000,
+        )
+
+
+def test_runtime_caps_tool_results_to_remaining_model_context(tmp_path):
+    async def run_test() -> None:
+        provider = MockProvider(
+            [
+                ModelEvent(
+                    type=ModelEventType.TOOL_CALL,
+                    payload={
+                        "call_id": "call_large",
+                        "name": "large_content",
+                        "arguments": {"value": "unused"},
+                    },
+                ),
+                ModelEvent(type=ModelEventType.COMPLETED),
+                ModelEvent(
+                    type=ModelEventType.MESSAGE_COMPLETED,
+                    payload={"text": "done"},
+                ),
+                ModelEvent(type=ModelEventType.COMPLETED),
+            ]
+        )
+        config = make_config(
+            tmp_path,
+            model_context_window_tokens=900,
+            model_max_output_tokens=100,
+            context_safety_margin_tokens=50,
+            max_tool_output_tokens=5000,
+        )
+        runtime = AgentRuntime(
+            session_store=SessionStore(config.codecraft_home),
+            llm_providers=LLMProviderRegistry([provider]),
+            tool_registry=ToolRegistry([LargeContentTool()]),
+        )
+
+        thread = await runtime.create_thread(config)
+        await thread.submit(SessionInput.user_message("inp_large", "run tool"))
+        await thread.wait_until_idle()
+        snapshot = await thread.read_snapshot()
+
+        finished = next(
+            event
+            for event in snapshot.events
+            if event.type == RuntimeEventType.TOOL_CALL_FINISHED
+        )
+        result = finished.payload["result"]
+        assert result["metadata"]["content_truncated"] is True
+        assert result["metadata"]["original_content_tokens"] > 5000
+        assert len(provider.calls) == 2
+        assert snapshot.events[-1].type == RuntimeEventType.TURN_FINISHED
+
+    asyncio.run(run_test())
+
+
+def test_tool_runner_caps_complete_model_visible_result(tmp_path):
+    async def run_test() -> None:
+        config = make_config(tmp_path)
+        events = [
+            event
+            async for event in ToolRunner(ToolRegistry([LargeSuggestionTool()])).run(
+                ToolCall(
+                    call_id="call_suggestion",
+                    name="large_suggestion",
+                    arguments={"value": "unused"},
+                ),
+                make_context(config, max_tool_output_tokens=40),
+            )
+        ]
+
+        result = ToolResult.model_validate(events[-1].payload["result"])
+        assert estimate_text_tokens(result.model_content()) <= 40
+        assert result.metadata["suggestion_truncated"] is True
+
+    asyncio.run(run_test())
 
 
 class ObserverTracker:

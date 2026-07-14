@@ -167,6 +167,45 @@ def test_context_engine_falls_back_when_index_match_is_stale(tmp_path):
     assert response.matches[0].path == "src/auth/service.py"
 
 
+def test_context_engine_falls_back_when_only_some_index_matches_are_stale(tmp_path):
+    workspace = tmp_path / "workspace"
+    seed_retrieval_workspace(workspace)
+    secondary = workspace / "src/auth/secondary.py"
+    secondary.write_text(
+        "def validate_access_token_copy():\n    return True\n",
+        encoding="utf-8",
+    )
+    index = RepositoryIndex(tmp_path / "indexes")
+    index.sync(workspace)
+    service = workspace / "src/auth/service.py"
+    service.write_text(
+        service.read_text(encoding="utf-8") + "\n# changed after indexing\n",
+        encoding="utf-8",
+    )
+    engine = ContextEngine([ScanRetriever(), LexicalRetriever(index)])
+    request = RetrievalRequest(
+        query="validate_access_token",
+        root=workspace,
+        workspace_roots=(workspace,),
+        mode="content",
+    )
+
+    response = asyncio.run(
+        engine.retrieve(
+            request,
+            retriever_name="lexical",
+            fallback_retriever="scan",
+        )
+    )
+
+    assert response.retriever == "scan"
+    assert response.fallback_from == "lexical"
+    assert {match.path for match in response.matches} >= {
+        "src/auth/service.py",
+        "src/auth/secondary.py",
+    }
+
+
 def test_tool_runner_refreshes_index_after_write_and_patch(tmp_path):
     async def run_test() -> None:
         workspace = tmp_path / "workspace"

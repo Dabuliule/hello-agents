@@ -10,6 +10,7 @@ from pydantic import ValidationError
 
 from codecraft.approval.manager import ApprovalManager
 from codecraft.core.errors import CodecraftError
+from codecraft.core.token_budget import estimate_text_tokens, truncate_text_to_tokens
 from codecraft.core.turn_context import TurnContext
 from codecraft.sandbox.policy import SandboxPolicy
 from codecraft.schema.event import RuntimeEventType
@@ -86,7 +87,11 @@ class ToolRunner:
                         "denied_effect": sandbox_evaluation.denied_effect,
                     },
                 )
-                result = self._limit_output(result, context.max_tool_output_chars)
+                result = self._limit_output(
+                    result,
+                    context.max_tool_output_chars,
+                    context.max_tool_output_tokens,
+                )
                 yield ToolRunnerEvent(
                     RuntimeEventType.TOOL_CALL_FINISHED,
                     self._finished_payload(
@@ -166,7 +171,11 @@ class ToolRunner:
                             ),
                         },
                     )
-                    result = self._limit_output(result, context.max_tool_output_chars)
+                    result = self._limit_output(
+                        result,
+                        context.max_tool_output_chars,
+                        context.max_tool_output_tokens,
+                    )
                     yield ToolRunnerEvent(
                         RuntimeEventType.TOOL_CALL_FINISHED,
                         self._finished_payload(
@@ -251,7 +260,11 @@ class ToolRunner:
             if post_actions:
                 result.metadata["post_actions"] = post_actions
 
-        result = self._limit_output(result, context.max_tool_output_chars)
+        result = self._limit_output(
+            result,
+            context.max_tool_output_chars,
+            context.max_tool_output_tokens,
+        )
         yield ToolRunnerEvent(
             RuntimeEventType.TOOL_CALL_FINISHED,
             self._finished_payload(
@@ -323,10 +336,16 @@ class ToolRunner:
         )
 
     @staticmethod
-    def _limit_output(result: ToolResult, max_chars: int) -> ToolResult:
+    def _limit_output(
+        result: ToolResult,
+        max_chars: int,
+        max_tokens: int,
+    ) -> ToolResult:
         content = result.content
         metadata = dict(result.metadata)
         data = result.data
+        suggestion = result.suggestion
+        original_tokens = estimate_text_tokens(content)
 
         if len(content) > max_chars:
             content = content[:max_chars]
@@ -336,6 +355,26 @@ class ToolRunner:
                     "original_content_chars": len(result.content),
                 }
             )
+
+        if estimate_text_tokens(content) > max_tokens:
+            content = truncate_text_to_tokens(content, max_tokens)
+            metadata.update(
+                {
+                    "content_truncated": True,
+                    "original_content_chars": len(result.content),
+                    "original_content_tokens": original_tokens,
+                }
+            )
+
+        if suggestion:
+            suggestion_tokens = max(1, min(64, max_tokens // 4))
+            limited_suggestion = truncate_text_to_tokens(
+                suggestion,
+                suggestion_tokens,
+            )
+            if limited_suggestion != suggestion:
+                suggestion = limited_suggestion
+                metadata["suggestion_truncated"] = True
 
         if data is not None:
             data = ToolRunner._limit_mapping(data, max_chars, label="data")
@@ -353,9 +392,57 @@ class ToolRunner:
                 "original_metadata_chars": metadata_chars,
             }
 
-        return result.model_copy(
-            update={"content": content, "data": data, "metadata": metadata}
+        limited = result.model_copy(
+            update={
+                "content": content,
+                "data": data,
+                "metadata": metadata,
+                "suggestion": suggestion,
+            }
         )
+        return ToolRunner._fit_model_content(limited, max_tokens=max_tokens)
+
+    @staticmethod
+    def _fit_model_content(result: ToolResult, *, max_tokens: int) -> ToolResult:
+        if estimate_text_tokens(result.model_content()) <= max_tokens:
+            return result
+
+        if result.metadata.get("content_truncated") is not True:
+            result = result.model_copy(
+                update={
+                    "metadata": {
+                        **result.metadata,
+                        "content_truncated": True,
+                        "original_content_chars": len(result.content),
+                        "original_content_tokens": estimate_text_tokens(result.content),
+                    }
+                }
+            )
+
+        candidates = [result]
+        if result.suggestion is not None:
+            candidates.append(result.model_copy(update={"suggestion": None}))
+
+        for candidate in candidates:
+            empty = candidate.model_copy(update={"content": ""})
+            if estimate_text_tokens(empty.model_content()) > max_tokens:
+                continue
+            low = 0
+            high = len(candidate.content)
+            best = empty
+            while low <= high:
+                middle = (low + high) // 2
+                attempted = candidate.model_copy(
+                    update={"content": candidate.content[:middle]}
+                )
+                if estimate_text_tokens(attempted.model_content()) <= max_tokens:
+                    best = attempted
+                    low = middle + 1
+                else:
+                    high = middle - 1
+            return best
+
+        return result.model_copy(update={"content": "", "suggestion": None})
 
     @staticmethod
     def _limit_mapping(value: dict, max_chars: int, *, label: str) -> dict:

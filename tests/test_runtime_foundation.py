@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncIterator
+from pathlib import Path
 
 import pytest
 from pydantic import BaseModel
@@ -427,7 +428,46 @@ def test_instruction_loader_reads_workspace_instruction_files(tmp_path):
     assert "# pkg/CODECRAFT.md" in loaded
     assert "package codecraft" in loaded
     assert "# AGENTS.md" in loaded
-    assert loaded.index("package codecraft") < loaded.index("root agents")
+    assert "scope: pkg" in loaded
+    assert loaded.index("root agents") < loaded.index("package codecraft")
+
+
+def test_instruction_loader_applies_target_scopes_and_skips_escaped_symlinks(
+    tmp_path,
+):
+    workspace = tmp_path / "workspace"
+    package = workspace / "pkg"
+    package.mkdir(parents=True)
+    (workspace / "AGENTS.md").write_text("root rule", encoding="utf-8")
+    (package / "AGENTS.md").write_text("package rule", encoding="utf-8")
+    outside = tmp_path / "secret.txt"
+    outside.write_text("outside secret", encoding="utf-8")
+    (workspace / "CODECRAFT.md").symlink_to(outside)
+
+    loaded = InstructionLoader().load_project_instructions(
+        cwd=workspace,
+        workspace_roots=[workspace],
+        target_paths=[Path("pkg/source.py"), outside],
+    )
+
+    assert loaded is not None
+    assert "root rule" in loaded
+    assert "package rule" in loaded
+    assert "outside secret" not in loaded
+    assert loaded.index("root rule") < loaded.index("package rule")
+
+
+def test_instruction_loader_bounds_large_files(tmp_path):
+    (tmp_path / "AGENTS.md").write_text("x" * 10_000, encoding="utf-8")
+
+    loaded = InstructionLoader(max_chars=200).load_project_instructions(
+        cwd=tmp_path,
+        workspace_roots=[tmp_path],
+    )
+
+    assert loaded is not None
+    assert len(loaded) <= 200
+    assert loaded.startswith("[earlier project instructions omitted]")
 
 
 def test_workspace_guard_rejects_path_escape(tmp_path):
@@ -1112,12 +1152,24 @@ def test_session_config_rejects_stale_fields_invalid_boundaries_and_budgets(tmp_
 
     with pytest.raises(ValueError, match="thread_id"):
         SessionConfig.model_validate({**config_data, "thread_id": "thr_stale"})
+    with pytest.raises(ValueError, match="project_instructions"):
+        SessionConfig.model_validate(
+            {**config_data, "project_instructions": "stale snapshot"}
+        )
     with pytest.raises(ValueError, match="inside a workspace root"):
         SessionConfig.model_validate({**config_data, "cwd": outside})
     with pytest.raises(ValueError, match="max_tool_calls"):
         SessionConfig.model_validate({**config_data, "max_tool_calls": 0})
     with pytest.raises(ValueError, match="max_tool_output_chars"):
         SessionConfig.model_validate({**config_data, "max_tool_output_chars": 0})
+    with pytest.raises(ValueError, match="model output tokens"):
+        SessionConfig.model_validate(
+            {
+                **config_data,
+                "model_context_window_tokens": 4096,
+                "model_max_output_tokens": 4096,
+            }
+        )
     with pytest.raises(ValueError, match="model_api_key_env"):
         SessionConfig.model_validate({**config_data, "model_api_key_env": "BAD-NAME"})
     with pytest.raises(ValueError, match="MCP server names"):
@@ -1284,6 +1336,7 @@ def test_openai_provider_converts_response_to_model_events(tmp_path):
         assert client.responses.kwargs["input"] == [{"role": "user", "content": "read"}]
         assert client.responses.kwargs["stream"] is True
         assert client.responses.kwargs["store"] is False
+        assert client.responses.kwargs["max_output_tokens"] == 8192
         assert client.responses.kwargs["tools"][0]["name"] == "read_file"
         assert [event.type for event in events] == [
             ModelEventType.MESSAGE_COMPLETED,
@@ -1521,6 +1574,7 @@ def test_qwen_provider_streams_chat_completion_deltas(tmp_path):
             {"role": "user", "content": "hello"}
         ]
         assert client.chat.completions.kwargs["stream"] is True
+        assert client.chat.completions.kwargs["max_tokens"] == 8192
         assert "tools" not in client.chat.completions.kwargs
         assert [event.type for event in events] == [
             ModelEventType.MESSAGE_DELTA,
@@ -2224,13 +2278,7 @@ def test_runtime_injects_system_instructions_before_conversation(tmp_path):
             ]
         )
         config = make_config(tmp_path).model_copy(
-            update={
-                "project_instructions": InstructionLoader().load_project_instructions(
-                    cwd=tmp_path,
-                    workspace_roots=[tmp_path],
-                ),
-                "user_instructions": "User rule: answer briefly.",
-            }
+            update={"user_instructions": "User rule: answer briefly."}
         )
         (tmp_path / "AGENTS.md").write_text(
             "Changed after session creation.", encoding="utf-8"
@@ -2248,12 +2296,56 @@ def test_runtime_injects_system_instructions_before_conversation(tmp_path):
         messages = provider.calls[0].messages
         assert messages[0].role == ModelRole.SYSTEM
         assert "<base_instructions>" in messages[0].content
-        assert "Project rule: inspect files first." in messages[0].content
-        assert "Changed after session creation." not in messages[0].content
+        assert "Project rule: inspect files first." not in messages[0].content
+        assert "Changed after session creation." in messages[0].content
         assert "User rule: answer briefly." in messages[0].content
         assert "approval_policy: never" in messages[0].content
         assert messages[1].role == ModelRole.USER
         assert messages[1].content == "hello"
+
+    asyncio.run(run_test())
+
+
+def test_runtime_loads_scoped_instructions_after_accessing_nested_path(tmp_path):
+    async def run_test() -> None:
+        package = tmp_path / "pkg"
+        package.mkdir()
+        (tmp_path / "AGENTS.md").write_text("root rule", encoding="utf-8")
+        (package / "AGENTS.md").write_text("package rule", encoding="utf-8")
+        (package / "note.txt").write_text("hello", encoding="utf-8")
+        provider = MockProvider(
+            script=[
+                ModelEvent(
+                    type=ModelEventType.TOOL_CALL,
+                    payload={
+                        "call_id": "call_read",
+                        "name": "read_file",
+                        "arguments": {"path": "pkg/note.txt"},
+                    },
+                ),
+                ModelEvent(type=ModelEventType.COMPLETED),
+                ModelEvent(
+                    type=ModelEventType.MESSAGE_COMPLETED,
+                    payload={"text": "done"},
+                ),
+                ModelEvent(type=ModelEventType.COMPLETED),
+            ]
+        )
+        config = make_config(tmp_path)
+        runtime = AgentRuntime(
+            session_store=SessionStore(config.codecraft_home),
+            llm_providers=LLMProviderRegistry([provider]),
+            tool_registry=ToolRegistry([ReadFileTool()]),
+        )
+
+        thread = await runtime.create_thread(config)
+        await thread.submit(SessionInput.user_message("inp_one", "read note"))
+        await thread.wait_until_idle()
+
+        assert "root rule" in provider.calls[0].messages[0].content
+        assert "package rule" not in provider.calls[0].messages[0].content
+        assert "package rule" in provider.calls[1].messages[0].content
+        assert "scope: pkg" in provider.calls[1].messages[0].content
 
     asyncio.run(run_test())
 
@@ -2329,7 +2421,7 @@ def test_runtime_resume_uses_context_compaction_summary(tmp_path):
             "new user",
         ]
         assert [message.role.value for message in messages[1:]] == [
-            "system",
+            "user",
             "user",
         ]
 

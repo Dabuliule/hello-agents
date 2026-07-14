@@ -25,7 +25,6 @@ from codecraft.eval.suite import (
     seed_workspace,
 )
 from codecraft.llm import LLMProviderRegistry
-from codecraft.prompt import InstructionLoader
 from codecraft.sandbox import SandboxMode
 from codecraft.schema.event import RuntimeEvent, RuntimeEventType
 from codecraft.schema.input import SessionInput
@@ -125,10 +124,6 @@ async def _run_task(
             "approval_policy": ApprovalPolicy.NEVER,
             "sandbox_mode": SandboxMode.WORKSPACE_WRITE,
             "network_access": False,
-            "project_instructions": InstructionLoader().load_project_instructions(
-                cwd=workspace,
-                workspace_roots=[workspace],
-            ),
             "user_instructions": None,
             "created_at": datetime.now(UTC),
             "evaluation": EvalSessionContext(

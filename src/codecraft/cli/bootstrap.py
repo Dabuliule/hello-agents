@@ -17,7 +17,7 @@ from codecraft.llm import (
     QwenProvider,
 )
 from codecraft.mcp.client import MCPStdioProvider
-from codecraft.prompt import BASE_INSTRUCTIONS, InstructionLoader
+from codecraft.prompt import BASE_INSTRUCTIONS
 from codecraft.retrieval import (
     ContextEngine,
     LexicalRetriever,
@@ -108,6 +108,8 @@ def load_session_config(
             settings.model.provider, settings.model.api_key_env
         ),
         model_base_url=settings.model.base_url,
+        model_context_window_tokens=settings.model.context_window_tokens,
+        model_max_output_tokens=settings.model.max_output_tokens,
         approval_policy=settings.approval.policy,
         sandbox_mode=settings.sandbox.mode,
         network_access=settings.sandbox.network_access,
@@ -116,17 +118,14 @@ def load_session_config(
         docker_sandbox=settings.sandbox.docker,
         mcp_servers=settings.mcp.servers,
         base_instructions=BASE_INSTRUCTIONS,
-        project_instructions=InstructionLoader().load_project_instructions(
-            cwd=cwd,
-            workspace_roots=workspace_roots,
-        ),
         user_instructions=settings.instructions.user,
         max_tool_calls=settings.turn.max_tool_calls,
         max_tool_output_chars=settings.turn.max_tool_output_chars,
+        max_tool_output_tokens=settings.turn.max_tool_output_tokens,
         turn_timeout_seconds=settings.turn.turn_timeout_seconds,
         tool_timeout_seconds=settings.turn.tool_timeout_seconds,
         approval_timeout_seconds=settings.turn.approval_timeout_seconds,
-        max_context_chars=settings.turn.max_context_chars,
+        context_safety_margin_tokens=settings.turn.context_safety_margin_tokens,
         context_keep_recent_items=settings.turn.context_keep_recent_items,
         max_parallel_read_tools=settings.turn.max_parallel_read_tools,
     )

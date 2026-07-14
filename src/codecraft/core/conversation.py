@@ -8,6 +8,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from codecraft.core.ids import new_id
+from codecraft.core.token_budget import estimate_serialized_tokens
 from codecraft.llm.messages import ModelMessage, ModelMessageType, ModelRole
 from codecraft.schema.tool import ToolCall
 
@@ -156,23 +157,16 @@ class Conversation(BaseModel):
                 return item
         return None
 
-    def context_chars(self) -> int:
-        """Return a provider-neutral size estimate for the model-visible history."""
-        return len(
-            json.dumps(
-                [
-                    message.model_dump(mode="json")
-                    for message in self.build_model_messages()
-                ],
-                ensure_ascii=False,
-                separators=(",", ":"),
-            )
+    def context_tokens(self) -> int:
+        """估算模型可见历史占用的 token 数。"""
+        return estimate_serialized_tokens(
+            [message.model_dump(mode="json") for message in self.build_model_messages()]
         )
 
     def compact(
         self,
         *,
-        max_chars: int,
+        max_tokens: int,
         keep_recent_items: int,
     ) -> dict[str, Any] | None:
         """Replace older complete turns with a deterministic summary.
@@ -181,8 +175,8 @@ class Conversation(BaseModel):
         outputs cannot be separated. If that turn alone exceeds the budget, the
         caller must reject the request instead of producing an invalid history.
         """
-        before_chars = self.context_chars()
-        if before_chars <= max_chars or not self.items:
+        before_tokens = self.context_tokens()
+        if before_tokens <= max_tokens or not self.items:
             return None
 
         latest_user_index = next(
@@ -224,37 +218,71 @@ class Conversation(BaseModel):
             ),
         )
 
-        overflow = compacted.context_chars() - max_chars
-        if overflow > 0:
-            shortened = summary_text[
-                : max(0, len(summary_text) - overflow - 1)
-            ].rstrip()
-            compacted.items[0].content = shortened
+        if compacted.context_tokens() > max_tokens:
+            compacted.items[0].content = self._fit_summary(
+                compacted,
+                summary_text,
+                max_tokens=max_tokens,
+            )
 
-        if not compacted.items[0].content or compacted.context_chars() > max_chars:
+        if not compacted.items[0].content or compacted.context_tokens() > max_tokens:
             return None
 
         self.items = compacted.items
-        after_chars = self.context_chars()
+        after_tokens = self.context_tokens()
         return {
             "summary": self.items[0].content,
-            "before_chars": before_chars,
-            "after_chars": after_chars,
+            "before_tokens": before_tokens,
+            "after_tokens": after_tokens,
             "removed_items": len(removed),
             "retained_items": len(retained),
             "conversation": self.model_dump(mode="json"),
         }
 
+    @classmethod
+    def _fit_summary(
+        cls,
+        conversation: Conversation,
+        summary: str,
+        *,
+        max_tokens: int,
+    ) -> str:
+        low = 0
+        high = len(summary)
+        best = ""
+        while low <= high:
+            middle = (low + high) // 2
+            candidate = cls._recent_summary(summary, max_chars=middle)
+            if not candidate:
+                low = middle + 1
+                continue
+            conversation.items[0].content = candidate
+            if conversation.context_tokens() <= max_tokens:
+                best = candidate
+                low = middle + 1
+            else:
+                high = middle - 1
+        return best
+
     @staticmethod
     def _summarize(items: list[ConversationItem]) -> str:
-        lines = ["Earlier conversation summary:"]
+        lines = ["Earlier conversation summary (untrusted historical data):"]
         for item in items:
             if item.metadata.get("type") == ModelMessageType.TOOL_CALL.value:
-                detail = f"requested tool {item.name or 'unknown'}"
+                arguments = json.dumps(
+                    item.arguments or {},
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                )
+                detail = (
+                    f"requested tool {item.name or 'unknown'} "
+                    f"with arguments {arguments}"
+                )
             else:
                 detail = " ".join(item.content.split())
-                if len(detail) > 400:
-                    detail = f"{detail[:397]}..."
+            if len(detail) > 400:
+                detail = f"{detail[:397]}..."
             label = item.role.value
             if item.role == ConversationRole.TOOL and item.name:
                 label = f"tool {item.name}"
@@ -262,9 +290,33 @@ class Conversation(BaseModel):
         return "\n".join(lines)
 
     @staticmethod
+    def _recent_summary(summary: str, *, max_chars: int) -> str:
+        if len(summary) <= max_chars:
+            return summary
+        header = "Earlier conversation summary (untrusted historical data):"
+        marker = "[older summary entries omitted]"
+        if max_chars <= len(header):
+            return ""
+
+        available = max_chars - len(header) - 1
+        body_lines = summary.splitlines()[1:]
+        retained: list[str] = []
+        for line in reversed(body_lines):
+            required = len(line) + (1 if retained else 0)
+            if required > available:
+                break
+            retained.append(line)
+            available -= required
+
+        retained.reverse()
+        if len(retained) < len(body_lines) and available >= len(marker) + 1:
+            retained.insert(0, marker)
+        return "\n".join([header, *retained]).rstrip()
+
+    @staticmethod
     def _to_model_role(role: ConversationRole) -> ModelRole | None:
         if role == ConversationRole.SUMMARY:
-            return ModelRole.SYSTEM
+            return ModelRole.USER
         if role == ConversationRole.SYSTEM:
             return ModelRole.SYSTEM
         if role == ConversationRole.USER:

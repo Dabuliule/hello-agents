@@ -37,6 +37,7 @@ class ResponsesProvider(OpenAIClientProvider):
             "input": self._messages_to_input(request.messages),
             "stream": True,
             "store": False,
+            "max_output_tokens": request.max_output_tokens,
         }
         tools = self._tools_to_responses(request.tools)
         if tools:

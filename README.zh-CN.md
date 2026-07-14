@@ -168,6 +168,8 @@ provider = "qwen"
 name = "qwen-plus"
 api_key_env = "DASHSCOPE_API_KEY"
 base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+context_window_tokens = 131072
+max_output_tokens = 8192
 
 [approval]
 policy = "on_request"
@@ -184,7 +186,18 @@ user = "回答尽量简洁。"
 [turn]
 max_tool_calls = 30
 max_tool_output_chars = 80000
+max_tool_output_tokens = 16384
+turn_timeout_seconds = 1800
+tool_timeout_seconds = 300
+approval_timeout_seconds = 300
+context_safety_margin_tokens = 2048
+context_keep_recent_items = 12
+max_parallel_read_tools = 4
 ```
+
+运行时会按配置的模型上下文窗口估算输入 token，并预留最大输出和安全余量。
+较早的完整 turn 会自动压缩成不可信的历史摘要，当前工具协议保持完整；工具
+结果还会根据下一次模型调用的剩余输入预算动态限额。
 
 API key 建议放在环境变量里：
 
@@ -247,14 +260,16 @@ turn_context
 conversation
 ```
 
-项目指令来自 workspace 内的：
+项目指令会从 workspace 内安全加载：
 
 ```text
 AGENTS.md
 CODECRAFT.md
 ```
 
-CodeCraft 会从当前工作目录开始向上查找，但不会越过 workspace root。离当前目录越近的指令文件优先级越高。解析后的内容会在创建 Session 时写入 `SessionConfig`，因此恢复会话和后续 Turn 使用同一份指令快照。
+每个 turn 都会重新加载指令。根目录规则先应用；访问嵌套路径后会加载对应
+目录作用域的规则，越深的作用域优先级越高。解析后指向 workspace 外部的
+符号链接会被忽略。
 
 工具 schema 不写进 prompt，而是通过 provider 的 `tools` 参数以结构化 schema 传给模型。
 
@@ -488,7 +503,6 @@ chore: update workflow permissions
 - TUI 同一时间只运行一个活动 session。
 - 还没有自动清理 invalid session。
 - v1.0 暂不做 Web/GitHub/cloud 工具。
-- 完整自动 context compact 属于 v1.1 范围。
 
 ## Runtime 结构
 

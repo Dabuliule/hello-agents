@@ -40,6 +40,7 @@ class ModelRequest(BaseModel):
     model: str = Field(min_length=1)
     messages: tuple[ModelMessage, ...]
     tools: tuple[ToolSpec, ...] = ()
+    max_output_tokens: int = Field(default=8192, ge=1)
 
 
 class LLMProvider(ABC):
