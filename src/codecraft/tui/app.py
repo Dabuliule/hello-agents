@@ -64,6 +64,7 @@ class CodeCraftTUI(App[None]):
         }
         self._assistant_block: MessageBlock | None = None
         self._assistant_buffer = ""
+        self._last_error_turn_id: str | None = None
         self._closed = False
 
     def compose(self) -> ComposeResult:
@@ -223,7 +224,9 @@ class CodeCraftTUI(App[None]):
                 self.config.session_id
             )
         except CodecraftError as exc:
-            self._tool_log().write(f"[red]trace unavailable: {exc.message}[/red]")
+            self._tool_log().write(
+                Text(f"trace unavailable: {exc.message}", style="red")
+            )
             return
         report = build_trace_report(self.config.session_id, events)
         self.push_screen(TraceScreen(report))
@@ -238,15 +241,29 @@ class CodeCraftTUI(App[None]):
     async def _consume_events(self) -> None:
         if self.thread is None:
             return
-        while True:
-            event = await self.thread.next_event()
-            await self._handle_event(event)
-            if event.type == RuntimeEventType.SESSION_CLOSED:
+        try:
+            while True:
+                event = await self.thread.next_event()
+                await self._handle_event(event)
+                if event.type == RuntimeEventType.SESSION_CLOSED:
+                    return
+        except Exception as exc:
+            if self._closed:
                 return
+            await self._append_message(
+                "Error",
+                f"Runtime event stream failed: {type(exc).__name__}: {exc}",
+            )
+            self._finish_turn("failed")
 
     async def _handle_event(self, event: RuntimeEvent) -> None:
         payload = event.payload
-        if event.type == RuntimeEventType.USER_MESSAGE:
+        if event.type == RuntimeEventType.TURN_STARTED:
+            self._last_error_turn_id = None
+            self.turn_status = "running"
+            self.query_one("#prompt", Input).disabled = True
+            self._refresh_status()
+        elif event.type == RuntimeEventType.USER_MESSAGE:
             text = payload.get("text")
             if isinstance(text, str):
                 await self._append_message("User", text)
@@ -284,16 +301,21 @@ class CodeCraftTUI(App[None]):
             self._tool_log().write("[cyan]session restored[/cyan]")
         elif event.type == RuntimeEventType.ERROR:
             message = str(payload.get("message") or payload.get("code") or "Error")
-            await self._append_message("Error", message)
+            if event.turn_id is None or event.turn_id != self._last_error_turn_id:
+                await self._append_message("Error", message)
+            self._last_error_turn_id = event.turn_id
         elif event.type == RuntimeEventType.TURN_ABORTED:
             message = str(payload.get("message") or payload.get("reason") or "Aborted")
-            await self._append_message("Error", message)
-            self._finish_turn("aborted")
+            if event.turn_id is None or event.turn_id != self._last_error_turn_id:
+                await self._append_message("Error", message)
+            self._last_error_turn_id = None
+            self._finish_turn("idle")
         elif event.type == RuntimeEventType.TURN_FINISHED:
+            self._last_error_turn_id = None
             self._finish_turn("idle")
         elif event.type == RuntimeEventType.SESSION_CLOSED:
-            self.turn_status = "closed"
-            self._refresh_status()
+            self._last_error_turn_id = None
+            self._finish_turn("closed")
 
     async def _request_approval(self, payload: dict[str, Any]) -> None:
         if self.thread is None:
@@ -301,13 +323,27 @@ class CodeCraftTUI(App[None]):
         self.turn_status = "approval"
         self._refresh_status()
         approved = await self.push_screen_wait(ApprovalScreen(payload))
-        decision = SessionInput.approval_decision(
-            new_id("inp_"),
-            approval_id=str(payload["approval_id"]),
-            approved=approved,
-            reason="approved by TUI" if approved else "rejected by TUI",
-        )
-        await self.thread.submit(decision)
+        try:
+            approval_id = payload.get("approval_id")
+            if not isinstance(approval_id, str) or not approval_id:
+                raise ValueError("approval request is missing approval_id")
+            decision = SessionInput.approval_decision(
+                new_id("inp_"),
+                approval_id=approval_id,
+                approved=approved,
+                reason="approved by TUI" if approved else "rejected by TUI",
+            )
+            await self.thread.submit(decision)
+        except Exception as exc:
+            await self._append_message(
+                "Error",
+                f"Could not submit approval decision: {type(exc).__name__}: {exc}",
+            )
+            try:
+                await self.thread.interrupt("approval_submission_failed")
+            except Exception:
+                self._finish_turn("failed")
+            return
         label = "approved" if approved else "rejected"
         style = "green" if approved else "red"
         self._tool_log().write(f"[{style}]approval {label}[/{style}]")
@@ -330,7 +366,10 @@ class CodeCraftTUI(App[None]):
         if isinstance(arguments, dict) and arguments:
             compact = json.dumps(arguments, ensure_ascii=False, sort_keys=True)
             suffix = f" {compact[:180]}"
-        self._tool_log().write(f"[yellow][running][/yellow] {name}{suffix}")
+        line = Text()
+        line.append("[running]", style="yellow")
+        line.append(f" {name}{suffix}")
+        self._tool_log().write(line)
 
     def _render_tool_finished(self, payload: dict[str, Any]) -> None:
         name = str(payload.get("name") or "tool")
@@ -340,7 +379,10 @@ class CodeCraftTUI(App[None]):
         status = "ok" if success else "failed"
         style = "green" if success else "red"
         elapsed = f" {duration}ms" if isinstance(duration, int) else ""
-        self._tool_log().write(f"[{style}][{status}][/{style}] {name}{elapsed}")
+        line = Text()
+        line.append(f"[{status}]", style=style)
+        line.append(f" {name}{elapsed}")
+        self._tool_log().write(line)
         if not success and isinstance(result, dict):
             content = str(result.get("content") or result.get("error") or "")
             if content:
@@ -353,13 +395,15 @@ class CodeCraftTUI(App[None]):
     def _accumulate_token_usage(self, payload: dict[str, Any]) -> None:
         for name in self.token_usage:
             value = payload.get(name)
-            if isinstance(value, int):
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
                 self.token_usage[name] += value
 
     def _finish_turn(self, status: str) -> None:
+        self._assistant_block = None
+        self._assistant_buffer = ""
         self.turn_status = status
         prompt = self.query_one("#prompt", Input)
-        prompt.disabled = status != "idle"
+        prompt.disabled = self._closed or status != "idle"
         if status == "idle":
             prompt.focus()
         self._refresh_status()

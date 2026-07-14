@@ -71,10 +71,10 @@ class SessionBrowserScreen(ModalScreen[str | None]):
                 updated.astimezone().strftime("%Y-%m-%d %H:%M") if updated else "-"
             )
             table.add_row(
-                updated_text,
-                summary.session_id,
-                str(summary.source or "-"),
-                str(summary.event_count),
+                Text(updated_text),
+                Text(summary.session_id),
+                Text(str(summary.source or "-")),
+                Text(str(summary.event_count)),
                 key=summary.session_id,
             )
         table.focus()
@@ -126,11 +126,11 @@ class TraceScreen(ModalScreen[None]):
         for event in self.report.get("events", []):
             timestamp = str(event.get("timestamp") or "-")
             table.add_row(
-                str(event.get("seq") or "-"),
-                timestamp[11:19] if len(timestamp) >= 19 else timestamp,
-                str(event.get("type") or "-"),
-                str(event.get("turn_id") or "-"),
-                str(event.get("summary") or ""),
+                Text(str(event.get("seq") or "-")),
+                Text(timestamp[11:19] if len(timestamp) >= 19 else timestamp),
+                Text(str(event.get("type") or "-")),
+                Text(str(event.get("turn_id") or "-")),
+                Text(str(event.get("summary") or "")),
                 key=str(event["seq"]),
             )
         if table.row_count:
@@ -206,9 +206,9 @@ def _approval_details(payload: dict[str, Any]) -> Group:
     table = Table.grid(padding=(0, 2), expand=True)
     table.add_column(style="#9ca3ad", width=10)
     table.add_column(ratio=1)
-    table.add_row("tool", str(payload.get("tool_name") or "-"))
-    table.add_row("risk", str(payload.get("risk") or "-"))
-    table.add_row("reason", str(payload.get("reason") or "-"))
+    table.add_row("tool", Text(str(payload.get("tool_name") or "-")))
+    table.add_row("risk", Text(str(payload.get("risk") or "-")))
+    table.add_row("reason", Text(str(payload.get("reason") or "-")))
     arguments = payload.get("arguments")
     details = ""
     if isinstance(arguments, dict) and arguments:

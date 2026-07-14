@@ -11,10 +11,13 @@ from codecraft.cli.app import app
 from codecraft.core.runtime import AgentRuntime
 from codecraft.core.session_store import SessionStore
 from codecraft.llm import (
+    LLMProvider,
+    LLMProviderError,
     LLMProviderRegistry,
     MockProvider,
     ModelEvent,
     ModelEventType,
+    ModelRequest,
 )
 from codecraft.schema.event import RuntimeEvent, RuntimeEventType
 from codecraft.schema.session import SessionConfig, SessionSource
@@ -28,6 +31,27 @@ from codecraft.tui import (
 )
 
 runner = CliRunner()
+
+
+class RecoveringProvider(LLMProvider):
+    name = "recovering"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def stream(self, request: ModelRequest):
+        self.calls += 1
+        if self.calls == 1:
+            yield ModelEvent(
+                type=ModelEventType.MESSAGE_DELTA,
+                payload={"text": "partial answer"},
+            )
+            raise LLMProviderError("transient provider failure")
+        yield ModelEvent(
+            type=ModelEventType.MESSAGE_COMPLETED,
+            payload={"text": "recovered answer"},
+        )
+        yield ModelEvent(type=ModelEventType.COMPLETED)
 
 
 def _config(tmp_path, *, approval_policy=ApprovalPolicy.NEVER) -> SessionConfig:
@@ -164,6 +188,122 @@ def test_tui_streams_messages_and_updates_runtime_status(tmp_path):
             assert conversation.region.right <= side_panel.region.x
             assert main.region.bottom <= prompt.region.y
             assert conversation.region.width >= 30
+
+    asyncio.run(run_test())
+
+
+def test_tui_recovers_after_aborted_stream_without_reusing_message_block(tmp_path):
+    async def run_test():
+        config = _config(tmp_path).model_copy(update={"model_provider": "recovering"})
+        provider = RecoveringProvider()
+        runtime = AgentRuntime(
+            session_store=SessionStore(config.codecraft_home),
+            llm_providers=LLMProviderRegistry([provider]),
+            tool_registry=ToolRegistry(),
+        )
+        tui = CodeCraftTUI(config, runtime)
+
+        async with tui.run_test(size=(80, 24)) as pilot:
+            await _wait_until(pilot, lambda: tui.turn_status == "idle")
+            prompt = tui.query_one("#prompt")
+            prompt.value = "first request"
+            await pilot.press("enter")
+            await _wait_until(
+                pilot,
+                lambda: (
+                    tui.turn_status == "idle"
+                    and any(
+                        message.role == "Error" for message in tui.query(MessageBlock)
+                    )
+                ),
+            )
+
+            assert prompt.disabled is False
+            prompt.value = "retry"
+            await pilot.press("enter")
+            await _wait_until(
+                pilot,
+                lambda: (
+                    tui.turn_status == "idle"
+                    and any(
+                        message.text == "recovered answer"
+                        for message in tui.query(MessageBlock)
+                    )
+                ),
+            )
+
+            messages = [
+                (message.role, message.text) for message in tui.query(MessageBlock)
+            ]
+            assert messages == [
+                ("User", "first request"),
+                ("Assistant", "partial answer"),
+                ("Error", "transient provider failure"),
+                ("User", "retry"),
+                ("Assistant", "recovered answer"),
+            ]
+            assert provider.calls == 2
+
+    asyncio.run(run_test())
+
+
+def test_tui_renders_tool_payloads_as_plain_text_and_disables_closed_session(
+    tmp_path,
+):
+    async def run_test():
+        config = _config(tmp_path)
+        runtime = AgentRuntime(
+            session_store=SessionStore(config.codecraft_home),
+            llm_providers=LLMProviderRegistry([MockProvider()]),
+            tool_registry=ToolRegistry(),
+        )
+        tui = CodeCraftTUI(config, runtime)
+
+        async with tui.run_test(size=(80, 24)) as pilot:
+            await _wait_until(pilot, lambda: tui.turn_status == "idle")
+            tui._render_tool_started(
+                {
+                    "name": "[red]spoof[/red]",
+                    "arguments": {"path": "[bold]README.md[/bold]"},
+                }
+            )
+            tui._render_tool_finished(
+                {
+                    "name": "[link=https://example.test]tool[/link]",
+                    "result": {"success": True},
+                }
+            )
+            await pilot.pause()
+
+            log = tui.query_one("#tool-log")
+            rendered = "".join(line.text for line in log.lines)
+            assert "[red]spoof[/red]" in rendered
+            assert "[bold]README.md[/bold]" in rendered
+            assert "[link=https://example.test]tool[/link]" in rendered
+
+            tui._accumulate_token_usage(
+                {
+                    "input_tokens": -1,
+                    "output_tokens": True,
+                    "total_tokens": 4,
+                }
+            )
+            assert tui.token_usage == {
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "total_tokens": 4,
+            }
+
+            await tui._handle_event(
+                RuntimeEvent(
+                    event_id="evt_closed",
+                    session_id=config.session_id,
+                    seq=999,
+                    type=RuntimeEventType.SESSION_CLOSED,
+                )
+            )
+            assert tui.turn_status == "closed"
+            assert tui.query_one("#prompt").disabled is True
 
     asyncio.run(run_test())
 
