@@ -184,6 +184,7 @@ def test_tui_approval_modal_controls_side_effect(tmp_path):
                         },
                     },
                 ),
+                ModelEvent(type=ModelEventType.COMPLETED),
                 ModelEvent(
                     type=ModelEventType.MESSAGE_COMPLETED,
                     payload={"text": "File created."},

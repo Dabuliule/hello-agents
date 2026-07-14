@@ -25,15 +25,16 @@ from codecraft.core.session_store import SessionStore
 from codecraft.core.turn_context import TurnContext
 from codecraft.llm import (
     DeepSeekProvider,
+    LLMConfigError,
     LLMProvider,
     LLMProviderRegistry,
     ModelEvent,
     ModelEventType,
     ModelMessage,
     ModelMessageType,
+    ModelRequest,
     ModelRole,
     MockProvider,
-    OpenAICompatibleProvider,
     OpenAIProvider,
     QwenProvider,
 )
@@ -1163,13 +1164,11 @@ def test_llm_provider_stream_contract(tmp_path):
 
         async def stream(
             self,
-            messages: list[ModelMessage],
-            tools: list[ToolSpec],
-            context: TurnContext,
+            request: ModelRequest,
         ) -> AsyncIterator[ModelEvent]:
             yield ModelEvent(
                 type=ModelEventType.MESSAGE_COMPLETED,
-                payload={"text": messages[0].content},
+                payload={"text": request.messages[0].content},
             )
             yield ModelEvent(type=ModelEventType.COMPLETED)
 
@@ -1195,9 +1194,10 @@ def test_llm_provider_stream_contract(tmp_path):
         return [
             event
             async for event in provider.stream(
-                [ModelMessage(role=ModelRole.USER, content="hello")],
-                [],
-                context,
+                ModelRequest(
+                    model=context.model,
+                    messages=(ModelMessage(role=ModelRole.USER, content="hello"),),
+                )
             )
         ]
 
@@ -1233,7 +1233,9 @@ def test_openai_provider_converts_response_to_model_events(tmp_path):
                 "usage": {
                     "input_tokens": 10,
                     "output_tokens": 5,
-                    "reasoning_tokens": 2,
+                    "total_tokens": 15,
+                    "input_tokens_details": {"cached_tokens": 3},
+                    "output_tokens_details": {"reasoning_tokens": 2},
                 },
             }
 
@@ -1270,15 +1272,18 @@ def test_openai_provider_converts_response_to_model_events(tmp_path):
         events = [
             event
             async for event in provider.stream(
-                [ModelMessage(role=ModelRole.USER, content="read")],
-                context.available_tools,
-                context,
+                ModelRequest(
+                    model="gpt-test",
+                    messages=(ModelMessage(role=ModelRole.USER, content="read"),),
+                    tools=tuple(context.available_tools),
+                )
             )
         ]
 
         assert client.responses.kwargs["model"] == "gpt-test"
         assert client.responses.kwargs["input"] == [{"role": "user", "content": "read"}]
         assert client.responses.kwargs["stream"] is True
+        assert client.responses.kwargs["store"] is False
         assert client.responses.kwargs["tools"][0]["name"] == "read_file"
         assert [event.type for event in events] == [
             ModelEventType.MESSAGE_COMPLETED,
@@ -1287,7 +1292,9 @@ def test_openai_provider_converts_response_to_model_events(tmp_path):
             ModelEventType.COMPLETED,
         ]
         assert events[0].payload.text == "done"
-        assert events[1].payload.total_tokens == 17
+        assert events[1].payload.total_tokens == 15
+        assert events[1].payload.reasoning_tokens == 2
+        assert events[1].payload.cached_input_tokens == 3
         assert events[2].payload.arguments == {"path": "README.md"}
 
     asyncio.run(run_test())
@@ -1318,10 +1325,11 @@ def test_openai_provider_streams_response_deltas_and_tool_calls(tmp_path):
                     {
                         "type": "response.completed",
                         "response": {
+                            "output_text": "hello stream",
                             "usage": {
                                 "input_tokens": 2,
                                 "output_tokens": 3,
-                            }
+                            },
                         },
                     },
                 ]
@@ -1347,31 +1355,16 @@ def test_openai_provider_streams_response_deltas_and_tool_calls(tmp_path):
             self.responses = FakeResponses()
 
     async def run_test() -> None:
-        config = make_config(tmp_path)
-        context = TurnContext(
-            session_id=config.session_id,
-            turn_id="turn_test",
-            cwd=config.cwd,
-            workspace_roots=config.workspace_roots,
-            model="gpt-test",
-            model_provider="openai",
-            approval_policy=config.approval_policy,
-            sandbox_mode=config.sandbox_mode,
-            network_access=config.network_access,
-            available_tools=[],
-            max_tool_calls=config.max_tool_calls,
-            max_tool_output_chars=config.max_tool_output_chars,
-            created_at=config.created_at,
-        )
         client = FakeClient()
         provider = OpenAIProvider(client=client)
 
         events = [
             event
             async for event in provider.stream(
-                [ModelMessage(role=ModelRole.USER, content="read")],
-                [],
-                context,
+                ModelRequest(
+                    model="gpt-test",
+                    messages=(ModelMessage(role=ModelRole.USER, content="read"),),
+                )
             )
         ]
 
@@ -1407,48 +1400,31 @@ def test_openai_provider_serializes_tool_history_as_response_items(tmp_path):
             self.responses = FakeResponses()
 
     async def run_test() -> None:
-        config = make_config(tmp_path)
-        context = TurnContext(
-            session_id=config.session_id,
-            turn_id="turn_test",
-            cwd=config.cwd,
-            workspace_roots=config.workspace_roots,
-            model="gpt-test",
-            model_provider="openai",
-            approval_policy=config.approval_policy,
-            sandbox_mode=config.sandbox_mode,
-            network_access=config.network_access,
-            available_tools=[],
-            max_tool_calls=config.max_tool_calls,
-            max_tool_output_chars=config.max_tool_output_chars,
-            created_at=config.created_at,
-        )
         client = FakeClient()
         provider = OpenAIProvider(client=client)
 
         events = [
             event
             async for event in provider.stream(
-                [
-                    ModelMessage(role=ModelRole.USER, content="read README"),
-                    ModelMessage(
-                        type=ModelMessageType.FUNCTION_CALL,
-                        role=ModelRole.ASSISTANT,
-                        content='{"path": "README.md"}',
-                        name="read_file",
-                        tool_call_id="call_read",
-                        arguments={"path": "README.md"},
+                ModelRequest(
+                    model="gpt-test",
+                    messages=(
+                        ModelMessage(role=ModelRole.USER, content="read README"),
+                        ModelMessage(
+                            type=ModelMessageType.TOOL_CALL,
+                            role=ModelRole.ASSISTANT,
+                            name="read_file",
+                            tool_call_id="call_read",
+                            arguments={"path": "README.md"},
+                        ),
+                        ModelMessage(
+                            type=ModelMessageType.TOOL_RESULT,
+                            role=ModelRole.TOOL,
+                            content="README contents",
+                            tool_call_id="call_read",
+                        ),
                     ),
-                    ModelMessage(
-                        type=ModelMessageType.FUNCTION_CALL_OUTPUT,
-                        role=ModelRole.TOOL,
-                        content="README contents",
-                        name="read_file",
-                        tool_call_id="call_read",
-                    ),
-                ],
-                [],
-                context,
+                )
             )
         ]
 
@@ -1490,7 +1466,8 @@ def test_qwen_provider_streams_chat_completion_deltas(tmp_path):
                             {
                                 "delta": {
                                     "content": "stream",
-                                }
+                                },
+                                "finish_reason": "stop",
                             }
                         ],
                         "usage": {
@@ -1526,31 +1503,16 @@ def test_qwen_provider_streams_chat_completion_deltas(tmp_path):
             self.chat = FakeChat()
 
     async def run_test() -> None:
-        config = make_config(tmp_path)
-        context = TurnContext(
-            session_id=config.session_id,
-            turn_id="turn_test",
-            cwd=config.cwd,
-            workspace_roots=config.workspace_roots,
-            model="qwen-plus",
-            model_provider="qwen",
-            approval_policy=config.approval_policy,
-            sandbox_mode=config.sandbox_mode,
-            network_access=config.network_access,
-            available_tools=[],
-            max_tool_calls=config.max_tool_calls,
-            max_tool_output_chars=config.max_tool_output_chars,
-            created_at=config.created_at,
-        )
         client = FakeClient()
         provider = QwenProvider(client=client)
 
         events = [
             event
             async for event in provider.stream(
-                [ModelMessage(role=ModelRole.USER, content="hello")],
-                [],
-                context,
+                ModelRequest(
+                    model="qwen-plus",
+                    messages=(ModelMessage(role=ModelRole.USER, content="hello"),),
+                )
             )
         ]
 
@@ -1595,7 +1557,8 @@ def test_qwen_provider_streams_chat_completion_tool_calls(tmp_path):
                                             },
                                         }
                                     ]
-                                }
+                                },
+                                "finish_reason": "tool_calls",
                             }
                         ]
                     },
@@ -1670,26 +1633,26 @@ def test_qwen_provider_streams_chat_completion_tool_calls(tmp_path):
         events = [
             event
             async for event in provider.stream(
-                [
-                    ModelMessage(role=ModelRole.USER, content="read README"),
-                    ModelMessage(
-                        type=ModelMessageType.FUNCTION_CALL,
-                        role=ModelRole.ASSISTANT,
-                        content='{"path": "README.md"}',
-                        name="read_file",
-                        tool_call_id="call_previous",
-                        arguments={"path": "README.md"},
+                ModelRequest(
+                    model="qwen-plus",
+                    messages=(
+                        ModelMessage(role=ModelRole.USER, content="read README"),
+                        ModelMessage(
+                            type=ModelMessageType.TOOL_CALL,
+                            role=ModelRole.ASSISTANT,
+                            name="read_file",
+                            tool_call_id="call_previous",
+                            arguments={"path": "README.md"},
+                        ),
+                        ModelMessage(
+                            type=ModelMessageType.TOOL_RESULT,
+                            role=ModelRole.TOOL,
+                            content="README contents",
+                            tool_call_id="call_previous",
+                        ),
                     ),
-                    ModelMessage(
-                        type=ModelMessageType.FUNCTION_CALL_OUTPUT,
-                        role=ModelRole.TOOL,
-                        content="README contents",
-                        name="read_file",
-                        tool_call_id="call_previous",
-                    ),
-                ],
-                context.available_tools,
-                context,
+                    tools=tuple(context.available_tools),
+                )
             )
         ]
 
@@ -1737,10 +1700,7 @@ def test_qwen_provider_streams_chat_completion_tool_calls(tmp_path):
     asyncio.run(run_test())
 
 
-def test_openai_and_qwen_share_compatible_provider_base():
-    assert isinstance(OpenAIProvider(client=object()), OpenAICompatibleProvider)
-    assert isinstance(QwenProvider(client=object()), OpenAICompatibleProvider)
-    assert isinstance(DeepSeekProvider(client=object()), OpenAICompatibleProvider)
+def test_responses_and_chat_providers_have_separate_protocol_bases():
     assert not isinstance(QwenProvider(client=object()), OpenAIProvider)
     assert not isinstance(DeepSeekProvider(client=object()), OpenAIProvider)
 
@@ -1752,7 +1712,12 @@ def test_deepseek_provider_streams_chat_completion_deltas(tmp_path):
                 [
                     {"choices": [{"delta": {"content": "deepseek "}}]},
                     {
-                        "choices": [{"delta": {"content": "stream"}}],
+                        "choices": [
+                            {
+                                "delta": {"content": "stream"},
+                                "finish_reason": "stop",
+                            }
+                        ],
                         "usage": {
                             "prompt_tokens": 5,
                             "completion_tokens": 6,
@@ -1786,31 +1751,16 @@ def test_deepseek_provider_streams_chat_completion_deltas(tmp_path):
             self.chat = FakeChat()
 
     async def run_test() -> None:
-        config = make_config(tmp_path)
-        context = TurnContext(
-            session_id=config.session_id,
-            turn_id="turn_test",
-            cwd=config.cwd,
-            workspace_roots=config.workspace_roots,
-            model="deepseek-v4-flash",
-            model_provider="deepseek",
-            approval_policy=config.approval_policy,
-            sandbox_mode=config.sandbox_mode,
-            network_access=config.network_access,
-            available_tools=[],
-            max_tool_calls=config.max_tool_calls,
-            max_tool_output_chars=config.max_tool_output_chars,
-            created_at=config.created_at,
-        )
         client = FakeClient()
         provider = DeepSeekProvider(client=client)
 
         events = [
             event
             async for event in provider.stream(
-                [ModelMessage(role=ModelRole.USER, content="hello")],
-                [],
-                context,
+                ModelRequest(
+                    model="deepseek-v4-flash",
+                    messages=(ModelMessage(role=ModelRole.USER, content="hello"),),
+                )
             )
         ]
 
@@ -1838,16 +1788,16 @@ def test_qwen_provider_requires_dashscope_api_key(monkeypatch):
     monkeypatch.delenv("DASHSCOPE_API_KEY", raising=False)
     provider = QwenProvider()
 
-    with pytest.raises(Exception, match="DASHSCOPE_API_KEY"):
-        provider._default_client()
+    with pytest.raises(LLMConfigError, match="DASHSCOPE_API_KEY"):
+        provider._client()
 
 
 def test_deepseek_provider_requires_deepseek_api_key(monkeypatch):
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
     provider = DeepSeekProvider()
 
-    with pytest.raises(Exception, match="DEEPSEEK_API_KEY"):
-        provider._default_client()
+    with pytest.raises(LLMConfigError, match="DEEPSEEK_API_KEY"):
+        provider._client()
 
 
 def test_session_store_appends_loads_lists_and_resumes(tmp_path):
@@ -2088,8 +2038,8 @@ def test_agent_runtime_creates_thread_and_runs_basic_turn(tmp_path):
         ]
         assert [event.seq for event in snapshot.events] == list(range(1, 8))
         assert snapshot.events[-1].payload["answer"] == "hello runtime"
-        assert provider.calls[0][0][0].role == ModelRole.SYSTEM
-        assert provider.calls[0][0][1].content == "say hello"
+        assert provider.calls[0].messages[0].role == ModelRole.SYSTEM
+        assert provider.calls[0].messages[1].content == "say hello"
 
     asyncio.run(run_test())
 
@@ -2173,7 +2123,9 @@ def test_runtime_resume_reconstructs_conversation_without_replaying_turn(tmp_pat
         assert restored.type == RuntimeEventType.SESSION_RESTORED
         assert len(first_provider.calls) == 1
         assert len(second_provider.calls) == 1
-        assert [message.content for message in second_provider.calls[0][0][1:]] == [
+        assert [
+            message.content for message in second_provider.calls[0].messages[1:]
+        ] == [
             "first",
             "first answer",
             "second",
@@ -2197,6 +2149,7 @@ def test_runtime_resume_reconstructs_tool_call_and_result_history(tmp_path):
                         "arguments": {"path": "note.txt"},
                     },
                 ),
+                ModelEvent(type=ModelEventType.COMPLETED),
                 ModelEvent(
                     type=ModelEventType.MESSAGE_COMPLETED,
                     payload={"text": "first answer"},
@@ -2234,10 +2187,10 @@ def test_runtime_resume_reconstructs_tool_call_and_result_history(tmp_path):
 
         assert len(first_provider.calls) == 2
         assert len(second_provider.calls) == 1
-        messages = second_provider.calls[0][0]
+        messages = second_provider.calls[0].messages
         assert [message.content for message in messages[1:]] == [
             "read note",
-            '{"path":"note.txt"}',
+            None,
             "resume sees tool result",
             "first answer",
             "continue",
@@ -2249,9 +2202,9 @@ def test_runtime_resume_reconstructs_tool_call_and_result_history(tmp_path):
             "assistant",
             "user",
         ]
-        assert messages[2].type == ModelMessageType.FUNCTION_CALL
+        assert messages[2].type == ModelMessageType.TOOL_CALL
         assert messages[2].arguments == {"path": "note.txt"}
-        assert messages[3].type == ModelMessageType.FUNCTION_CALL_OUTPUT
+        assert messages[3].type == ModelMessageType.TOOL_RESULT
 
     asyncio.run(run_test())
 
@@ -2292,7 +2245,7 @@ def test_runtime_injects_system_instructions_before_conversation(tmp_path):
         await thread.submit(SessionInput.user_message("inp_one", "hello"))
         await thread.wait_until_idle()
 
-        messages = provider.calls[0][0]
+        messages = provider.calls[0].messages
         assert messages[0].role == ModelRole.SYSTEM
         assert "<base_instructions>" in messages[0].content
         assert "Project rule: inspect files first." in messages[0].content
@@ -2369,7 +2322,7 @@ def test_runtime_resume_uses_context_compaction_summary(tmp_path):
         await resumed.submit(SessionInput.user_message("inp_two", "new user"))
         await resumed.wait_until_idle()
 
-        messages = provider.calls[0][0]
+        messages = provider.calls[0].messages
         assert "<base_instructions>" in messages[0].content
         assert [message.content for message in messages[1:]] == [
             "old conversation summary",
@@ -2396,6 +2349,7 @@ def test_runtime_allows_final_answer_after_reaching_tool_call_limit(tmp_path):
                         "arguments": {"path": "note.txt"},
                     },
                 ),
+                ModelEvent(type=ModelEventType.COMPLETED),
                 ModelEvent(
                     type=ModelEventType.MESSAGE_COMPLETED,
                     payload={"text": "The file says: tool loop works"},
@@ -2429,14 +2383,14 @@ def test_runtime_allows_final_answer_after_reaching_tool_call_limit(tmp_path):
         assert finished.payload["result"]["success"] is True
         assert finished.payload["result"]["content"] == "tool loop works"
         assert snapshot.events[-1].payload["tool_calls"] == 1
-        messages = provider.calls[1][0]
+        messages = provider.calls[1].messages
         assert [message.content for message in messages[1:]] == [
             "read note",
-            '{"path":"note.txt"}',
+            None,
             "tool loop works",
         ]
-        assert messages[2].type == ModelMessageType.FUNCTION_CALL
-        assert messages[3].type == ModelMessageType.FUNCTION_CALL_OUTPUT
+        assert messages[2].type == ModelMessageType.TOOL_CALL
+        assert messages[3].type == ModelMessageType.TOOL_RESULT
 
     asyncio.run(run_test())
 
@@ -2462,6 +2416,7 @@ def test_runtime_preserves_streamed_assistant_text_before_tool_call(tmp_path):
                         "arguments": {"path": "note.txt"},
                     },
                 ),
+                ModelEvent(type=ModelEventType.COMPLETED),
                 ModelEvent(
                     type=ModelEventType.MESSAGE_COMPLETED,
                     payload={"text": "The file says: tool loop works"},
@@ -2496,11 +2451,11 @@ def test_runtime_preserves_streamed_assistant_text_before_tool_call(tmp_path):
         ]
         assert snapshot.events[5].payload["text"] == "I will read that."
 
-        messages = provider.calls[1][0]
+        messages = provider.calls[1].messages
         assert [message.content for message in messages[1:]] == [
             "read note",
             "I will read that.",
-            '{"path":"note.txt"}',
+            None,
             "tool loop works",
         ]
         assert [message.role.value for message in messages[1:]] == [
@@ -2525,6 +2480,7 @@ def test_runtime_records_failed_unknown_tool(tmp_path):
                         "arguments": {},
                     },
                 ),
+                ModelEvent(type=ModelEventType.COMPLETED),
                 ModelEvent(
                     type=ModelEventType.MESSAGE_COMPLETED,
                     payload={"text": "Missing tool was reported."},
@@ -2551,7 +2507,7 @@ def test_runtime_records_failed_unknown_tool(tmp_path):
         ][0]
         assert finished.payload["result"]["success"] is False
         assert finished.payload["result"]["error"] == "tool_not_found"
-        assert "[tool_error: tool_not_found]" in provider.calls[1][0][-1].content
+        assert "[tool_error: tool_not_found]" in provider.calls[1].messages[-1].content
         assert snapshot.events[-1].type == RuntimeEventType.TURN_FINISHED
 
     asyncio.run(run_test())
@@ -2572,6 +2528,7 @@ def test_runtime_executes_write_file_tool_call(tmp_path):
                         },
                     },
                 ),
+                ModelEvent(type=ModelEventType.COMPLETED),
                 ModelEvent(
                     type=ModelEventType.MESSAGE_COMPLETED,
                     payload={"text": "Wrote generated.txt"},
@@ -2607,7 +2564,7 @@ def test_runtime_executes_write_file_tool_call(tmp_path):
         finished = snapshot.events[5]
         assert finished.payload["result"]["success"] is True
         assert finished.payload["result"]["data"]["status"] == "created"
-        assert provider.calls[1][0][-1].content.startswith("created ")
+        assert provider.calls[1].messages[-1].content.startswith("created ")
 
     asyncio.run(run_test())
 
@@ -2634,6 +2591,7 @@ def test_runtime_emits_patch_applied_event(tmp_path):
                         "arguments": {"patch": patch},
                     },
                 ),
+                ModelEvent(type=ModelEventType.COMPLETED),
                 ModelEvent(
                     type=ModelEventType.MESSAGE_COMPLETED,
                     payload={"text": "Patched note.txt"},
@@ -2684,6 +2642,7 @@ def test_runtime_executes_bash_tool_call(tmp_path):
                         "arguments": {"command": "pwd"},
                     },
                 ),
+                ModelEvent(type=ModelEventType.COMPLETED),
                 ModelEvent(
                     type=ModelEventType.MESSAGE_COMPLETED,
                     payload={"text": "Ran pwd"},
@@ -2727,6 +2686,7 @@ def test_tool_runner_emits_approval_events_and_runs_approved_prompt_command(tmp_
                         "arguments": {"command": "rm missing.txt"},
                     },
                 ),
+                ModelEvent(type=ModelEventType.COMPLETED),
                 ModelEvent(
                     type=ModelEventType.MESSAGE_COMPLETED,
                     payload={"text": "Approval path exercised"},
@@ -2783,6 +2743,7 @@ def test_tool_runner_denies_rejected_workspace_write(tmp_path):
                         "arguments": {"path": "blocked.txt", "content": "nope"},
                     },
                 ),
+                ModelEvent(type=ModelEventType.COMPLETED),
                 ModelEvent(
                     type=ModelEventType.MESSAGE_COMPLETED,
                     payload={"text": "Write was denied"},
@@ -2830,6 +2791,7 @@ def test_thread_approval_decision_allows_pending_tool_call(tmp_path):
                         "arguments": {"path": "approved.txt", "content": "yes"},
                     },
                 ),
+                ModelEvent(type=ModelEventType.COMPLETED),
                 ModelEvent(
                     type=ModelEventType.MESSAGE_COMPLETED,
                     payload={"text": "Write approved"},
@@ -2895,6 +2857,7 @@ def test_thread_approval_decision_denies_pending_tool_call(tmp_path):
                         "arguments": {"path": "denied.txt", "content": "no"},
                     },
                 ),
+                ModelEvent(type=ModelEventType.COMPLETED),
                 ModelEvent(
                     type=ModelEventType.MESSAGE_COMPLETED,
                     payload={"text": "Write denied"},

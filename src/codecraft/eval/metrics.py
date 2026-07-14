@@ -37,7 +37,7 @@ def summarize_events(events: list[RuntimeEvent]) -> dict[str, Any]:
         else:
             token_usage["total_tokens"] += sum(
                 _non_negative_int(event.payload.get(field))
-                for field in ("input_tokens", "output_tokens", "reasoning_tokens")
+                for field in ("input_tokens", "output_tokens")
             )
 
     return {

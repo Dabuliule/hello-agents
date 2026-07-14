@@ -105,6 +105,15 @@ class SessionConfig(BaseModel):
             raise ValueError("model_api_key_env must be an environment variable name")
         return value
 
+    @field_validator("model_provider")
+    @classmethod
+    def normalize_model_provider(cls, value: str) -> str:
+        """Provider 名称属于程序标识符，统一使用无空白的小写形式。"""
+        normalized = value.strip().lower()
+        if not normalized:
+            raise ValueError("model_provider must not be empty")
+        return normalized
+
     @field_validator("sandbox_env_allowlist")
     @classmethod
     def validate_sandbox_env_names(cls, values: list[str]) -> list[str]:

@@ -1,41 +1,69 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 
-from codecraft.core.turn_context import TurnContext
-from codecraft.llm.base import LLMProvider
+from codecraft.llm.base import LLMProtocolError, LLMProvider, ModelRequest
 from codecraft.llm.events import ModelEvent, ModelEventType
-from codecraft.llm.messages import ModelMessage
-from codecraft.schema.tool import ToolSpec
 
 
 class MockProvider(LLMProvider):
+    """按模型调用边界返回预设事件的严格测试 Provider。
+
+    ``script`` 使用显式 ``COMPLETED`` 划分每次调用。初始化时会先切分并校验
+    所有响应；Mock 不补终止事件，避免测试脚本掩盖运行时或协议错误。
+    """
+
     name = "mock"
 
-    def __init__(self, script: list[ModelEvent] | None = None) -> None:
-        self.script = list(script or [])
-        self.calls: list[tuple[list[ModelMessage], list[ToolSpec], TurnContext]] = []
+    def __init__(
+        self,
+        script: list[ModelEvent] | None = None,
+    ) -> None:
+        self._responses = self._partition(script or [])
+        self.calls: list[ModelRequest] = []
+        self._lock = asyncio.Lock()
 
     async def stream(
         self,
-        messages: list[ModelMessage],
-        tools: list[ToolSpec],
-        context: TurnContext,
+        request: ModelRequest,
     ) -> AsyncIterator[ModelEvent]:
-        self.calls.append((messages, tools, context))
-        tool_call_seen = False
-        while self.script:
-            next_event = self.script[0]
-            if tool_call_seen and next_event.type not in {
-                ModelEventType.TOOL_CALL,
-                ModelEventType.COMPLETED,
-            }:
-                yield ModelEvent(type=ModelEventType.COMPLETED)
-                return
+        async with self._lock:
+            if not self._responses:
+                raise LLMProtocolError("mock provider has no response for this call")
+            response = self._responses.pop(0)
+            self.calls.append(request.model_copy(deep=True))
 
-            event = self.script.pop(0)
+        for event in response:
             yield event
-            if event.type == ModelEventType.TOOL_CALL:
-                tool_call_seen = True
+
+    @staticmethod
+    def _partition(script: list[ModelEvent]) -> list[tuple[ModelEvent, ...]]:
+        responses: list[tuple[ModelEvent, ...]] = []
+        pending: list[ModelEvent] = []
+        for event in script:
+            pending.append(event)
             if event.type == ModelEventType.COMPLETED:
-                return
+                response = tuple(pending)
+                MockProvider._validate_response(response)
+                responses.append(response)
+                pending = []
+        if pending:
+            raise ValueError("mock script ended without completed")
+        return responses
+
+    @staticmethod
+    def _validate_response(response: tuple[ModelEvent, ...]) -> None:
+        if not response or response[-1].type != ModelEventType.COMPLETED:
+            raise ValueError("each mock response must end with completed")
+        if sum(event.type == ModelEventType.COMPLETED for event in response) != 1:
+            raise ValueError("each mock response must contain one completed event")
+
+        event_types = {event.type for event in response}
+        if {
+            ModelEventType.MESSAGE_DELTA,
+            ModelEventType.MESSAGE_COMPLETED,
+        } <= event_types:
+            raise ValueError(
+                "a mock response cannot mix message deltas and a completed message"
+            )

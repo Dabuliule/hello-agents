@@ -14,17 +14,18 @@ class ModelEventType(StrEnum):
     TOOL_CALL = "tool_call"
     TOKEN_COUNT = "token_count"
     COMPLETED = "completed"
-    ERROR = "error"
 
 
 class ModelTextPayload(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
     text: str = Field(min_length=1)
 
 
 class ModelTokenCountPayload(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    """一次模型调用的 Token 用量，reasoning 是 output 的子集。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
     input_tokens: int = Field(default=0, ge=0)
     output_tokens: int = Field(default=0, ge=0)
@@ -32,28 +33,47 @@ class ModelTokenCountPayload(BaseModel):
     cached_input_tokens: int = Field(default=0, ge=0)
     total_tokens: int = Field(default=0, ge=0)
 
+    @model_validator(mode="before")
+    @classmethod
+    def fill_total_tokens(cls, value: Any) -> Any:
+        if isinstance(value, dict) and "total_tokens" not in value:
+            normalized = dict(value)
+            input_tokens = normalized.get("input_tokens", 0)
+            output_tokens = normalized.get("output_tokens", 0)
+            if (
+                isinstance(input_tokens, int)
+                and not isinstance(input_tokens, bool)
+                and isinstance(output_tokens, int)
+                and not isinstance(output_tokens, bool)
+            ):
+                normalized["total_tokens"] = input_tokens + output_tokens
+            return normalized
+        return value
 
-class ModelErrorPayload(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    message: str = Field(min_length=1)
+    @model_validator(mode="after")
+    def validate_total_tokens(self) -> ModelTokenCountPayload:
+        if self.total_tokens != self.input_tokens + self.output_tokens:
+            raise ValueError("total_tokens must equal input_tokens + output_tokens")
+        return self
 
 
 class ModelCompletedPayload(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
 
 ModelEventPayload = (
-    ModelTextPayload
-    | ModelTokenCountPayload
-    | ModelErrorPayload
-    | ModelCompletedPayload
-    | ToolCall
+    ModelTextPayload | ModelTokenCountPayload | ModelCompletedPayload | ToolCall
 )
 
 
 class ModelEvent(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    """Provider 向运行时暴露的统一成功事件。
+
+    事件只表达模型输出数据和成功终止；调用失败通过 ``LLMProviderError``
+    或 ``LLMProtocolError`` 表达。一次成功响应必须以 ``COMPLETED`` 结束。
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
     type: ModelEventType
     payload: ModelEventPayload = Field(default_factory=ModelCompletedPayload)
@@ -75,8 +95,6 @@ class ModelEvent(BaseModel):
             payload_type = ToolCall
         elif event_type == ModelEventType.TOKEN_COUNT:
             payload_type = ModelTokenCountPayload
-        elif event_type == ModelEventType.ERROR:
-            payload_type = ModelErrorPayload
         else:
             payload_type = ModelCompletedPayload
 

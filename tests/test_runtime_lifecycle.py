@@ -9,7 +9,6 @@ from codecraft.core.turn import TurnStatus
 from codecraft.core.event_bus import EventBus
 from codecraft.core.runtime import AgentRuntime
 from codecraft.core.session_store import SessionStore
-from codecraft.core.turn_context import TurnContext
 from codecraft.llm import (
     LLMProvider,
     LLMProviderError,
@@ -17,13 +16,12 @@ from codecraft.llm import (
     MockProvider,
     ModelEvent,
     ModelEventType,
-    ModelMessage,
+    ModelRequest,
     QwenProvider,
 )
 from codecraft.schema.event import RuntimeEventType
 from codecraft.schema.input import SessionInput
 from codecraft.schema.session import SessionConfig, SessionSource
-from codecraft.schema.tool import ToolSpec
 from codecraft.tool import ReadFileTool, ToolRegistry
 
 
@@ -51,9 +49,7 @@ class BlockingThenCompleteProvider(LLMProvider):
 
     async def stream(
         self,
-        messages: list[ModelMessage],
-        tools: list[ToolSpec],
-        context: TurnContext,
+        request: ModelRequest,
     ) -> AsyncIterator[ModelEvent]:
         self.call_count += 1
         if self.call_count == 1:
@@ -255,7 +251,7 @@ def test_runtime_executes_all_tool_calls_from_one_model_response(tmp_path):
             RuntimeEventType.MODEL_TOOL_CALL,
         ]
 
-        chat_messages = QwenProvider._messages_to_chat(provider.calls[1][0])
+        chat_messages = QwenProvider._messages_to_chat(provider.calls[1].messages)
         assistant_batch = next(
             message for message in chat_messages if message.get("tool_calls")
         )
@@ -334,11 +330,18 @@ def test_runtime_rejects_over_budget_tool_batch_without_partial_execution(tmp_pa
     ],
 )
 def test_runtime_rejects_incomplete_or_empty_model_responses(tmp_path, script):
+    class IncompleteProvider(LLMProvider):
+        name = "mock"
+
+        async def stream(self, request):
+            for event in script:
+                yield event
+
     async def run_test() -> None:
         config = make_config(tmp_path)
         runtime = AgentRuntime(
             session_store=SessionStore(config.codecraft_home),
-            llm_providers=LLMProviderRegistry([MockProvider(script)]),
+            llm_providers=LLMProviderRegistry([IncompleteProvider()]),
             tool_registry=ToolRegistry(),
         )
         thread = await runtime.create_thread(config)
@@ -360,7 +363,7 @@ def test_runtime_classifies_provider_exceptions_as_model_errors(tmp_path):
     class FailingProvider(LLMProvider):
         name = "failing"
 
-        async def stream(self, messages, tools, context):
+        async def stream(self, request):
             if False:
                 yield
             raise LLMProviderError("provider unavailable")

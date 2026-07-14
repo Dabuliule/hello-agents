@@ -26,6 +26,7 @@ class ConversationItem(BaseModel):
     content: str
     tool_call_id: str | None = None
     name: str | None = None
+    arguments: dict[str, Any] | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
@@ -69,21 +70,16 @@ class Conversation(BaseModel):
     ) -> ConversationItem:
         """记录 assistant 发起的 tool call。
 
-        content 保存稳定的 JSON 字符串，metadata 保存结构化 arguments，方便
-        后续适配 Responses API 和 Chat Completions API。
+        参数只保存为结构化数据，具体 JSON 形态由 Provider 适配器决定。
         """
         item = ConversationItem(
             item_id=new_id("item_"),
             role=ConversationRole.ASSISTANT,
-            content=json.dumps(
-                arguments, ensure_ascii=False, separators=(",", ":"), sort_keys=True
-            ),
+            content="",
             tool_call_id=tool_call_id,
             name=name,
-            metadata={
-                "type": ModelMessageType.FUNCTION_CALL.value,
-                "arguments": arguments,
-            },
+            arguments=arguments,
+            metadata={"type": ModelMessageType.TOOL_CALL.value},
         )
         self.append(item)
         return item
@@ -127,27 +123,30 @@ class Conversation(BaseModel):
             if role is None:
                 continue
 
-            message_type = ModelMessageType(
-                item.metadata.get("type", ModelMessageType.MESSAGE)
-            )
-            arguments = item.metadata.get("arguments")
-            if not isinstance(arguments, dict):
-                arguments = None
-
             if item.role == ConversationRole.TOOL:
-                message_type = ModelMessageType.FUNCTION_CALL_OUTPUT
-
-            messages.append(
-                ModelMessage(
-                    type=message_type,
-                    role=role,
-                    content=item.content,
-                    name=item.name,
-                    tool_call_id=item.tool_call_id,
-                    arguments=arguments,
-                    metadata=item.metadata,
+                messages.append(
+                    ModelMessage(
+                        type=ModelMessageType.TOOL_RESULT,
+                        role=role,
+                        content=item.content,
+                        tool_call_id=item.tool_call_id,
+                    )
                 )
-            )
+                continue
+
+            if item.metadata.get("type") == ModelMessageType.TOOL_CALL.value:
+                messages.append(
+                    ModelMessage(
+                        type=ModelMessageType.TOOL_CALL,
+                        role=role,
+                        name=item.name,
+                        tool_call_id=item.tool_call_id,
+                        arguments=item.arguments,
+                    )
+                )
+                continue
+
+            messages.append(ModelMessage(role=role, content=item.content))
 
         return messages
 
@@ -250,7 +249,7 @@ class Conversation(BaseModel):
     def _summarize(items: list[ConversationItem]) -> str:
         lines = ["Earlier conversation summary:"]
         for item in items:
-            if item.metadata.get("type") == ModelMessageType.FUNCTION_CALL.value:
+            if item.metadata.get("type") == ModelMessageType.TOOL_CALL.value:
                 detail = f"requested tool {item.name or 'unknown'}"
             else:
                 detail = " ".join(item.content.split())

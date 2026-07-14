@@ -30,7 +30,7 @@ class ToolSpec(BaseModel):
 class ToolCall(BaseModel):
     """模型请求执行某个 tool 时的结构化调用。"""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
     call_id: str = Field(min_length=1)
     name: str = Field(min_length=1)

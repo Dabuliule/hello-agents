@@ -78,7 +78,7 @@ def test_eval_metrics_derive_tokens_and_classify_failures():
         "output_tokens": 2,
         "reasoning_tokens": 1,
         "cached_input_tokens": 3,
-        "total_tokens": 10,
+        "total_tokens": 9,
     }
     assert percentile([40, 10, 30, 20], 50) == 20
     assert percentile([40, 10, 30, 20], 95) == 40
@@ -123,7 +123,7 @@ def test_eval_command_runs_task_and_writes_reports(tmp_path, monkeypatch):
                     "output_tokens": 2,
                     "reasoning_tokens": 1,
                     "cached_input_tokens": 1,
-                    "total_tokens": 13,
+                    "total_tokens": 12,
                 },
             ),
             ModelEvent(
@@ -137,6 +137,7 @@ def test_eval_command_runs_task_and_writes_reports(tmp_path, monkeypatch):
                     },
                 },
             ),
+            ModelEvent(type=ModelEventType.COMPLETED),
             ModelEvent(
                 type=ModelEventType.TOKEN_COUNT,
                 payload={
@@ -159,7 +160,7 @@ def test_eval_command_runs_task_and_writes_reports(tmp_path, monkeypatch):
                     "output_tokens": 2,
                     "reasoning_tokens": 1,
                     "cached_input_tokens": 1,
-                    "total_tokens": 13,
+                    "total_tokens": 12,
                 },
             ),
             ModelEvent(
@@ -173,6 +174,7 @@ def test_eval_command_runs_task_and_writes_reports(tmp_path, monkeypatch):
                     },
                 },
             ),
+            ModelEvent(type=ModelEventType.COMPLETED),
             ModelEvent(
                 type=ModelEventType.TOKEN_COUNT,
                 payload={
@@ -239,7 +241,7 @@ def test_eval_command_runs_task_and_writes_reports(tmp_path, monkeypatch):
         "output_tokens": 10,
         "reasoning_tokens": 2,
         "cached_input_tokens": 6,
-        "total_tokens": 72,
+        "total_tokens": 70,
     }
     assert metrics["failure_counts"] == {}
     assert metrics["duration_p50_ms"] >= 0
@@ -247,14 +249,14 @@ def test_eval_command_runs_task_and_writes_reports(tmp_path, monkeypatch):
     assert report["tasks"][0]["attempt_count"] == 2
     assert report["tasks"][0]["passed_count"] == 2
     assert report["tasks"][0]["success_rate"] == 100.0
-    assert report["tasks"][0]["total_tokens"] == 72
+    assert report["tasks"][0]["total_tokens"] == 70
     assert [task_result["attempt"] for task_result in report["results"]] == [1, 2]
     for task_result in report["results"]:
         assert task_result["task_id"] == "create-welcome-file"
         assert task_result["status"] == "passed"
         assert task_result["final_status"] == "success"
         assert task_result["failure_type"] is None
-        assert task_result["token_usage"]["total_tokens"] == 36
+        assert task_result["token_usage"]["total_tokens"] == 35
         assert all(check["passed"] for check in task_result["checks"])
         assert (output_dir / task_result["trace_json"]).is_file()
     session_configs = [

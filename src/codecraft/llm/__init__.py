@@ -3,13 +3,13 @@ from codecraft.llm.base import (
     LLMProtocolError,
     LLMProvider,
     LLMProviderError,
+    ModelRequest,
 )
 from codecraft.llm.events import ModelEvent, ModelEventType
 from codecraft.llm.messages import ModelMessage, ModelMessageType, ModelRole
 from codecraft.llm.providers import (
     DeepSeekProvider,
     MockProvider,
-    OpenAICompatibleProvider,
     OpenAIProvider,
     QwenProvider,
 )
@@ -27,8 +27,8 @@ __all__ = [
     "ModelMessage",
     "ModelMessageType",
     "ModelRole",
+    "ModelRequest",
     "MockProvider",
-    "OpenAICompatibleProvider",
     "OpenAIProvider",
     "QwenProvider",
 ]

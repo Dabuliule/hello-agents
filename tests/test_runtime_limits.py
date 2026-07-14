@@ -18,7 +18,7 @@ from codecraft.llm import (
     MockProvider,
     ModelEvent,
     ModelEventType,
-    ModelMessage,
+    ModelRequest,
 )
 from codecraft.schema.event import RuntimeEventType
 from codecraft.schema.input import SessionInput
@@ -28,7 +28,6 @@ from codecraft.schema.tool import (
     ToolEffect,
     ToolResult,
     ToolRuntimeEvent,
-    ToolSpec,
 )
 from codecraft.tool import BaseTool, ToolContext, ToolRegistry
 from codecraft.tool.runner import ToolRunner
@@ -140,8 +139,8 @@ def test_runtime_compacts_context_and_reconstructs_exact_snapshot(tmp_path):
         assert (
             compacted[0].payload["after_chars"] < compacted[0].payload["before_chars"]
         )
-        assert provider.calls[1][0][1].role.value == "system"
-        assert provider.calls[1][0][-1].content == "new question"
+        assert provider.calls[1].messages[1].role.value == "system"
+        assert provider.calls[1].messages[-1].content == "new question"
         reconstructed = reconstruct_conversation(snapshot.events)
         assert (
             reconstructed.build_model_messages()
@@ -217,7 +216,7 @@ def test_read_only_tool_batch_runs_concurrently_and_preserves_result_order(tmp_p
         assert tool.max_active == 2
         tool_messages = [
             message.content
-            for message in provider.calls[1][0]
+            for message in provider.calls[1].messages
             if message.role.value == "tool"
         ]
         assert tool_messages == ["first", "second"]
@@ -320,9 +319,7 @@ class HangingProvider(LLMProvider):
 
     async def stream(
         self,
-        messages: list[ModelMessage],
-        tools: list[ToolSpec],
-        context: TurnContext,
+        request: ModelRequest,
     ) -> AsyncIterator[ModelEvent]:
         await asyncio.sleep(2)
         if False:
@@ -334,9 +331,7 @@ class RaisesTimeoutProvider(HangingProvider):
 
     async def stream(
         self,
-        messages: list[ModelMessage],
-        tools: list[ToolSpec],
-        context: TurnContext,
+        request: ModelRequest,
     ) -> AsyncIterator[ModelEvent]:
         raise TimeoutError("provider-owned timeout")
         if False:

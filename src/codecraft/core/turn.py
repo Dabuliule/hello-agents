@@ -11,8 +11,8 @@ from codecraft.core.conversation import Conversation
 from codecraft.core.errors import CodecraftError
 from codecraft.core.turn_context import TurnContext
 from codecraft.llm.base import LLMProtocolError
+from codecraft.llm.base import ModelRequest
 from codecraft.llm.events import (
-    ModelErrorPayload,
     ModelEventType,
     ModelTextPayload,
     ModelTokenCountPayload,
@@ -91,11 +91,12 @@ class Turn:
             if model_messages is None:
                 return
 
-            async for model_event in self.session.llm_provider.stream(
-                model_messages,
-                self.context.available_tools,
-                self.context,
-            ):
+            request = ModelRequest(
+                model=self.context.model,
+                messages=tuple(model_messages),
+                tools=tuple(self.context.available_tools),
+            )
+            async for model_event in self.session.llm_provider.stream(request):
                 if model_event.type == ModelEventType.MESSAGE_DELTA:
                     if not isinstance(model_event.payload, ModelTextPayload):
                         raise LLMProtocolError("message delta has an invalid payload")
@@ -143,20 +144,6 @@ class Turn:
                     if not isinstance(model_event.payload, ToolCall):
                         raise LLMProtocolError("tool call has an invalid payload")
                     tool_calls.append(model_event.payload)
-
-                elif model_event.type == ModelEventType.ERROR:
-                    if not isinstance(model_event.payload, ModelErrorPayload):
-                        raise LLMProtocolError("model error has an invalid payload")
-                    await self.session.emit(
-                        RuntimeEventType.ERROR,
-                        {
-                            "code": "model_error",
-                            "message": model_event.payload.message,
-                        },
-                        turn_id=self.turn_id,
-                    )
-                    await self.abort("model_error", model_event.payload.message)
-                    return
 
                 elif model_event.type == ModelEventType.COMPLETED:
                     response_completed = True

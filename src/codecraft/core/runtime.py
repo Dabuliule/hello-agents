@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+import asyncio
 from pathlib import Path
 
 from codecraft.approval.manager import ApprovalManager
@@ -38,12 +39,13 @@ class AgentRuntime:
 
     async def create_thread(self, config: SessionConfig) -> AgentThread:
         """创建新 session，并返回可消费事件的 AgentThread。"""
+        llm_provider = self.llm_providers.get(config.model_provider)
         await self.tool_registry.start()
         await self.session_store.create_session(config)
         session = Session(
             config=config,
             session_store=self.session_store,
-            llm_provider=self.llm_providers.get(config.model_provider),
+            llm_provider=llm_provider,
             tool_registry=self.tool_registry,
             approval_manager=self.approval_manager,
             event_bus=self.event_bus,
@@ -58,14 +60,15 @@ class AgentRuntime:
 
     async def resume_thread(self, session_id: str) -> AgentThread:
         """根据 session 日志恢复 thread，并重建模型 conversation。"""
-        await self.tool_registry.start()
         snapshot = await self.session_store.resume(session_id)
+        llm_provider = self.llm_providers.get(snapshot.config.model_provider)
+        await self.tool_registry.start()
         conversation = reconstruct_conversation(snapshot.events)
 
         session = Session(
             config=snapshot.config,
             session_store=self.session_store,
-            llm_provider=self.llm_providers.get(snapshot.config.model_provider),
+            llm_provider=llm_provider,
             tool_registry=self.tool_registry,
             approval_manager=self.approval_manager,
             event_bus=self.event_bus,
@@ -85,4 +88,14 @@ class AgentRuntime:
         return await self.session_store.list_sessions(cwd=cwd)
 
     async def close(self) -> None:
-        await self.tool_registry.close()
+        """关闭模型和工具资源，并保证两边都获得清理机会。"""
+        results = await asyncio.gather(
+            self.llm_providers.close(),
+            self.tool_registry.close(),
+            return_exceptions=True,
+        )
+        errors = [result for result in results if isinstance(result, BaseException)]
+        if errors:
+            raise RuntimeError(
+                f"failed to close {len(errors)} runtime resource group(s)"
+            ) from errors[0]
