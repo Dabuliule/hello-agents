@@ -327,6 +327,11 @@ def _chat_tool_calls(message: Any) -> list[ToolCall]:
 
 
 def _set_tool_part(part: dict[str, Any], field: str, value: Any) -> None:
+    """合并流式身份字段；兼容 DashScope 在续传 chunk 中发送空占位值。"""
+    if value == "":
+        return
+    if not isinstance(value, str):
+        raise LLMProtocolError(f"streamed tool call {field} must be text")
     previous = part[field]
     if previous is not None and previous != value:
         raise LLMProtocolError(f"streamed tool call changed its {field}")

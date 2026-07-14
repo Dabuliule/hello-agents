@@ -273,6 +273,118 @@ def test_chat_stream_ignores_empty_role_chunk():
     ]
 
 
+def test_chat_stream_ignores_empty_tool_identity_placeholders():
+    provider = QwenProvider(
+        client=FakeChatClient(
+            AsyncEvents(
+                [
+                    {
+                        "choices": [
+                            {
+                                "index": 0,
+                                "delta": {
+                                    "tool_calls": [
+                                        {
+                                            "index": 0,
+                                            "id": "call_list",
+                                            "function": {
+                                                "name": "list_directory",
+                                                "arguments": "",
+                                            },
+                                        }
+                                    ]
+                                },
+                            }
+                        ]
+                    },
+                    {
+                        "choices": [
+                            {
+                                "index": 0,
+                                "delta": {
+                                    "tool_calls": [
+                                        {
+                                            "index": 0,
+                                            "id": "",
+                                            "function": {
+                                                "name": "",
+                                                "arguments": '{"path":"."}',
+                                            },
+                                        }
+                                    ]
+                                },
+                                "finish_reason": "tool_calls",
+                            }
+                        ]
+                    },
+                ]
+            )
+        )
+    )
+
+    events = asyncio.run(collect(provider))
+
+    assert [event.type for event in events] == [
+        ModelEventType.TOOL_CALL,
+        ModelEventType.COMPLETED,
+    ]
+    assert events[0].payload.model_dump(mode="json") == {
+        "call_id": "call_list",
+        "name": "list_directory",
+        "arguments": {"path": "."},
+    }
+
+
+def test_chat_stream_rejects_conflicting_non_empty_tool_identity():
+    provider = QwenProvider(
+        client=FakeChatClient(
+            AsyncEvents(
+                [
+                    {
+                        "choices": [
+                            {
+                                "index": 0,
+                                "delta": {
+                                    "tool_calls": [
+                                        {
+                                            "index": 0,
+                                            "id": "call_first",
+                                            "function": {
+                                                "name": "read_file",
+                                                "arguments": "{}",
+                                            },
+                                        }
+                                    ]
+                                },
+                            }
+                        ]
+                    },
+                    {
+                        "choices": [
+                            {
+                                "index": 0,
+                                "delta": {
+                                    "tool_calls": [
+                                        {
+                                            "index": 0,
+                                            "id": "call_second",
+                                            "function": {},
+                                        }
+                                    ]
+                                },
+                                "finish_reason": "tool_calls",
+                            }
+                        ]
+                    },
+                ]
+            )
+        )
+    )
+
+    with pytest.raises(LLMProtocolError, match="changed its call_id"):
+        asyncio.run(collect(provider))
+
+
 def test_provider_wraps_errors_raised_during_stream_iteration():
     provider = QwenProvider(
         client=FakeChatClient(AsyncEvents([], OSError("connection reset")))
