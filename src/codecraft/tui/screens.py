@@ -14,6 +14,7 @@ from textual.screen import ModalScreen
 from textual.widgets import Button, DataTable, Label, Static
 
 from codecraft.schema.session import SessionSummary
+from codecraft.tui.theme import palette_for
 
 
 class SessionBrowserScreen(ModalScreen[str | None]):
@@ -100,7 +101,10 @@ class TraceScreen(ModalScreen[None]):
                     compact=True,
                     flat=True,
                 )
-            yield Static(_trace_metrics(self.report), id="trace-metrics")
+            yield Static(
+                _trace_metrics(self.report, dark=self.app.current_theme.dark),
+                id="trace-metrics",
+            )
             yield DataTable(
                 id="trace-events",
                 cursor_type="row",
@@ -160,32 +164,33 @@ class TraceScreen(ModalScreen[None]):
             Syntax(
                 serialized,
                 "json",
-                theme="ansi_dark",
+                theme="ansi_dark" if self.app.current_theme.dark else "ansi_light",
                 word_wrap=True,
                 background_color="default",
             )
         )
 
 
-def _trace_metrics(report: dict[str, Any]) -> Table:
+def _trace_metrics(report: dict[str, Any], *, dark: bool) -> Table:
+    palette = palette_for(dark)
     metrics = report.get("metrics", {})
     table = Table.grid(padding=(0, 1), expand=True)
     for _ in range(6):
         table.add_column(ratio=1)
     table.add_row(
-        Text("events", style="#8f98a3"),
+        Text("events", style=palette.muted),
         str(metrics.get("event_count", 0)),
-        Text("turns", style="#8f98a3"),
+        Text("turns", style=palette.muted),
         str(metrics.get("turn_count", 0)),
-        Text("tools", style="#8f98a3"),
+        Text("tools", style=palette.muted),
         str(metrics.get("tool_call_count", 0)),
     )
     table.add_row(
-        Text("failures", style="#8f98a3"),
+        Text("failures", style=palette.muted),
         str(metrics.get("tool_failure_count", 0)),
-        Text("approvals", style="#8f98a3"),
+        Text("approvals", style=palette.muted),
         str(metrics.get("approval_count", 0)),
-        Text("status", style="#8f98a3"),
+        Text("status", style=palette.muted),
         str(metrics.get("final_status", "unknown")),
     )
     return table

@@ -28,6 +28,7 @@ from codecraft.tui import (
     CodeCraftTUI,
     MessageBlock,
     SessionBrowserScreen,
+    TUIColorScheme,
     TraceScreen,
 )
 from codecraft.tui.commands import (
@@ -290,33 +291,63 @@ def test_tui_composer_menu_layout_does_not_overlap_at_narrow_or_wide_sizes(
     tmp_path,
 ):
     async def run_test() -> None:
+        appearances = (
+            (TUIColorScheme.LIGHT, "codecraft-light", "#EEF0F2", "#FFFFFF"),
+            (TUIColorScheme.DARK, "codecraft-dark", "#0E0F11", "#16181B"),
+        )
         for width, height in ((60, 24), (120, 40)):
-            config = _config(tmp_path).model_copy(
-                update={"session_id": f"ses_menu_{width}"}
-            )
-            runtime = AgentRuntime(
-                session_store=SessionStore(config.codecraft_home),
-                llm_providers=LLMProviderRegistry([MockProvider()]),
-                tool_registry=ToolRegistry(),
-            )
-            tui = CodeCraftTUI(config, runtime, browse_sessions=False)
+            for scheme, theme_name, background, surface in appearances:
+                await assert_layout(
+                    width,
+                    height,
+                    scheme,
+                    theme_name,
+                    background,
+                    surface,
+                )
 
-            async with tui.run_test(size=(width, height)) as pilot:
-                await _wait_until(pilot, lambda: tui.turn_status == "idle")
-                prompt = tui.query_one("#prompt")
-                prompt.value = "/"
-                await pilot.pause()
+    async def assert_layout(
+        width: int,
+        height: int,
+        scheme: TUIColorScheme,
+        theme_name: str,
+        background: str,
+        surface: str,
+    ) -> None:
+        config = _config(tmp_path).model_copy(
+            update={"session_id": f"ses_menu_{width}_{scheme}"}
+        )
+        runtime = AgentRuntime(
+            session_store=SessionStore(config.codecraft_home),
+            llm_providers=LLMProviderRegistry([MockProvider()]),
+            tool_registry=ToolRegistry(),
+        )
+        tui = CodeCraftTUI(
+            config,
+            runtime,
+            browse_sessions=False,
+            color_scheme=scheme,
+        )
 
-                conversation = tui.query_one("#conversation-pane")
-                composer_frame = tui.query_one("#composer-frame")
-                menu = tui.query_one("#composer-menu")
-                prompt_shell = tui.query_one("#prompt-shell")
-                status = tui.query_one("#runtime-status")
+        async with tui.run_test(size=(width, height)) as pilot:
+            await _wait_until(pilot, lambda: tui.turn_status == "idle")
+            assert tui.theme == theme_name
+            assert tui.screen.styles.background.hex == background
+            assert tui.query_one("#prompt-shell").styles.background.hex == surface
+            prompt = tui.query_one("#prompt")
+            prompt.value = "/"
+            await pilot.pause()
 
-                assert conversation.region.bottom <= composer_frame.region.y
-                assert menu.region.bottom <= prompt_shell.region.y
-                assert prompt_shell.region.bottom <= status.region.y
-                assert status.region.bottom <= height
+            conversation = tui.query_one("#conversation-pane")
+            composer_frame = tui.query_one("#composer-frame")
+            menu = tui.query_one("#composer-menu")
+            prompt_shell = tui.query_one("#prompt-shell")
+            status = tui.query_one("#runtime-status")
+
+            assert conversation.region.bottom <= composer_frame.region.y
+            assert menu.region.bottom <= prompt_shell.region.y
+            assert prompt_shell.region.bottom <= status.region.y
+            assert status.region.bottom <= height
 
     asyncio.run(run_test())
 

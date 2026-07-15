@@ -8,7 +8,7 @@ import typer
 from codecraft.approval.policy import ApprovalPolicy
 from codecraft.cli.options import CodecraftHomeOption
 from codecraft.schema.session import SessionSource
-from codecraft.tui import CodeCraftTUI
+from codecraft.tui import CodeCraftTUI, TUIThemeMode, resolve_color_scheme
 
 
 def register_root_command(app: typer.Typer) -> None:
@@ -53,6 +53,14 @@ def register_root_command(app: typer.Typer) -> None:
                 help="Resume the latest session for the current working directory.",
             ),
         ] = False,
+        theme: Annotated[
+            TUIThemeMode,
+            typer.Option(
+                "--theme",
+                envvar="CODECRAFT_THEME",
+                help="TUI theme: auto, light, or dark.",
+            ),
+        ] = TUIThemeMode.AUTO,
     ) -> None:
         if context.invoked_subcommand is not None:
             return
@@ -78,4 +86,5 @@ def register_root_command(app: typer.Typer) -> None:
             runtime_factory=cli_app._build_runtime,
             resume_session_id=resume,
             resume_last=last,
+            color_scheme=resolve_color_scheme(theme),
         ).run()

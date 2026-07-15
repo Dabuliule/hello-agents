@@ -28,6 +28,13 @@ from codecraft.tui.commands import (
 )
 from codecraft.tui.composer import ComposerMenu
 from codecraft.tui.screens import SessionBrowserScreen, TraceScreen
+from codecraft.tui.theme import (
+    CODECRAFT_THEMES,
+    CODECRAFT_THEME_VARIABLE_DEFAULTS,
+    TUIColorScheme,
+    palette_for,
+    textual_theme_name,
+)
 from codecraft.tui.widgets import (
     ActivityBlock,
     MessageBlock,
@@ -60,8 +67,12 @@ class CodeCraftTUI(App[None]):
         resume_session_id: str | None = None,
         resume_last: bool = False,
         browse_sessions: bool = True,
+        color_scheme: TUIColorScheme = TUIColorScheme.LIGHT,
     ) -> None:
         super().__init__()
+        for theme in CODECRAFT_THEMES:
+            self.register_theme(theme)
+        self.theme = textual_theme_name(color_scheme)
         self.config = config
         self.runtime = runtime
         self.runtime_factory = runtime_factory
@@ -81,6 +92,12 @@ class CodeCraftTUI(App[None]):
         self._approval_result: asyncio.Future[bool] | None = None
         self._last_error_turn_id: str | None = None
         self._closed = False
+
+    def get_theme_variable_defaults(self) -> dict[str, str]:
+        return {
+            **super().get_theme_variable_defaults(),
+            **CODECRAFT_THEME_VARIABLE_DEFAULTS,
+        }
 
     def compose(self) -> ComposeResult:
         with Vertical(id="app-shell"):
@@ -526,10 +543,11 @@ class CodeCraftTUI(App[None]):
         if self._approval_result is not None:
             raise RuntimeError("another approval decision is already active")
 
-        title = Text("Approval required", style="bold #f1f3f5")
+        palette = palette_for(self.current_theme.dark)
+        title = Text("Approval required", style=f"bold {palette.strong}")
         tool_name = str(payload.get("tool_name") or "tool")
-        title.append("  ·  ", style="#4f555d")
-        title.append(tool_name, style="#d8b56d")
+        title.append("  ·  ", style=palette.separator)
+        title.append(tool_name, style=palette.warning)
         reason = str(payload.get("reason") or payload.get("risk") or "")
 
         self.query_one("#approval-inline-title", Static).update(title)

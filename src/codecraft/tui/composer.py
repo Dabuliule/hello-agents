@@ -14,6 +14,7 @@ from codecraft.tui.commands import (
     parse_composer_menu,
     skill_choices,
 )
+from codecraft.tui.theme import palette_for
 
 
 class ComposerMenu(Vertical):
@@ -87,9 +88,9 @@ class ComposerMenu(Vertical):
             + value[query.replace_end :]
         )
 
-    @staticmethod
-    def _choice_prompt(choice: ComposerChoice) -> Text:
-        prompt = Text(choice.title, style="bold #f1f3f5")
+    def _choice_prompt(self, choice: ComposerChoice) -> Text:
+        palette = palette_for(self.app.current_theme.dark)
+        prompt = Text(choice.title, style=f"bold {palette.strong}")
         prompt.append("  ")
-        prompt.append(choice.description, style="#8b919a")
+        prompt.append(choice.description, style=palette.muted)
         return prompt

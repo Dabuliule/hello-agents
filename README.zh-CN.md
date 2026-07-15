@@ -86,6 +86,16 @@ uv run codecraft
 
 TUI 使用以对话为中心的单列布局。工具调用在对话流中原位更新，精简后的 runtime 和 Token 状态显示在输入区下方。Assistant Markdown 在流式输出时原位更新。高风险工具调用会将输入区替换为内联选项，可以使用方向键选择操作并按回车确认。当前 turn 结束前输入框保持锁定。TUI 消费与 CLI 相同的 `RuntimeEvent`，没有实现第二套 Agent loop。
 
+默认的 `auto` 主题会在启动时探测终端背景：优先读取 `COLORFGBG`，不可用时
+通过 OSC 11 查询背景色。因此同一台电脑上的 macOS Terminal 配置、IDE
+集成终端等可以分别匹配自己的浅色或深色外观，不依赖操作系统的全局主题。
+探测不可用或需要固定外观时，可以显式覆盖：
+
+```zsh
+uv run codecraft --theme dark
+CODECRAFT_THEME=light uv run codecraft
+```
+
 在输入框输入 `/` 会展开内联命令列表，继续输入即可过滤；使用上下键移动，
 Enter 或 Tab 选择，Escape 关闭。列表只展示已经实现的 `/skills`、`/status`、
 `/tools`、`/mcp`、`/trace` 和 `/quit`。`/skills` 会进入已发现的 Skill

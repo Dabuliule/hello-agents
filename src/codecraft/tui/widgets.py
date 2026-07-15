@@ -10,6 +10,7 @@ from textual.widgets import Static
 
 from codecraft.schema.session import SessionConfig
 from codecraft.tui.rendering import runtime_status, session_header
+from codecraft.tui.theme import palette_for
 
 
 class SessionHeader(Static):
@@ -22,7 +23,11 @@ class SessionHeader(Static):
         self.refresh()
 
     def render(self) -> Text:
-        return session_header(self.config, max(self.content_size.width, 1))
+        return session_header(
+            self.config,
+            max(self.content_size.width, 1),
+            palette_for(self.app.current_theme.dark),
+        )
 
 
 class RuntimeStatusLine(Static):
@@ -49,6 +54,7 @@ class RuntimeStatusLine(Static):
             self.status,
             self.token_usage,
             max(self.content_size.width, 1),
+            palette_for(self.app.current_theme.dark),
         )
 
 
@@ -63,24 +69,25 @@ class MessageBlock(Static):
         self.refresh(layout=True)
 
     def render(self) -> RenderableType:
+        palette = palette_for(self.app.current_theme.dark)
         if self.role == "Assistant":
             return Markdown(self.text)
 
         if self.role == "User":
             body = Text()
-            body.append("› ", style="bold #8da2fb")
-            body.append(self.text, style="#f1f3f5")
+            body.append("› ", style=f"bold {palette.accent}")
+            body.append(self.text, style=palette.strong)
             return body
 
         if self.role == "Error":
             body = Text()
-            body.append("! ", style="bold #ef767a")
-            body.append(self.text, style="#efb0b3")
+            body.append("! ", style=f"bold {palette.error}")
+            body.append(self.text, style=palette.error_detail)
             return body
 
         return Group(
-            Text(self.role.casefold(), style="bold #8b919a"),
-            Text(self.text, style="#a5abb3"),
+            Text(self.role.casefold(), style=f"bold {palette.muted}"),
+            Text(self.text, style=palette.secondary),
         )
 
 
@@ -141,29 +148,34 @@ class ActivityBlock(Static):
         self.refresh(layout=True)
 
     def render(self) -> Text:
+        palette = palette_for(self.app.current_theme.dark)
         symbol, symbol_style = {
-            "running": ("·", "bold #8da2fb"),
-            "waiting": ("?", "bold #d8b56d"),
-            "completed": ("✓", "bold #79c99e"),
-            "failed": ("×", "bold #ef767a"),
-            "stopped": ("×", "#8b919a"),
-            "notice": ("·", "#8b919a"),
-        }.get(self.status, ("·", "#8b919a"))
+            "running": ("·", f"bold {palette.accent}"),
+            "waiting": ("?", f"bold {palette.warning}"),
+            "completed": ("✓", f"bold {palette.success}"),
+            "failed": ("×", f"bold {palette.error}"),
+            "stopped": ("×", palette.muted),
+            "notice": ("·", palette.muted),
+        }.get(self.status, ("·", palette.muted))
 
         line = Text()
         line.append(f"{symbol} ", style=symbol_style)
-        name_style = "#a5abb3" if self.status == "notice" else "#d8dbe0"
+        name_style = (
+            palette.secondary if self.status == "notice" else palette.foreground
+        )
         line.append(self.tool_name, style=name_style)
 
         arguments = _compact_arguments(self.arguments)
         if arguments:
-            line.append("  ·  ", style="#4f555d")
-            line.append(arguments, style="#8b919a")
+            line.append("  ·  ", style=palette.separator)
+            line.append(arguments, style=palette.muted)
         if self.duration_ms is not None and self.content_size.width >= 50:
-            line.append("  ·  ", style="#4f555d")
-            line.append(f"{self.duration_ms}ms", style="#6f757d")
+            line.append("  ·  ", style=palette.separator)
+            line.append(f"{self.duration_ms}ms", style=palette.faint)
         if self.detail:
-            detail_style = "#d98f93" if self.status == "failed" else "#8b919a"
+            detail_style = (
+                palette.error_detail if self.status == "failed" else palette.muted
+            )
             line.append(f"\n  {self.detail}", style=detail_style)
         return line
 

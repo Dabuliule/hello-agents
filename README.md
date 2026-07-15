@@ -87,6 +87,17 @@ uv run codecraft
 
 The TUI uses a single conversation-focused layout. Tool calls update in place inside the conversation flow, while compact runtime and token status stays below the composer. Assistant Markdown updates in place while streaming. Risky tool calls replace the composer with an inline choice: use the arrow keys to select an action and Enter to confirm. The input remains locked until the active turn finishes. The TUI consumes the same `RuntimeEvent` stream as the CLI and does not implement a separate agent loop.
 
+The default `auto` theme follows the terminal background detected at startup,
+using `COLORFGBG` when available and an OSC 11 background query otherwise. This
+works with terminal profiles independently of the host operating-system theme.
+If detection is unavailable or a fixed appearance is preferred, override it
+explicitly:
+
+```zsh
+uv run codecraft --theme dark
+CODECRAFT_THEME=light uv run codecraft
+```
+
 Type `/` in the composer to open the inline command menu. Continue typing to
 filter, use Up/Down to move, Enter or Tab to select, and Escape to close it. The
 menu exposes only implemented actions: `/skills`, `/status`, `/tools`, `/mcp`,

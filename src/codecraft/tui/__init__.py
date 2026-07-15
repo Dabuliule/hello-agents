@@ -1,6 +1,11 @@
 from codecraft.tui.app import CodeCraftTUI
 from codecraft.tui.composer import ComposerMenu
 from codecraft.tui.screens import SessionBrowserScreen, TraceScreen
+from codecraft.tui.theme import (
+    TUIColorScheme,
+    TUIThemeMode,
+    resolve_color_scheme,
+)
 from codecraft.tui.widgets import ActivityBlock, MessageBlock
 
 __all__ = [
@@ -9,5 +14,8 @@ __all__ = [
     "ComposerMenu",
     "MessageBlock",
     "SessionBrowserScreen",
+    "TUIColorScheme",
+    "TUIThemeMode",
     "TraceScreen",
+    "resolve_color_scheme",
 ]

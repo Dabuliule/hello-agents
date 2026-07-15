@@ -3,9 +3,14 @@ from __future__ import annotations
 from rich.text import Text
 
 from codecraft.schema.session import SessionConfig
+from codecraft.tui.theme import TUIColorPalette
 
 
-def session_header(config: SessionConfig, width: int) -> Text:
+def session_header(
+    config: SessionConfig,
+    width: int,
+    palette: TUIColorPalette,
+) -> Text:
     workspace = config.cwd.name or str(config.cwd)
     candidates = (
         (workspace, f"{config.model_provider}/{config.model}"),
@@ -13,10 +18,10 @@ def session_header(config: SessionConfig, width: int) -> Text:
         (None, None),
     )
     for candidate_workspace, model in candidates:
-        header = _session_header(candidate_workspace, model)
+        header = _session_header(candidate_workspace, model, palette)
         if len(header.plain) <= width:
             return header
-    return _session_header(None, None)
+    return _session_header(None, None, palette)
 
 
 def runtime_status(
@@ -24,15 +29,16 @@ def runtime_status(
     status: str,
     token_usage: dict[str, int],
     width: int,
+    palette: TUIColorPalette,
 ) -> Text:
     status_style = {
-        "idle": "#79c99e",
-        "running": "#8da2fb",
-        "approval": "#d8b56d",
-        "failed": "#ef767a",
-        "closed": "#777e87",
-        "starting": "#777e87",
-    }.get(status, "#a5abb3")
+        "idle": palette.success,
+        "running": palette.accent,
+        "approval": palette.warning,
+        "failed": palette.error,
+        "closed": palette.faint,
+        "starting": palette.faint,
+    }.get(status, palette.secondary)
     candidates = (
         (True, True),
         (False, True),
@@ -47,21 +53,26 @@ def runtime_status(
                 f"{token_usage['total_tokens']:,} tokens" if include_tokens else None
             ),
             mcp_count=len(config.mcp_servers) if include_sandbox else 0,
+            palette=palette,
         )
         if len(line.plain) <= width:
             return line
-    return _runtime_status(status, status_style)
+    return _runtime_status(status, status_style, palette=palette)
 
 
-def _session_header(workspace: str | None, model: str | None) -> Text:
+def _session_header(
+    workspace: str | None,
+    model: str | None,
+    palette: TUIColorPalette,
+) -> Text:
     header = Text(no_wrap=True, overflow="ellipsis")
-    header.append("CodeCraft", style="bold #f1f3f5")
+    header.append("CodeCraft", style=f"bold {palette.strong}")
     if workspace is not None:
-        header.append("  ·  ", style="#5f656d")
-        header.append(workspace, style="#a5abb3")
+        header.append("  ·  ", style=palette.separator)
+        header.append(workspace, style=palette.secondary)
     if model is not None:
         header.append("  ")
-        header.append(model, style="#777e87")
+        header.append(model, style=palette.faint)
     return header
 
 
@@ -72,6 +83,7 @@ def _runtime_status(
     sandbox: str | None = None,
     tokens: str | None = None,
     mcp_count: int = 0,
+    palette: TUIColorPalette,
 ) -> Text:
     line = Text(no_wrap=True, overflow="ellipsis")
     line.append(status, style=f"bold {status_style}")
@@ -82,6 +94,6 @@ def _runtime_status(
     ):
         if value is None:
             continue
-        line.append("  ·  ", style="#4f555d")
-        line.append(value, style="#777e87")
+        line.append("  ·  ", style=palette.separator)
+        line.append(value, style=palette.faint)
     return line

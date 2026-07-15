@@ -72,6 +72,11 @@ def test_cli_uses_root_as_the_only_interactive_entrypoint():
     assert "chat" not in command_names
     assert "resume" not in command_names
 
+    help_result = runner.invoke(app, ["--help"])
+    assert help_result.exit_code == 0
+    assert "--theme" in help_result.output
+    assert "auto" in help_result.output
+
 
 def test_sessions_command_lists_session(tmp_path):
     config = seed_session(tmp_path)
