@@ -85,6 +85,8 @@ class Turn:
             turn_id=self.turn_id,
         )
         self.session.conversation.append_user_message(text)
+        for skill in self.session.skill_registry.explicit_mentions(text):
+            self._active_skills[skill.metadata.name] = skill
 
         answer = ""
 

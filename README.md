@@ -87,6 +87,12 @@ uv run codecraft
 
 The TUI uses a single conversation-focused layout. Tool calls update in place inside the conversation flow, while compact runtime and token status stays below the composer. Assistant Markdown updates in place while streaming. Risky tool calls replace the composer with an inline choice: use the arrow keys to select an action and Enter to confirm. The input remains locked until the active turn finishes. The TUI consumes the same `RuntimeEvent` stream as the CLI and does not implement a separate agent loop.
 
+Type `/` in the composer to open the inline command menu. Continue typing to
+filter, use Up/Down to move, Enter or Tab to select, and Escape to close it. The
+menu exposes only implemented actions: `/skills`, `/status`, `/tools`, `/mcp`,
+`/trace`, and `/quit`. `/skills` opens the discovered Skill list; typing `$` in
+the composer opens the same Skill completion directly.
+
 When the current repository has previous sessions, startup opens a session browser. Select one to restore its persisted configuration and conversation, or start a new session. Direct resume is also available:
 
 ```zsh
@@ -353,6 +359,10 @@ Only `name`, `description`, and `source` summaries appear in the initial system
 prompt. When a Skill matches the current task, the model calls the read-only
 `load_skill` tool. Its body is added to `<active_skills>` on the next model request
 and remains active only for the current turn.
+
+For explicit invocation, choose a Skill through `/skills` or mention it as
+`$skill-name` in the prompt. Explicit mentions activate the Skill before the first
+model request, so they do not require an extra `load_skill` round trip.
 
 Names must match their directory and use lowercase letters, digits, hyphens, or
 underscores. Skill files are UTF-8, limited to 64 KiB, and cannot be symbolic links;

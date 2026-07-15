@@ -86,6 +86,11 @@ uv run codecraft
 
 TUI 使用以对话为中心的单列布局。工具调用在对话流中原位更新，精简后的 runtime 和 Token 状态显示在输入区下方。Assistant Markdown 在流式输出时原位更新。高风险工具调用会将输入区替换为内联选项，可以使用方向键选择操作并按回车确认。当前 turn 结束前输入框保持锁定。TUI 消费与 CLI 相同的 `RuntimeEvent`，没有实现第二套 Agent loop。
 
+在输入框输入 `/` 会展开内联命令列表，继续输入即可过滤；使用上下键移动，
+Enter 或 Tab 选择，Escape 关闭。列表只展示已经实现的 `/skills`、`/status`、
+`/tools`、`/mcp`、`/trace` 和 `/quit`。`/skills` 会进入已发现的 Skill
+列表；在输入框直接输入 `$` 也可以打开同一个 Skill 补全。
+
 当前仓库存在历史 session 时，TUI 启动后会打开 session 浏览器，可以选择恢复原有配置和对话，也可以新建 session。还可以直接恢复：
 
 ```zsh
@@ -304,6 +309,10 @@ description: Use when reviewing frontend usability and accessibility.
 第一次请求只把 `name`、`description` 和 `source` 摘要放进 system prompt。
 当某个 Skill 与当前任务匹配时，模型调用只读的 `load_skill` 工具；正文从
 下一次模型请求开始进入 `<active_skills>`，并且只在当前 turn 内有效。
+
+需要显式调用时，可以通过 `/skills` 选择，或者在 prompt 中写
+`$skill-name`。显式 mention 会在第一次模型请求前激活 Skill，不需要额外的
+`load_skill` 往返。
 
 Skill 名称必须与目录一致，只能包含小写字母、数字、连字符或下划线；文件
 必须是 UTF-8，最大 64 KiB，并且不能是符号链接。无效条目会被跳过并留下

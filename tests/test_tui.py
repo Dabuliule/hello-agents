@@ -8,6 +8,7 @@ from codecraft.approval.manager import ApprovalManager
 from codecraft.approval.policy import ApprovalPolicy
 from codecraft.approval.thread_reviewer import ThreadApprovalReviewer
 from codecraft.cli.app import app
+from codecraft.cli.bootstrap import build_runtime
 from codecraft.core.runtime import AgentRuntime
 from codecraft.core.session_store import SessionStore
 from codecraft.llm import (
@@ -28,6 +29,11 @@ from codecraft.tui import (
     MessageBlock,
     SessionBrowserScreen,
     TraceScreen,
+)
+from codecraft.tui.commands import (
+    ComposerMenuMode,
+    command_choices,
+    parse_composer_menu,
 )
 
 runner = CliRunner()
@@ -125,6 +131,194 @@ async def _seed_session(config: SessionConfig) -> None:
     ]
     for event in events:
         await store.append_event(event)
+
+
+def test_composer_menu_parses_commands_and_skill_mentions():
+    slash = parse_composer_menu("/sta")
+    skill_command = parse_composer_menu("/skills front")
+    skill_mention = parse_composer_menu("review with $front")
+
+    assert slash is not None
+    assert slash.mode == ComposerMenuMode.COMMANDS
+    assert slash.query == "sta"
+    assert [choice.value for choice in command_choices(slash.query)] == ["status"]
+
+    assert skill_command is not None
+    assert skill_command.mode == ComposerMenuMode.SKILLS
+    assert skill_command.query == "front"
+    assert skill_command.replace_start == 0
+
+    assert skill_mention is not None
+    assert skill_mention.mode == ComposerMenuMode.SKILLS
+    assert skill_mention.query == "front"
+    assert skill_mention.replace_start == len("review with ")
+    assert parse_composer_menu("normal message") is None
+
+
+def test_tui_slash_menu_filters_commands_and_activates_selected_skill(tmp_path):
+    async def run_test():
+        skill_directory = tmp_path / ".codecraft" / "skills" / "frontend-review"
+        skill_directory.mkdir(parents=True)
+        skill_body = "SLASH_SELECTED_SKILL_BODY"
+        (skill_directory / "SKILL.md").write_text(
+            "\n".join(
+                [
+                    "---",
+                    "name: frontend-review",
+                    "description: Review frontend usability and accessibility.",
+                    "---",
+                    "",
+                    skill_body,
+                ]
+            ),
+            encoding="utf-8",
+        )
+        provider = MockProvider(
+            [
+                ModelEvent(
+                    type=ModelEventType.MESSAGE_COMPLETED,
+                    payload={"text": "skill applied"},
+                ),
+                ModelEvent(type=ModelEventType.COMPLETED),
+            ]
+        )
+        config = _config(tmp_path)
+        runtime = build_runtime(
+            config,
+            llm_providers=LLMProviderRegistry([provider]),
+        )
+        tui = CodeCraftTUI(config, runtime, browse_sessions=False)
+
+        async with tui.run_test(size=(100, 32)) as pilot:
+            await _wait_until(pilot, lambda: tui.turn_status == "idle")
+            prompt = tui.query_one("#prompt")
+            menu = tui.query_one("#composer-menu")
+            options = tui.query_one("#composer-options")
+
+            prompt.value = "/"
+            await pilot.pause()
+            assert menu.display is True
+            assert options.option_count == 6
+            assert tui.focused is prompt
+            assert menu.region.bottom <= tui.query_one("#prompt-shell").region.y
+
+            await pilot.press("down")
+            assert options.highlighted == 1
+            await pilot.press("up")
+            assert options.highlighted == 0
+
+            await pilot.press("escape")
+            assert menu.display is False
+            assert tui.focused is prompt
+
+            prompt.value = "/sta"
+            await pilot.pause()
+            assert options.option_count == 1
+            assert options.get_option_at_index(0).id == "command-status"
+            await pilot.press("enter")
+            await _wait_until(
+                pilot,
+                lambda: any(
+                    block.role == "Status" for block in tui.query(MessageBlock)
+                ),
+            )
+            assert provider.calls == []
+            assert prompt.value == ""
+            assert menu.display is False
+
+            prompt.value = "/does-not-exist"
+            await pilot.pause()
+            assert options.highlighted is None
+            await pilot.press("enter")
+            await _wait_until(
+                pilot,
+                lambda: any(
+                    block.role == "Error" and "Unknown command" in block.text
+                    for block in tui.query(MessageBlock)
+                ),
+            )
+            assert provider.calls == []
+
+            prompt.value = "/status extra"
+            await pilot.press("enter")
+            await _wait_until(
+                pilot,
+                lambda: any(
+                    block.role == "Error"
+                    and block.text == "Unknown command: /status extra"
+                    for block in tui.query(MessageBlock)
+                ),
+            )
+            assert provider.calls == []
+
+            prompt.value = "/skills"
+            await pilot.pause()
+            assert options.option_count == 1
+            assert options.get_option_at_index(0).id == "skill-frontend-review"
+            await pilot.press("tab")
+            assert prompt.value == "$frontend-review "
+            assert menu.display is False
+
+            prompt.value += "review this screen"
+            await pilot.press("enter")
+            await _wait_until(
+                pilot,
+                lambda: (
+                    tui.turn_status == "idle"
+                    and any(
+                        block.role == "Assistant" and block.text == "skill applied"
+                        for block in tui.query(MessageBlock)
+                    )
+                ),
+            )
+
+            assert len(provider.calls) == 1
+            system = provider.calls[0].messages[0].content or ""
+            assert skill_body in system
+            assert system.count("## Skill: frontend-review") == 1
+
+            snapshot = await tui.thread.read_snapshot()
+            assert not any(
+                event.type == RuntimeEventType.MODEL_TOOL_CALL
+                for event in snapshot.events
+            )
+
+    asyncio.run(run_test())
+
+
+def test_tui_composer_menu_layout_does_not_overlap_at_narrow_or_wide_sizes(
+    tmp_path,
+):
+    async def run_test() -> None:
+        for width, height in ((60, 24), (120, 40)):
+            config = _config(tmp_path).model_copy(
+                update={"session_id": f"ses_menu_{width}"}
+            )
+            runtime = AgentRuntime(
+                session_store=SessionStore(config.codecraft_home),
+                llm_providers=LLMProviderRegistry([MockProvider()]),
+                tool_registry=ToolRegistry(),
+            )
+            tui = CodeCraftTUI(config, runtime, browse_sessions=False)
+
+            async with tui.run_test(size=(width, height)) as pilot:
+                await _wait_until(pilot, lambda: tui.turn_status == "idle")
+                prompt = tui.query_one("#prompt")
+                prompt.value = "/"
+                await pilot.pause()
+
+                conversation = tui.query_one("#conversation-pane")
+                composer_frame = tui.query_one("#composer-frame")
+                menu = tui.query_one("#composer-menu")
+                prompt_shell = tui.query_one("#prompt-shell")
+                status = tui.query_one("#runtime-status")
+
+                assert conversation.region.bottom <= composer_frame.region.y
+                assert menu.region.bottom <= prompt_shell.region.y
+                assert prompt_shell.region.bottom <= status.region.y
+                assert status.region.bottom <= height
+
+    asyncio.run(run_test())
 
 
 def test_tui_streams_messages_and_updates_runtime_status(tmp_path):

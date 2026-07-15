@@ -440,3 +440,50 @@ def test_runtime_returns_stable_error_for_unknown_skill(tmp_path):
         await runtime.close()
 
     asyncio.run(run_test())
+
+
+def test_explicit_skill_mentions_activate_before_the_first_model_request(tmp_path):
+    async def run_test() -> None:
+        instruction = "EXPLICIT_MENTION_SKILL_BODY"
+        write_skill(
+            tmp_path / ".codecraft" / "skills",
+            "known",
+            description="Use for explicit mention tests.",
+            instructions=instruction,
+        )
+        provider = MockProvider(
+            script=[
+                ModelEvent(
+                    type=ModelEventType.MESSAGE_COMPLETED,
+                    payload={"text": "explicit skill applied"},
+                ),
+                ModelEvent(type=ModelEventType.COMPLETED),
+            ]
+        )
+        config = make_config(tmp_path)
+        runtime = build_runtime(
+            config,
+            llm_providers=LLMProviderRegistry([provider]),
+        )
+        thread = await runtime.create_thread(config)
+
+        await thread.submit(
+            SessionInput.user_message(
+                "inp_explicit",
+                "$known handle this with $known and ignore $missing",
+            )
+        )
+        await thread.wait_until_idle()
+
+        assert len(provider.calls) == 1
+        system = provider.calls[0].messages[0].content or ""
+        assert instruction in system
+        assert system.count("## Skill: known") == 1
+        snapshot = await thread.read_snapshot()
+        assert not any(
+            event.type == RuntimeEventType.MODEL_TOOL_CALL for event in snapshot.events
+        )
+
+        await runtime.close()
+
+    asyncio.run(run_test())

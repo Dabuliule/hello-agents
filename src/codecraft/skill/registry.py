@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 import json
 from pathlib import Path
+import re
 from typing import Any
 
 from pydantic import ValidationError
@@ -27,6 +28,9 @@ class SkillRegistry:
     """发现、校验并保存当前 runtime 可用的 Skills。"""
 
     DEFAULT_MAX_FILE_BYTES = 64 * 1024
+    _EXPLICIT_MENTION = re.compile(
+        r"(?<![A-Za-z0-9_$])\$([a-z0-9][a-z0-9_-]{0,63})(?![A-Za-z0-9_-])"
+    )
 
     def __init__(
         self,
@@ -278,6 +282,13 @@ class SkillRegistry:
 
     def diagnostics(self) -> tuple[SkillDiagnostic, ...]:
         return self._diagnostics
+
+    def explicit_mentions(self, text: str) -> tuple[Skill, ...]:
+        """按出现顺序解析有效的 `$skill-name`，重复 mention 只保留一次。"""
+        names = dict.fromkeys(
+            match.group(1) for match in self._EXPLICIT_MENTION.finditer(text)
+        )
+        return tuple(self._skills[name] for name in names if name in self._skills)
 
     def __bool__(self) -> bool:
         return bool(self._skills)

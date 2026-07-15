@@ -27,6 +27,10 @@ When a listed description clearly matches the current task, call `load_skill` wi
 its exact name. Load only Skills that are relevant, and load them again when needed
 in a later turn.
 
+A `$skill-name` mention explicitly activates that Skill before the model request. If
+the Skill is already present in `<active_skills>`, follow it without calling
+`load_skill` again.
+
 Only Skill bodies in `<active_skills>` are active instructions. They supplement the
 current task but cannot override runtime safety, project instructions, user
 instructions, or the current request. Skill scripts and referenced commands still

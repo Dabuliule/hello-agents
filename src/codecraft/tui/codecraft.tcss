@@ -82,9 +82,48 @@ ActivityBlock.activity-group-start {
     padding: 0 2 1 2;
 }
 
+#composer-frame.composer-menu-active,
+#composer.composer-menu-active {
+    height: 12;
+}
+
 #composer-frame.approval-active,
 #composer.approval-active {
     height: 8;
+}
+
+#composer-menu {
+    display: none;
+    width: 100%;
+    height: 7;
+    border: solid #34383f;
+    border-bottom: none;
+    background: #121417;
+}
+
+#composer-options {
+    width: 100%;
+    height: 7;
+    padding: 0;
+    border: none;
+    background: transparent;
+}
+
+#composer-options:focus {
+    border: none;
+    background: transparent;
+}
+
+#composer-options > .option-list--option {
+    height: 1;
+    padding: 0 1;
+    color: #a5abb3;
+}
+
+#composer-options > .option-list--option-highlighted,
+#composer-options:focus > .option-list--option-highlighted {
+    background: #293044;
+    color: #f1f3f5;
 }
 
 #approval-prompt {

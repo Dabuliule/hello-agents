@@ -5,7 +5,7 @@ from collections.abc import Callable
 from typing import Any
 
 from rich.text import Text
-from textual import on
+from textual import events, on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Center, Horizontal, Vertical, VerticalScroll
@@ -21,6 +21,12 @@ from codecraft.core.trace_report import build_trace_report
 from codecraft.schema.event import RuntimeEvent, RuntimeEventType
 from codecraft.schema.input import SessionInput
 from codecraft.schema.session import SessionConfig
+from codecraft.tui.commands import (
+    ComposerChoiceKind,
+    ComposerMenuMode,
+    parse_composer_menu,
+)
+from codecraft.tui.composer import ComposerMenu
 from codecraft.tui.screens import SessionBrowserScreen, TraceScreen
 from codecraft.tui.widgets import (
     ActivityBlock,
@@ -83,6 +89,7 @@ class CodeCraftTUI(App[None]):
             yield VerticalScroll(id="conversation-pane")
             with Center(id="composer-frame"):
                 with Vertical(id="composer"):
+                    yield ComposerMenu(id="composer-menu")
                     with Vertical(id="approval-prompt"):
                         yield Static(id="approval-inline-title")
                         yield Static(id="approval-inline-detail")
@@ -222,7 +229,28 @@ class CodeCraftTUI(App[None]):
         text = event.value.strip()
         if not text or self.thread is None or self.turn_status != "idle":
             return
+        menu_query = parse_composer_menu(event.value)
+        if menu_query is not None:
+            if await self._accept_composer_choice():
+                return
+            event.input.value = ""
+            self._close_composer_menu()
+            message = (
+                "No matching skills were found."
+                if menu_query.mode == ComposerMenuMode.SKILLS
+                else f"Unknown command: {text}"
+            )
+            await self._append_message("Error", message)
+            event.input.focus()
+            return
+        if text.startswith("/"):
+            event.input.value = ""
+            self._close_composer_menu()
+            await self._append_message("Error", f"Unknown command: {text}")
+            event.input.focus()
+            return
         event.input.value = ""
+        self._close_composer_menu()
         event.input.disabled = True
         self.turn_status = "running"
         self._refresh_status()
@@ -231,6 +259,37 @@ class CodeCraftTUI(App[None]):
         except Exception as exc:
             await self._append_message("Error", f"Could not submit message: {exc}")
             self._finish_turn("failed")
+
+    @on(Input.Changed, "#prompt")
+    def on_prompt_changed(self, event: Input.Changed) -> None:
+        if self.turn_status != "idle" or event.input.disabled:
+            self._close_composer_menu()
+            return
+        self._refresh_composer_menu(event.value)
+
+    async def on_key(self, event: events.Key) -> None:
+        if not self._composer_menu_open() or self.focused is not self.query_one(
+            "#prompt", Input
+        ):
+            return
+        if event.key == "down":
+            self.query_one(ComposerMenu).move(1)
+        elif event.key == "up":
+            self.query_one(ComposerMenu).move(-1)
+        elif event.key == "tab":
+            await self._accept_composer_choice()
+        else:
+            return
+        event.prevent_default()
+        event.stop()
+
+    @on(OptionList.OptionSelected, "#composer-options")
+    async def on_composer_option_selected(
+        self,
+        event: OptionList.OptionSelected,
+    ) -> None:
+        if event.option.id is not None:
+            await self._accept_composer_choice(event.option.id)
 
     async def action_trace(self) -> None:
         try:
@@ -249,8 +308,91 @@ class CodeCraftTUI(App[None]):
         self.push_screen(TraceScreen(report))
 
     def action_reject_approval(self) -> None:
+        if self._composer_menu_open():
+            self._close_composer_menu()
+            self.query_one("#prompt", Input).focus()
+            return
         if self._approval_result is not None and not self._approval_result.done():
             self._approval_result.set_result(False)
+
+    def _refresh_composer_menu(self, value: str) -> None:
+        opened = self.query_one(ComposerMenu).refresh_for(
+            value,
+            self.runtime.skill_registry.list(),
+        )
+        self.query_one("#composer-frame").set_class(opened, "composer-menu-active")
+        self.query_one("#composer").set_class(opened, "composer-menu-active")
+
+    def _close_composer_menu(self) -> None:
+        self.query_one(ComposerMenu).close()
+        self.query_one("#composer-frame").remove_class("composer-menu-active")
+        self.query_one("#composer").remove_class("composer-menu-active")
+
+    def _composer_menu_open(self) -> bool:
+        return self.query_one("#composer-menu").display
+
+    async def _accept_composer_choice(self, choice_id: str | None = None) -> bool:
+        menu = self.query_one(ComposerMenu)
+        choice = menu.selected_choice(choice_id)
+        if choice is None:
+            return False
+
+        prompt = self.query_one("#prompt", Input)
+        if choice.kind == ComposerChoiceKind.SKILL:
+            updated = menu.insert_skill(prompt.value, choice.value)
+            if updated is None:
+                return False
+            prompt.value = updated
+            prompt.cursor_position = len(prompt.value)
+            self._close_composer_menu()
+            prompt.focus()
+            return True
+
+        prompt.value = ""
+        self._close_composer_menu()
+        if choice.value == "skills":
+            prompt.value = "/skills "
+            prompt.cursor_position = len(prompt.value)
+            prompt.focus()
+            return True
+        await self._execute_slash_command(choice.value)
+        if not self._closed and choice.value != "trace":
+            prompt.focus()
+        return True
+
+    async def _execute_slash_command(self, command: str) -> None:
+        if command == "status":
+            await self._append_message(
+                "Status",
+                "\n".join(
+                    [
+                        f"session: {self.config.session_id}",
+                        f"model: {self.config.model_provider}/{self.config.model}",
+                        f"approval: {self.config.approval_policy}",
+                        f"sandbox: {self.config.sandbox_mode}",
+                        f"skills: {len(self.runtime.skill_registry.list())}",
+                    ]
+                ),
+            )
+        elif command == "tools":
+            tools = self.runtime.tool_registry.specs()
+            await self._append_message(
+                "Tools",
+                "\n".join(spec.name for spec in tools) or "No tools available.",
+            )
+        elif command == "mcp":
+            servers = [
+                f"{name}: {'enabled' if settings.enabled else 'disabled'}"
+                for name, settings in self.config.mcp_servers.items()
+            ]
+            await self._append_message(
+                "MCP",
+                "\n".join(servers) or "No MCP servers configured.",
+            )
+        elif command == "trace":
+            await self.action_trace()
+        elif command == "quit":
+            await self.action_quit()
 
     @on(OptionList.OptionSelected, "#approval-options")
     def on_approval_selected(self, event: OptionList.OptionSelected) -> None:
@@ -288,6 +430,7 @@ class CodeCraftTUI(App[None]):
         if event.type == RuntimeEventType.TURN_STARTED:
             self._last_error_turn_id = None
             self.turn_status = "running"
+            self._close_composer_menu()
             self.query_one("#prompt", Input).disabled = True
             self._refresh_status()
         elif event.type == RuntimeEventType.USER_MESSAGE:
@@ -487,6 +630,7 @@ class CodeCraftTUI(App[None]):
             block.mark_stopped()
         self._activity_blocks.clear()
         self.turn_status = status
+        self._close_composer_menu()
         prompt = self.query_one("#prompt", Input)
         prompt.disabled = self._closed or status != "idle"
         if status == "idle":
