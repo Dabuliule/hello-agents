@@ -28,6 +28,7 @@ from codecraft.retrieval import (
 )
 from codecraft.schema.session import SessionConfig, SessionSource
 from codecraft.sandbox import SandboxBackendType, build_sandbox_backend
+from codecraft.skill import LoadSkillTool, SkillRegistry
 from codecraft.tool import (
     ApplyPatchTool,
     BashTool,
@@ -136,16 +137,39 @@ def build_runtime(
     *,
     llm_providers: LLMProviderRegistry | None = None,
     tool_registry: ToolRegistry | None = None,
+    skill_registry: SkillRegistry | None = None,
 ) -> AgentRuntime:
     index = RepositoryIndex(config.codecraft_home / "indexes")
+    skills = (
+        skill_registry if skill_registry is not None else build_skill_registry(config)
+    )
+    tools = tool_registry or build_tool_registry(config, skill_registry=skills)
+    if tool_registry is not None and skills:
+        registered = {tool.name: tool for tool in tools.list()}
+        load_skill = registered.get("load_skill")
+        if load_skill is None:
+            tools.register(LoadSkillTool(skills))
+        elif (
+            not isinstance(load_skill, LoadSkillTool)
+            or load_skill.registry is not skills
+        ):
+            raise ValueError("load_skill tool must use the runtime skill registry")
     return AgentRuntime(
         session_store=SessionStore(config.codecraft_home),
         llm_providers=llm_providers or build_provider_registry(config),
-        tool_registry=tool_registry or build_tool_registry(config),
+        tool_registry=tools,
         approval_manager=ApprovalManager(
             reviewer=ThreadApprovalReviewer(),
         ),
         tool_result_observers=[WorkspaceIndexObserver(index)],
+        skill_registry=skills,
+    )
+
+
+def build_skill_registry(config: SessionConfig) -> SkillRegistry:
+    return SkillRegistry.discover(
+        user_root=config.codecraft_home / "skills",
+        project_root=config.cwd / ".codecraft" / "skills",
     )
 
 
@@ -185,7 +209,11 @@ def model_api_key_env(provider: str, configured: str | None) -> str | None:
     return None
 
 
-def build_tool_registry(config: SessionConfig | None = None) -> ToolRegistry:
+def build_tool_registry(
+    config: SessionConfig | None = None,
+    *,
+    skill_registry: SkillRegistry | None = None,
+) -> ToolRegistry:
     if config is None:
         context_engine = ContextEngine()
     else:
@@ -202,16 +230,17 @@ def build_tool_registry(config: SessionConfig | None = None) -> ToolRegistry:
         if config is not None
         else build_sandbox_backend(SandboxBackendType.PROCESS)
     )
-    registry = ToolRegistry(
-        [
-            ReadFileTool(),
-            ListFilesTool(),
-            WorkspaceSearchTool(context_engine),
-            WriteFileTool(),
-            ApplyPatchTool(),
-            BashTool(sandbox_backend=sandbox_backend),
-        ]
-    )
+    tools = [
+        ReadFileTool(),
+        ListFilesTool(),
+        WorkspaceSearchTool(context_engine),
+        WriteFileTool(),
+        ApplyPatchTool(),
+        BashTool(sandbox_backend=sandbox_backend),
+    ]
+    if skill_registry:
+        tools.append(LoadSkillTool(skill_registry))
+    registry = ToolRegistry(tools)
     if config is not None:
         for server_name, settings in config.mcp_servers.items():
             if settings.enabled:

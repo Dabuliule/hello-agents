@@ -17,12 +17,16 @@ class PromptBuilder:
         conversation: Conversation,
         context: TurnContext,
         project_instructions: str | None = None,
+        available_skills: str | None = None,
+        active_skills: str | None = None,
     ) -> list[ModelMessage]:
         """按固定 section 顺序构造完整模型输入。"""
         sections = [
             ("base_instructions", config.base_instructions or BASE_INSTRUCTIONS),
             ("project_instructions", project_instructions),
             ("user_instructions", config.user_instructions),
+            ("available_skills", available_skills),
+            ("active_skills", active_skills),
             ("turn_context", self._turn_context(context)),
         ]
         content = "\n\n".join(

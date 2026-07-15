@@ -13,6 +13,7 @@ from codecraft.core.thread import AgentThread
 from codecraft.llm.registry import LLMProviderRegistry
 from codecraft.schema.event import RuntimeEventType
 from codecraft.schema.session import SessionConfig, SessionSummary
+from codecraft.skill import SkillRegistry
 from codecraft.tool.registry import ToolRegistry
 from codecraft.tool.observer import ToolResultObserver
 
@@ -29,6 +30,7 @@ class AgentRuntime:
         approval_manager: ApprovalManager | None = None,
         event_bus: EventBus | None = None,
         tool_result_observers: Sequence[ToolResultObserver] | None = None,
+        skill_registry: SkillRegistry | None = None,
     ) -> None:
         self.session_store = session_store
         self.llm_providers = llm_providers
@@ -36,6 +38,9 @@ class AgentRuntime:
         self.approval_manager = approval_manager or ApprovalManager()
         self.event_bus = event_bus
         self.tool_result_observers = tuple(tool_result_observers or ())
+        self.skill_registry = (
+            skill_registry if skill_registry is not None else SkillRegistry()
+        )
 
     async def create_thread(self, config: SessionConfig) -> AgentThread:
         """创建新 session，并返回可消费事件的 AgentThread。"""
@@ -50,11 +55,16 @@ class AgentRuntime:
             approval_manager=self.approval_manager,
             event_bus=self.event_bus,
             tool_result_observers=self.tool_result_observers,
+            skill_registry=self.skill_registry,
         )
         thread = AgentThread(session)
+        skill_snapshot = self._skill_snapshot()
         await session.emit(
             RuntimeEventType.SESSION_STARTED,
-            {"config": config.model_dump(mode="json")},
+            {
+                "config": config.model_dump(mode="json"),
+                **({"skills": skill_snapshot} if skill_snapshot else {}),
+            },
         )
         return thread
 
@@ -73,11 +83,16 @@ class AgentRuntime:
             approval_manager=self.approval_manager,
             event_bus=self.event_bus,
             tool_result_observers=self.tool_result_observers,
+            skill_registry=self.skill_registry,
             conversation=conversation,
             seq=snapshot.events[-1].seq if snapshot.events else 0,
         )
         thread = AgentThread(session)
-        await session.emit(RuntimeEventType.SESSION_RESTORED)
+        skill_snapshot = self._skill_snapshot()
+        await session.emit(
+            RuntimeEventType.SESSION_RESTORED,
+            {"skills": skill_snapshot} if skill_snapshot else None,
+        )
         return thread
 
     async def resume_last(self, cwd: Path | None = None) -> AgentThread:
@@ -99,3 +114,15 @@ class AgentRuntime:
             raise RuntimeError(
                 f"failed to close {len(errors)} runtime resource group(s)"
             ) from errors[0]
+
+    def _skill_snapshot(self) -> dict | None:
+        available = [
+            metadata.model_dump(mode="json") for metadata in self.skill_registry.list()
+        ]
+        diagnostics = [
+            diagnostic.model_dump(mode="json")
+            for diagnostic in self.skill_registry.diagnostics()
+        ]
+        if not available and not diagnostics:
+            return None
+        return {"available": available, "diagnostics": diagnostics}

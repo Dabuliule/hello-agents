@@ -303,6 +303,8 @@ Each model call receives a system message assembled from:
 base_instructions
 project_instructions
 user_instructions
+available_skills
+active_skills
 turn_context
 conversation
 ```
@@ -320,6 +322,45 @@ Symlinks that resolve outside the workspace are ignored.
 
 Tool schemas are not embedded in the prompt. They are passed through the provider `tools` parameter as structured schemas.
 
+## Skills
+
+Skills are reusable, local workflow instructions loaded with progressive disclosure.
+CodeCraft discovers them when the runtime starts from:
+
+```text
+<workspace>/.codecraft/skills/<name>/SKILL.md
+~/.codecraft/skills/<name>/SKILL.md
+```
+
+The second path follows the configured `codecraft_home`. A project Skill overrides a
+user Skill with the same name; the shadowed source remains available through
+`SkillRegistry.diagnostics()`.
+
+Each file uses strict YAML frontmatter followed by Markdown instructions:
+
+```markdown
+---
+name: frontend-review
+description: Use when reviewing frontend usability and accessibility.
+---
+
+# Frontend Review
+
+Inspect keyboard navigation and focus states before editing.
+```
+
+Only `name`, `description`, and `source` summaries appear in the initial system
+prompt. When a Skill matches the current task, the model calls the read-only
+`load_skill` tool. Its body is added to `<active_skills>` on the next model request
+and remains active only for the current turn.
+
+Names must match their directory and use lowercase letters, digits, hyphens, or
+underscores. Skill files are UTF-8, limited to 64 KiB, and cannot be symbolic links;
+invalid entries are skipped with diagnostics. CodeCraft never executes Skill scripts
+automatically. Any command mentioned by a Skill must still use the ordinary tools and
+pass the existing sandbox and approval checks. Restart the runtime after changing
+Skill files.
+
 ## Built-In Tools
 
 Current tools:
@@ -332,6 +373,7 @@ Current tools:
 | `write_file` | Write a text file inside the workspace | Requires approval |
 | `apply_patch` | Apply a unified diff inside the workspace | Requires approval |
 | `bash` | Run a shell command from inside the workspace | Command policy + approval + native/process/Docker backend |
+| `load_skill` | Activate a discovered Skill for the current turn | Read-only; registered only when valid Skills exist |
 
 All tools execute through `ToolRunner`. `ToolRegistry` only registers and looks up tools; it does not execute them.
 

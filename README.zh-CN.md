@@ -256,6 +256,8 @@ name = "deepseek-v4-flash"
 base_instructions
 project_instructions
 user_instructions
+available_skills
+active_skills
 turn_context
 conversation
 ```
@@ -273,6 +275,41 @@ CODECRAFT.md
 
 工具 schema 不写进 prompt，而是通过 provider 的 `tools` 参数以结构化 schema 传给模型。
 
+## Skills
+
+Skill 是本地可复用的工作流指令，CodeCraft 通过渐进式加载控制上下文开销。
+Runtime 启动时会从下面两个位置发现 Skill：
+
+```text
+<workspace>/.codecraft/skills/<name>/SKILL.md
+~/.codecraft/skills/<name>/SKILL.md
+```
+
+第二个路径以配置的 `codecraft_home` 为准。同名时项目级 Skill 覆盖用户级
+Skill，被覆盖来源会保留在 `SkillRegistry.diagnostics()` 中。
+
+每个文件由严格的 YAML frontmatter 和 Markdown 指令正文组成：
+
+```markdown
+---
+name: frontend-review
+description: Use when reviewing frontend usability and accessibility.
+---
+
+# Frontend Review
+
+修改前先检查键盘导航和焦点状态。
+```
+
+第一次请求只把 `name`、`description` 和 `source` 摘要放进 system prompt。
+当某个 Skill 与当前任务匹配时，模型调用只读的 `load_skill` 工具；正文从
+下一次模型请求开始进入 `<active_skills>`，并且只在当前 turn 内有效。
+
+Skill 名称必须与目录一致，只能包含小写字母、数字、连字符或下划线；文件
+必须是 UTF-8，最大 64 KiB，并且不能是符号链接。无效条目会被跳过并留下
+诊断。CodeCraft 不会自动执行 Skill 中的脚本；Skill 提到的命令仍须使用普通
+工具，并经过现有 sandbox 和审批。修改 Skill 文件后需要重启 runtime。
+
 ## 内置工具
 
 | 工具 | 作用 | 说明 |
@@ -283,6 +320,7 @@ CODECRAFT.md
 | `write_file` | 写入 workspace 内文本文件 | 需要审批 |
 | `apply_patch` | 在 workspace 内应用 unified diff | 需要审批 |
 | `bash` | 在 workspace 内运行 shell 命令 | command policy + 审批 + native/process/Docker backend |
+| `load_skill` | 为当前 turn 激活已发现的 Skill | 只读；仅在存在有效 Skill 时注册 |
 
 所有工具都通过 `ToolRunner` 执行。`ToolRegistry` 只负责注册和查找工具，不执行工具。
 

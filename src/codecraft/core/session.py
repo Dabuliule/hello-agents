@@ -22,6 +22,7 @@ from codecraft.schema.input import (
     SessionInputType,
 )
 from codecraft.schema.session import SessionConfig
+from codecraft.skill import SkillRegistry
 from codecraft.tool.registry import ToolRegistry
 from codecraft.tool.observer import ToolResultObserver
 from codecraft.tool.runner import ToolRunner
@@ -54,6 +55,7 @@ class Session:
         event_bus: EventBus | None = None,
         conversation: Conversation | None = None,
         seq: int = 0,
+        skill_registry: SkillRegistry | None = None,
     ) -> None:
         self.session_id = config.session_id
         self.config = config
@@ -66,6 +68,9 @@ class Session:
         self.seq = seq
         self.llm_provider = llm_provider
         self.tool_registry = tool_registry
+        self.skill_registry = (
+            skill_registry if skill_registry is not None else SkillRegistry()
+        )
         self.approval_manager = approval_manager or ApprovalManager(
             reviewer=ThreadApprovalReviewer()
         )

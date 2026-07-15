@@ -23,6 +23,7 @@ from codecraft.prompt import InstructionLoader, PromptBuilder
 from codecraft.schema.event import RuntimeEventType
 from codecraft.schema.input import SessionInput, UserMessagePayload
 from codecraft.schema.tool import ToolCall, ToolEffect, ToolResult
+from codecraft.skill import Skill
 
 if TYPE_CHECKING:
     from codecraft.core.session import Session
@@ -59,6 +60,7 @@ class Turn:
         self.tool_call_count = 0
         self.prompt_builder = PromptBuilder()
         self.instruction_loader = InstructionLoader()
+        self._active_skills: dict[str, Skill] = {}
         self._started_at: float | None = None
 
     async def run(self, user_input: SessionInput) -> None:
@@ -269,12 +271,22 @@ class Turn:
             ]
 
         for call, result in zip(calls, results, strict=True):
+            self._activate_skill(call, result)
             self.session.conversation.append_tool_result(
                 call.call_id,
                 call.name,
                 result.model_content(),
             )
         return True
+
+    def _activate_skill(self, call: ToolCall, result: ToolResult) -> None:
+        """在工具成功后激活 Skill；正文只进入下一轮 system prompt。"""
+        if call.name != "load_skill" or not result.success:
+            return
+        name = call.arguments.get("name")
+        if not isinstance(name, str):
+            return
+        self._active_skills[name] = self.session.skill_registry.get(name)
 
     def _can_parallelize(self, calls: list[ToolCall]) -> bool:
         if len(calls) < 2 or self.context.max_parallel_read_tools < 2:
@@ -414,6 +426,10 @@ class Turn:
             ),
             context=self.context,
             project_instructions=project_instructions,
+            available_skills=self.session.skill_registry.catalogue_prompt(),
+            active_skills=self.session.skill_registry.active_prompt(
+                self._active_skills.values()
+            ),
         )
 
     def _compact_model_context(
