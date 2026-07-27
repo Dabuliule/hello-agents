@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
+from codecraft.core.async_utils import finish_task_before_cancelling
 from codecraft.core.errors import SessionError, SessionRestoreError
 from codecraft.schema.event import (
     RUNTIME_EVENT_SCHEMA_VERSION,
@@ -18,6 +21,13 @@ from codecraft.schema.session import (
 )
 
 
+_SessionCandidate = tuple[
+    Path,
+    list[RuntimeEvent] | None,
+    SessionRestoreError | None,
+]
+
+
 class SessionStore:
     """基于 JSONL 文件的 session event 存储。
 
@@ -25,10 +35,13 @@ class SessionStore:
     快照，而是重新读取事件日志并校验 seq 连续性。
     """
 
+    SESSION_SCAN_CONCURRENCY = 8
+
     def __init__(self, codecraft_home: Path) -> None:
         self.codecraft_home = codecraft_home.expanduser().resolve()
         self.sessions_dir = self.codecraft_home / "sessions"
         self._paths: dict[str, Path] = {}
+        self._append_locks: dict[Path, asyncio.Lock] = {}
 
     async def create_session(self, config: SessionConfig) -> Path:
         """创建当前 session 的事件日志文件。"""
@@ -40,19 +53,27 @@ class SessionStore:
             / f"{created_at.day:02d}"
             / f"{config.session_id}.jsonl"
         )
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.touch(exist_ok=False)
+        creation = asyncio.create_task(
+            asyncio.to_thread(self._create_session_file, path)
+        )
+        try:
+            await finish_task_before_cancelling(creation)
+        except asyncio.CancelledError:
+            self._paths[config.session_id] = path
+            raise
         self._paths[config.session_id] = path
         return path
 
     async def append_event(self, event: RuntimeEvent) -> None:
-        """追加单个事件到 session 日志。"""
+        """追加单个事件到 session 日志，同时避免阻塞 runtime event loop。"""
         path = self._path_for_session(event.session_id)
+        line = event.model_dump_json()
+        append_lock = self._append_locks.setdefault(path, asyncio.Lock())
+        append = asyncio.create_task(
+            self._append_line_serialized(path, line, append_lock)
+        )
         try:
-            with path.open("a", encoding="utf-8") as handle:
-                handle.write(event.model_dump_json())
-                handle.write("\n")
-                handle.flush()
+            await finish_task_before_cancelling(append)
         except Exception as exc:
             raise SessionError(
                 "failed to append session event",
@@ -68,6 +89,10 @@ class SessionStore:
 
     async def load_events(self, session_id: str) -> list[RuntimeEvent]:
         """读取并校验一个 session 的全部事件。"""
+        return await asyncio.to_thread(self._load_events, session_id)
+
+    def _load_events(self, session_id: str) -> list[RuntimeEvent]:
+        """同步读取实现；只在线程池或同步诊断路径中调用。"""
         path = self._path_for_session(session_id)
         events: list[RuntimeEvent] = []
 
@@ -136,6 +161,9 @@ class SessionStore:
         return events
 
     async def load_raw_lines(self, session_id: str) -> list[str]:
+        return await asyncio.to_thread(self._load_raw_lines, session_id)
+
+    def _load_raw_lines(self, session_id: str) -> list[str]:
         path = self._path_for_session(session_id)
         try:
             return path.read_text(encoding="utf-8").splitlines()
@@ -156,23 +184,28 @@ class SessionStore:
         summaries: list[SessionSummary] = []
         cwd_resolved = cwd.expanduser().resolve() if cwd else None
 
-        for path in self._iter_session_files():
-            try:
-                events = await self.load_events(path.stem)
-            except SessionRestoreError as exc:
+        paths = await asyncio.to_thread(self._iter_session_files)
+        candidates = await self._load_session_candidates(paths)
+        for path, events, error in candidates:
+            if error is not None:
                 if include_invalid and cwd_resolved is None:
+                    event_count, last_event_at = await asyncio.to_thread(
+                        self._invalid_file_metadata,
+                        path,
+                    )
                     summaries.append(
                         SessionSummary(
                             session_id=path.stem,
                             path=path,
                             valid=False,
-                            error_code=exc.code,
-                            error_message=exc.message,
-                            event_count=self._count_raw_lines(path),
-                            last_event_at=self._mtime(path),
+                            error_code=error.code,
+                            error_message=error.message,
+                            event_count=event_count,
+                            last_event_at=last_event_at,
                         )
                     )
                 continue
+            assert events is not None
             if not events:
                 summaries.append(
                     SessionSummary(
@@ -231,6 +264,30 @@ class SessionStore:
             reverse=True,
         )
 
+    async def _load_session_candidates(
+        self,
+        paths: list[Path],
+    ) -> list[_SessionCandidate]:
+        for path in paths:
+            self._paths.setdefault(path.stem, path)
+        candidates: list[_SessionCandidate | None] = [None] * len(paths)
+        pending = iter(enumerate(paths))
+
+        async def load() -> None:
+            for index, path in pending:
+                try:
+                    candidates[index] = path, await self.load_events(path.stem), None
+                except SessionRestoreError as exc:
+                    candidates[index] = path, None, exc
+
+        workers = [
+            asyncio.create_task(load())
+            for _ in range(min(self.SESSION_SCAN_CONCURRENCY, len(paths)))
+        ]
+        if workers:
+            await asyncio.gather(*workers)
+        return [candidate for candidate in candidates if candidate is not None]
+
     async def resume_last(self, cwd: Path | None = None) -> SessionSnapshot:
         summaries = await self.list_sessions(cwd=cwd)
         if not summaries:
@@ -274,7 +331,7 @@ class SessionStore:
         )
 
     @staticmethod
-    def _validate_config_version(config_data: dict, session_id: str) -> None:
+    def _validate_config_version(config_data: dict[str, Any], session_id: str) -> None:
         version = config_data.get("schema_version")
         if version != SESSION_CONFIG_SCHEMA_VERSION:
             raise SessionRestoreError(
@@ -304,6 +361,30 @@ class SessionStore:
         if not self.sessions_dir.exists():
             return []
         return sorted(self.sessions_dir.glob("**/*.jsonl"))
+
+    @staticmethod
+    def _create_session_file(path: Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.touch(exist_ok=False)
+
+    @staticmethod
+    def _append_line(path: Path, line: str) -> None:
+        with path.open("ab") as handle:
+            handle.write(f"{line}\n".encode())
+            handle.flush()
+
+    async def _append_line_serialized(
+        self,
+        path: Path,
+        line: str,
+        lock: asyncio.Lock,
+    ) -> None:
+        async with lock:
+            await asyncio.to_thread(self._append_line, path, line)
+
+    @classmethod
+    def _invalid_file_metadata(cls, path: Path) -> tuple[int, datetime | None]:
+        return cls._count_raw_lines(path), cls._mtime(path)
 
     @staticmethod
     def _count_raw_lines(path: Path) -> int:

@@ -169,6 +169,11 @@ class Session:
             )
             try:
                 await self.session_store.append_event(event)
+            except asyncio.CancelledError:
+                # SessionStore completes a scheduled append before surfacing
+                # cancellation, so finish the matching broadcast as well.
+                await self.event_bus.emit(event)
+                raise
             except Exception:
                 self.seq -= 1
                 raise
