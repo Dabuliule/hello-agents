@@ -5,6 +5,7 @@ import typer
 from codecraft.approval.policy import ApprovalPolicy
 from codecraft.cli import bootstrap
 from codecraft.cli.commands import (
+    register_demo_command,
     register_eval_command,
     register_exec_command,
     register_index_command,
@@ -75,6 +76,7 @@ def _build_tool_registry(config: SessionConfig | None = None) -> ToolRegistry:
 
 
 register_exec_command(app)
+register_demo_command(app)
 register_eval_command(app)
 register_index_command(app)
 register_retrieval_eval_command(app)

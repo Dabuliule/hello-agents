@@ -13,12 +13,13 @@ from codecraft.mcp.config import MCPServerSettings, MCPSettings
 from codecraft.sandbox import DockerSandboxConfig, SandboxBackendType, SandboxMode
 from codecraft.schema.event import RuntimeEvent
 
-SESSION_CONFIG_SCHEMA_VERSION = 1
+SESSION_CONFIG_SCHEMA_VERSION: Literal[1] = 1
 _ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 class SessionSource(StrEnum):
     CLI_EXEC = "cli_exec"
+    CLI_DEMO = "cli_demo"
     CLI_EVAL = "cli_eval"
     CLI_TUI = "cli_tui"
     TEST = "test"
