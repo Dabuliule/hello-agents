@@ -8,6 +8,7 @@ import os
 import re
 import select
 import time
+from typing import TypeAlias, cast
 
 from textual.theme import Theme
 
@@ -174,6 +175,7 @@ _OSC_HEX = re.compile(
     rb"(?:\x07|\x1b\\)",
     re.IGNORECASE,
 )
+_TerminalAttributes: TypeAlias = list[int | list[bytes | int]]
 
 
 def palette_for(dark: bool) -> TUIColorPalette:
@@ -207,16 +209,22 @@ def resolve_color_scheme(
 def parse_osc_background(response: bytes) -> tuple[int, int, int] | None:
     rgb_match = _OSC_RGB.search(response)
     if rgb_match is not None:
-        return tuple(_scale_hex_channel(value) for value in rgb_match.groups())
+        red, green, blue = rgb_match.groups()
+        return (
+            _scale_hex_channel(red),
+            _scale_hex_channel(green),
+            _scale_hex_channel(blue),
+        )
 
     hex_match = _OSC_HEX.search(response)
     if hex_match is None:
         return None
     value = hex_match.group(1)
     width = len(value) // 3
-    return tuple(
-        _scale_hex_channel(value[index : index + width])
-        for index in range(0, len(value), width)
+    return (
+        _scale_hex_channel(value[:width]),
+        _scale_hex_channel(value[width : width * 2]),
+        _scale_hex_channel(value[width * 2 :]),
     )
 
 
@@ -233,16 +241,22 @@ def query_terminal_background(timeout: float = 0.1) -> tuple[int, int, int] | No
     except OSError:
         return None
 
-    original_attributes: list[object] | None = None
+    original_attributes: _TerminalAttributes | None = None
     try:
         if select.select([terminal_fd], [], [], 0)[0]:
             return None
 
-        original_attributes = termios.tcgetattr(terminal_fd)
+        original_attributes = cast(
+            _TerminalAttributes,
+            termios.tcgetattr(terminal_fd),
+        )
         query_attributes = deepcopy(original_attributes)
-        query_attributes[3] &= ~(termios.ICANON | termios.ECHO)
-        query_attributes[6][termios.VMIN] = 0
-        query_attributes[6][termios.VTIME] = 0
+        query_attributes[3] = cast(int, query_attributes[3]) & ~(
+            termios.ICANON | termios.ECHO
+        )
+        control_characters = cast(list[bytes | int], query_attributes[6])
+        control_characters[termios.VMIN] = 0
+        control_characters[termios.VTIME] = 0
         termios.tcsetattr(terminal_fd, termios.TCSANOW, query_attributes)
 
         os.write(terminal_fd, b"\x1b]11;?\x1b\\")
@@ -296,4 +310,4 @@ def _scheme_from_rgb(rgb: tuple[int, int, int]) -> TUIColorScheme:
 
 def _scale_hex_channel(value: bytes) -> int:
     maximum = (16 ** len(value)) - 1
-    return round(int(value, 16) * 255 / maximum)
+    return int(round(int(value, 16) * 255 / maximum))

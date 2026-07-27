@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from rich.text import Text
@@ -92,6 +92,25 @@ class CodeCraftTUI(App[None]):
         self._approval_result: asyncio.Future[bool] | None = None
         self._last_error_turn_id: str | None = None
         self._closed = False
+        self._runtime_event_handlers: dict[
+            RuntimeEventType,
+            Callable[[RuntimeEvent], Awaitable[None]],
+        ] = {
+            RuntimeEventType.TURN_STARTED: self._handle_turn_started,
+            RuntimeEventType.USER_MESSAGE: self._handle_user_message,
+            RuntimeEventType.ASSISTANT_MESSAGE_DELTA: self._handle_assistant_delta,
+            RuntimeEventType.ASSISTANT_MESSAGE: self._handle_assistant_message,
+            RuntimeEventType.TOOL_CALL_STARTED: self._handle_tool_started,
+            RuntimeEventType.TOOL_CALL_FINISHED: self._handle_tool_finished,
+            RuntimeEventType.APPROVAL_REQUESTED: self._handle_approval_requested,
+            RuntimeEventType.TOKEN_COUNT: self._handle_token_count,
+            RuntimeEventType.CONTEXT_COMPACTED: self._handle_context_compacted,
+            RuntimeEventType.SESSION_RESTORED: self._handle_session_restored,
+            RuntimeEventType.ERROR: self._handle_runtime_error,
+            RuntimeEventType.TURN_ABORTED: self._handle_turn_aborted,
+            RuntimeEventType.TURN_FINISHED: self._handle_turn_finished,
+            RuntimeEventType.SESSION_CLOSED: self._handle_session_closed,
+        }
 
     def get_theme_variable_defaults(self) -> dict[str, str]:
         return {
@@ -443,66 +462,84 @@ class CodeCraftTUI(App[None]):
             self._finish_turn("failed")
 
     async def _handle_event(self, event: RuntimeEvent) -> None:
+        handler = self._runtime_event_handlers.get(event.type)
+        if handler is not None:
+            await handler(event)
+
+    async def _handle_turn_started(self, event: RuntimeEvent) -> None:
+        self._last_error_turn_id = None
+        self.turn_status = "running"
+        self._close_composer_menu()
+        self.query_one("#prompt", Input).disabled = True
+        self._refresh_status()
+
+    async def _handle_user_message(self, event: RuntimeEvent) -> None:
+        text = event.payload.get("text")
+        if isinstance(text, str):
+            await self._append_message("User", text)
+
+    async def _handle_assistant_delta(self, event: RuntimeEvent) -> None:
+        delta = event.payload.get("text")
+        if not isinstance(delta, str):
+            return
+        self._assistant_buffer += delta
+        if self._assistant_block is None:
+            self._assistant_block = await self._append_message("Assistant", "")
+        self._assistant_block.set_text(self._assistant_buffer)
+        self._scroll_conversation()
+
+    async def _handle_assistant_message(self, event: RuntimeEvent) -> None:
+        text = event.payload.get("text")
+        if not isinstance(text, str):
+            return
+        if self._assistant_block is None:
+            self._assistant_block = await self._append_message("Assistant", text)
+        else:
+            self._assistant_block.set_text(text)
+        self._assistant_block = None
+        self._assistant_buffer = ""
+        self._scroll_conversation()
+
+    async def _handle_tool_started(self, event: RuntimeEvent) -> None:
+        await self._render_tool_started(event.payload)
+
+    async def _handle_tool_finished(self, event: RuntimeEvent) -> None:
+        await self._render_tool_finished(event.payload)
+
+    async def _handle_approval_requested(self, event: RuntimeEvent) -> None:
+        await self._request_approval(event.payload)
+
+    async def _handle_token_count(self, event: RuntimeEvent) -> None:
+        self._add_token_usage(event.payload)
+
+    async def _handle_context_compacted(self, event: RuntimeEvent) -> None:
+        await self._append_activity(ActivityBlock.notice("Context compacted"))
+
+    async def _handle_session_restored(self, event: RuntimeEvent) -> None:
+        await self._append_activity(ActivityBlock.notice("Session restored"))
+
+    async def _handle_runtime_error(self, event: RuntimeEvent) -> None:
         payload = event.payload
-        if event.type == RuntimeEventType.TURN_STARTED:
-            self._last_error_turn_id = None
-            self.turn_status = "running"
-            self._close_composer_menu()
-            self.query_one("#prompt", Input).disabled = True
-            self._refresh_status()
-        elif event.type == RuntimeEventType.USER_MESSAGE:
-            text = payload.get("text")
-            if isinstance(text, str):
-                await self._append_message("User", text)
-        elif event.type == RuntimeEventType.ASSISTANT_MESSAGE_DELTA:
-            delta = payload.get("text")
-            if isinstance(delta, str):
-                self._assistant_buffer += delta
-                if self._assistant_block is None:
-                    self._assistant_block = await self._append_message("Assistant", "")
-                self._assistant_block.set_text(self._assistant_buffer)
-                self._scroll_conversation()
-        elif event.type == RuntimeEventType.ASSISTANT_MESSAGE:
-            text = payload.get("text")
-            if isinstance(text, str):
-                if self._assistant_block is None:
-                    self._assistant_block = await self._append_message(
-                        "Assistant", text
-                    )
-                else:
-                    self._assistant_block.set_text(text)
-                self._assistant_block = None
-                self._assistant_buffer = ""
-                self._scroll_conversation()
-        elif event.type == RuntimeEventType.TOOL_CALL_STARTED:
-            await self._render_tool_started(payload)
-        elif event.type == RuntimeEventType.TOOL_CALL_FINISHED:
-            await self._render_tool_finished(payload)
-        elif event.type == RuntimeEventType.APPROVAL_REQUESTED:
-            await self._request_approval(payload)
-        elif event.type == RuntimeEventType.TOKEN_COUNT:
-            self._add_token_usage(payload)
-        elif event.type == RuntimeEventType.CONTEXT_COMPACTED:
-            await self._append_activity(ActivityBlock.notice("Context compacted"))
-        elif event.type == RuntimeEventType.SESSION_RESTORED:
-            await self._append_activity(ActivityBlock.notice("Session restored"))
-        elif event.type == RuntimeEventType.ERROR:
-            message = str(payload.get("message") or payload.get("code") or "Error")
-            if event.turn_id is None or event.turn_id != self._last_error_turn_id:
-                await self._append_message("Error", message)
-            self._last_error_turn_id = event.turn_id
-        elif event.type == RuntimeEventType.TURN_ABORTED:
-            message = str(payload.get("message") or payload.get("reason") or "Aborted")
-            if event.turn_id is None or event.turn_id != self._last_error_turn_id:
-                await self._append_message("Error", message)
-            self._last_error_turn_id = None
-            self._finish_turn("idle")
-        elif event.type == RuntimeEventType.TURN_FINISHED:
-            self._last_error_turn_id = None
-            self._finish_turn("idle")
-        elif event.type == RuntimeEventType.SESSION_CLOSED:
-            self._last_error_turn_id = None
-            self._finish_turn("closed")
+        message = str(payload.get("message") or payload.get("code") or "Error")
+        if event.turn_id is None or event.turn_id != self._last_error_turn_id:
+            await self._append_message("Error", message)
+        self._last_error_turn_id = event.turn_id
+
+    async def _handle_turn_aborted(self, event: RuntimeEvent) -> None:
+        payload = event.payload
+        message = str(payload.get("message") or payload.get("reason") or "Aborted")
+        if event.turn_id is None or event.turn_id != self._last_error_turn_id:
+            await self._append_message("Error", message)
+        self._last_error_turn_id = None
+        self._finish_turn("idle")
+
+    async def _handle_turn_finished(self, event: RuntimeEvent) -> None:
+        self._last_error_turn_id = None
+        self._finish_turn("idle")
+
+    async def _handle_session_closed(self, event: RuntimeEvent) -> None:
+        self._last_error_turn_id = None
+        self._finish_turn("closed")
 
     async def _request_approval(self, payload: dict[str, Any]) -> None:
         if self.thread is None:

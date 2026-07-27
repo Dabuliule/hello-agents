@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Annotated
 
 import typer
+from rich.console import Console
 
 from codecraft.cli.options import CodecraftHomeOption
 from codecraft.cli.ui import make_console
@@ -94,7 +95,11 @@ async def run_inspect(
     return 0
 
 
-def print_restore_error(console, session_id: str, exc: SessionRestoreError) -> None:
+def print_restore_error(
+    console: Console,
+    session_id: str,
+    exc: SessionRestoreError,
+) -> None:
     if exc.code == "session_file_not_found":
         console.print(f"No session found: {session_id}")
         return

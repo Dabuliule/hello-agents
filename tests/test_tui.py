@@ -788,7 +788,11 @@ def test_tui_browses_resumes_and_continues_session(tmp_path):
 
         async with tui.run_test(size=(120, 40)) as pilot:
             await _wait_until(
-                pilot, lambda: isinstance(tui.screen, SessionBrowserScreen)
+                pilot,
+                lambda: (
+                    isinstance(tui.screen, SessionBrowserScreen)
+                    and tui.screen.query_one("#session-table").row_count == 1
+                ),
             )
             table = tui.screen.query_one("#session-table")
             assert table.row_count == 1

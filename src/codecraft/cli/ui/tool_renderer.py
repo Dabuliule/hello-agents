@@ -153,8 +153,10 @@ class ToolRenderer:
 
     def _line_count(self, result: dict[str, Any]) -> int | None:
         data = result.get("data")
-        if isinstance(data, dict) and isinstance(data.get("line_count"), int):
-            return data["line_count"]
+        if isinstance(data, dict):
+            line_count = data.get("line_count")
+            if isinstance(line_count, int):
+                return line_count
         content = result.get("content")
         if isinstance(content, str):
             return len(content.splitlines())
@@ -163,10 +165,12 @@ class ToolRenderer:
     def _byte_size(self, result: dict[str, Any]) -> int | None:
         metadata = result.get("metadata")
         if isinstance(metadata, dict):
-            if isinstance(metadata.get("bytes"), int):
-                return metadata["bytes"]
-            if isinstance(metadata.get("chars"), int):
-                return metadata["chars"]
+            byte_count = metadata.get("bytes")
+            if isinstance(byte_count, int):
+                return byte_count
+            char_count = metadata.get("chars")
+            if isinstance(char_count, int):
+                return char_count
         content = result.get("content")
         if isinstance(content, str):
             return len(content.encode("utf-8"))
@@ -182,6 +186,7 @@ def format_bytes(size: int) -> str:
                 return f"{int(value)} B"
             return f"{value:.1f} {unit}"
         value /= 1000
+    raise AssertionError("byte units must not be empty")
 
 
 def preview_tool_output(value: str, max_chars: int) -> str:
