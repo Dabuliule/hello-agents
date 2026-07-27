@@ -57,11 +57,37 @@ codecraft = ["prompt/resources/*.md", "tui/*.tcss"]
 
 [dependency-groups]
 dev = [
+    "mypy>=1.15,<2",
     "pytest>=9.0.3",
+    "pytest-cov>=6,<8",
     "ruff>=0.15.13",
+    "types-pyyaml>=6.0.12",
 ]
 
 [tool.pytest.ini_options]
+addopts = ["--strict-config", "--strict-markers"]
 markers = [
-    "integration: requires an external runtime such as Docker",
+    "integration: requires a native or external sandbox runtime",
 ]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+ignore_missing_imports = true
+files = ["src/codecraft"]
+plugins = ["pydantic.mypy"]
+
+[tool.ruff.lint]
+extend-select = ["C901"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10
+
+[tool.coverage.run]
+branch = true
+source = ["codecraft"]
+
+[tool.coverage.report]
+fail_under = 80
+show_missing = true
+skip_covered = true

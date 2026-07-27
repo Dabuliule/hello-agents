@@ -111,8 +111,11 @@ jobs:
       - name: Ruff lint
         run: uv run ruff check .
 
-      - name: Pytest
-        run: uv run pytest
+      - name: Mypy
+        run: uv run mypy
+
+      - name: Pytest with coverage
+        run: uv run pytest --cov=codecraft --cov-report=term-missing:skip-covered
 
       - name: Build package
         run: uv build
@@ -145,3 +148,43 @@ jobs:
         env:
           CODECRAFT_RUN_DOCKER_TESTS: "1"
         run: uv run pytest -q -m integration tests/test_docker_sandbox_integration.py
+
+  native-sandbox:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            test: tests/test_native_sandbox_integration.py::test_seatbelt_enforces_write_network_and_environment_boundaries
+          - os: ubuntu-latest
+            test: tests/test_native_sandbox_integration.py::test_bubblewrap_enforces_write_network_and_environment_boundaries
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+        with:
+          enable-cache: true
+
+      - name: Install bubblewrap
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y bubblewrap
+
+      - name: Sync dependencies
+        run: uv sync --locked --all-groups
+
+      - name: Test native sandbox
+        env:
+          CODECRAFT_RUN_BUBBLEWRAP_TESTS: "1"
+          CODECRAFT_RUN_NATIVE_SANDBOX_TESTS: "1"
+        run: uv run pytest -q -m integration "${{ matrix.test }}"
