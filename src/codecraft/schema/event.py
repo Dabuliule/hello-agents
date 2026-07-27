@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from codecraft.schema.safety import redact_sensitive_json_value, sanitize_json_value
 
-RUNTIME_EVENT_SCHEMA_VERSION = 1
+RUNTIME_EVENT_SCHEMA_VERSION: Literal[1] = 1
 
 
 class RuntimeEventType(StrEnum):
@@ -53,5 +53,7 @@ class RuntimeEvent(BaseModel):
     def _sanitize_payload(cls, value: dict[str, Any]) -> dict[str, Any]:
         sanitized = sanitize_json_value(value)
         if isinstance(sanitized, dict):
-            return redact_sensitive_json_value(sanitized)
+            redacted = redact_sensitive_json_value(sanitized)
+            if isinstance(redacted, dict):
+                return {str(key): item for key, item in redacted.items()}
         return {}

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import Any
+from typing import Any, cast
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -84,7 +84,7 @@ class ModelEvent(BaseModel):
         if not isinstance(value, dict):
             return value
 
-        event_type = ModelEventType(value.get("type"))
+        event_type = ModelEventType(cast(str, value.get("type")))
         payload_type: type[BaseModel]
         if event_type in {
             ModelEventType.MESSAGE_DELTA,

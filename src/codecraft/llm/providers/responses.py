@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
+from dataclasses import dataclass, field
 from typing import Any
 
 from codecraft.core.errors import ModelProviderError
@@ -21,6 +22,12 @@ from codecraft.llm.providers._protocol import (
     token_value,
 )
 from codecraft.schema.tool import ToolCall, ToolSpec
+
+
+@dataclass
+class _ResponseStreamState:
+    emitted_text: str = ""
+    pending_calls: dict[str, ToolCall] = field(default_factory=dict)
 
 
 class ResponsesProvider(OpenAIClientProvider):
@@ -101,75 +108,98 @@ class ResponsesProvider(OpenAIClientProvider):
 
     async def _events_from_stream(self, stream: Any) -> AsyncIterator[ModelEvent]:
         """转换原始事件流；只有官方完成事件能够生成 ``COMPLETED``。"""
-        emitted_text = ""
-        pending_calls: dict[str, ToolCall] = {}
+        state = _ResponseStreamState()
 
         async for raw_event in stream:
             event_type = get_field(raw_event, "type")
 
             if event_type == "response.output_text.delta":
-                delta = get_field(raw_event, "delta")
-                if not isinstance(delta, str) or not delta:
-                    raise LLMProtocolError("response text delta must be non-empty")
-                emitted_text += delta
-                yield ModelEvent(
-                    type=ModelEventType.MESSAGE_DELTA,
-                    payload={"text": delta},
-                )
+                yield self._stream_text_delta(state, raw_event)
                 continue
 
             if event_type == "response.output_item.done":
-                item = get_field(raw_event, "item")
-                if item is None:
-                    raise LLMProtocolError("output_item.done is missing its item")
-                for call in self._tool_calls({"output": [item]}):
-                    self._merge_tool_call(pending_calls, call)
+                self._record_done_item(state, raw_event)
                 continue
 
             if event_type == "response.completed":
-                response = get_field(raw_event, "response")
-                if response is None:
-                    raise LLMProtocolError("response.completed is missing its response")
-                self._validate_status(response)
-
-                final_text = self._response_text(response)
-                if final_text != emitted_text:
-                    if not final_text.startswith(emitted_text):
-                        raise LLMProtocolError(
-                            "streamed text does not match the completed response"
-                        )
-                    suffix = final_text[len(emitted_text) :]
-                    if suffix:
-                        emitted_text += suffix
-                        yield ModelEvent(
-                            type=ModelEventType.MESSAGE_DELTA,
-                            payload={"text": suffix},
-                        )
-
-                for call in self._tool_calls(response):
-                    self._merge_tool_call(pending_calls, call)
-                usage = self._usage(response)
-                if usage:
-                    yield ModelEvent(
-                        type=ModelEventType.TOKEN_COUNT,
-                        payload=usage,
-                    )
-                for call in pending_calls.values():
-                    yield ModelEvent(type=ModelEventType.TOOL_CALL, payload=call)
-                yield ModelEvent(type=ModelEventType.COMPLETED)
+                for event in self._completed_stream_events(state, raw_event):
+                    yield event
                 return
 
-            if event_type in {
-                "response.failed",
-                "response.incomplete",
-                "error",
-            }:
-                message = error_message(raw_event, f"Responses API {event_type}")
-                if event_type == "response.incomplete":
-                    raise LLMProtocolError(message)
-                raise LLMProviderError(message)
+            self._raise_for_stream_failure(raw_event, event_type)
 
         raise LLMProtocolError("Responses API stream ended before response.completed")
+
+    @staticmethod
+    def _stream_text_delta(
+        state: _ResponseStreamState,
+        raw_event: Any,
+    ) -> ModelEvent:
+        delta = get_field(raw_event, "delta")
+        if not isinstance(delta, str) or not delta:
+            raise LLMProtocolError("response text delta must be non-empty")
+        state.emitted_text += delta
+        return ModelEvent(
+            type=ModelEventType.MESSAGE_DELTA,
+            payload={"text": delta},
+        )
+
+    def _record_done_item(
+        self,
+        state: _ResponseStreamState,
+        raw_event: Any,
+    ) -> None:
+        item = get_field(raw_event, "item")
+        if item is None:
+            raise LLMProtocolError("output_item.done is missing its item")
+        for call in self._tool_calls({"output": [item]}):
+            self._merge_tool_call(state.pending_calls, call)
+
+    def _completed_stream_events(
+        self,
+        state: _ResponseStreamState,
+        raw_event: Any,
+    ) -> Iterator[ModelEvent]:
+        response = get_field(raw_event, "response")
+        if response is None:
+            raise LLMProtocolError("response.completed is missing its response")
+        self._validate_status(response)
+
+        final_text = self._response_text(response)
+        if final_text != state.emitted_text:
+            if not final_text.startswith(state.emitted_text):
+                raise LLMProtocolError(
+                    "streamed text does not match the completed response"
+                )
+            suffix = final_text[len(state.emitted_text) :]
+            if suffix:
+                state.emitted_text += suffix
+                yield ModelEvent(
+                    type=ModelEventType.MESSAGE_DELTA,
+                    payload={"text": suffix},
+                )
+
+        for call in self._tool_calls(response):
+            self._merge_tool_call(state.pending_calls, call)
+        usage = self._usage(response)
+        if usage:
+            yield ModelEvent(type=ModelEventType.TOKEN_COUNT, payload=usage)
+        for call in state.pending_calls.values():
+            yield ModelEvent(type=ModelEventType.TOOL_CALL, payload=call)
+        yield ModelEvent(type=ModelEventType.COMPLETED)
+
+    @staticmethod
+    def _raise_for_stream_failure(raw_event: Any, event_type: Any) -> None:
+        if event_type not in {
+            "response.failed",
+            "response.incomplete",
+            "error",
+        }:
+            return
+        message = error_message(raw_event, f"Responses API {event_type}")
+        if event_type == "response.incomplete":
+            raise LLMProtocolError(message)
+        raise LLMProviderError(message)
 
     @staticmethod
     def _merge_tool_call(pending: dict[str, ToolCall], call: ToolCall) -> None:

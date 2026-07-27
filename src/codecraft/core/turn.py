@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
@@ -14,6 +15,7 @@ from codecraft.core.turn_context import TurnContext
 from codecraft.llm.base import LLMProtocolError
 from codecraft.llm.base import ModelRequest
 from codecraft.llm.events import (
+    ModelEvent,
     ModelEventType,
     ModelTextPayload,
     ModelTokenCountPayload,
@@ -34,6 +36,13 @@ class TurnStatus(StrEnum):
     RUNNING = "running"
     FINISHED = "finished"
     ABORTED = "aborted"
+
+
+@dataclass
+class _ModelResponse:
+    assistant_parts: list[str] = field(default_factory=list)
+    tool_calls: list[ToolCall] = field(default_factory=list)
+    completed_message: str | None = None
 
 
 class Turn:
@@ -69,10 +78,37 @@ class Turn:
         模型可能在一次响应中要求调用工具；工具结果会回填到 conversation，
         然后继续下一次模型调用，直到没有新的 tool call。
         """
+        await self._start(user_input)
+
+        while True:
+            model_messages = await self._prepare_model_messages()
+            if model_messages is None:
+                return
+
+            request = ModelRequest(
+                model=self.context.model,
+                messages=tuple(model_messages),
+                tools=tuple(self.context.available_tools),
+                max_output_tokens=self.context.model_max_output_tokens,
+            )
+            response = await self._consume_model_response(request)
+
+            if response.tool_calls:
+                if not await self._process_tool_calls(response):
+                    return
+                continue
+
+            answer = await self._final_answer(response)
+            break
+
+        await self.finish(answer)
+
+    async def _start(self, user_input: SessionInput) -> None:
         self._started_at = monotonic()
         self.status = TurnStatus.RUNNING
         if not isinstance(user_input.payload, UserMessagePayload):
             raise TypeError("turn requires a user message input")
+
         text = user_input.payload.text
         await self.session.emit(
             RuntimeEventType.TURN_STARTED,
@@ -88,126 +124,122 @@ class Turn:
         for skill in self.session.skill_registry.explicit_mentions(text):
             self._active_skills[skill.metadata.name] = skill
 
-        answer = ""
+    async def _consume_model_response(self, request: ModelRequest) -> _ModelResponse:
+        response = _ModelResponse()
+        async for model_event in self.session.llm_provider.stream(request):
+            if model_event.type == ModelEventType.COMPLETED:
+                return response
+            await self._handle_model_event(response, model_event)
+        raise LLMProtocolError("model event stream ended without a completed event")
 
-        while True:
-            tool_calls: list[ToolCall] = []
-            assistant_parts: list[str] = []
-            completed_message: str | None = None
-            response_completed = False
+    async def _handle_model_event(
+        self,
+        response: _ModelResponse,
+        model_event: ModelEvent,
+    ) -> None:
+        if model_event.type == ModelEventType.MESSAGE_DELTA:
+            await self._handle_message_delta(response, model_event)
+        elif model_event.type == ModelEventType.MESSAGE_COMPLETED:
+            await self._handle_completed_message(response, model_event)
+        elif model_event.type == ModelEventType.TOKEN_COUNT:
+            await self._handle_token_count(model_event)
+        elif model_event.type == ModelEventType.TOOL_CALL:
+            if not isinstance(model_event.payload, ToolCall):
+                raise LLMProtocolError("tool call has an invalid payload")
+            response.tool_calls.append(model_event.payload)
 
-            model_messages = await self._prepare_model_messages()
-            if model_messages is None:
-                return
+    async def _handle_message_delta(
+        self,
+        response: _ModelResponse,
+        model_event: ModelEvent,
+    ) -> None:
+        if not isinstance(model_event.payload, ModelTextPayload):
+            raise LLMProtocolError("message delta has an invalid payload")
+        if response.completed_message is not None:
+            raise LLMProtocolError("message delta arrived after a completed message")
 
-            request = ModelRequest(
-                model=self.context.model,
-                messages=tuple(model_messages),
-                tools=tuple(self.context.available_tools),
-                max_output_tokens=self.context.model_max_output_tokens,
+        delta = model_event.payload.text
+        response.assistant_parts.append(delta)
+        await self.session.emit(
+            RuntimeEventType.ASSISTANT_MESSAGE_DELTA,
+            {"text": delta},
+            turn_id=self.turn_id,
+        )
+
+    async def _handle_completed_message(
+        self,
+        response: _ModelResponse,
+        model_event: ModelEvent,
+    ) -> None:
+        if not isinstance(model_event.payload, ModelTextPayload):
+            raise LLMProtocolError("completed message has an invalid payload")
+        if response.assistant_parts or response.completed_message is not None:
+            raise LLMProtocolError(
+                "provider mixed streamed and completed message events"
             )
-            async for model_event in self.session.llm_provider.stream(request):
-                if model_event.type == ModelEventType.MESSAGE_DELTA:
-                    if not isinstance(model_event.payload, ModelTextPayload):
-                        raise LLMProtocolError("message delta has an invalid payload")
-                    if completed_message is not None:
-                        raise LLMProtocolError(
-                            "message delta arrived after a completed message"
-                        )
-                    delta = model_event.payload.text
-                    assistant_parts.append(delta)
-                    await self.session.emit(
-                        RuntimeEventType.ASSISTANT_MESSAGE_DELTA,
-                        {"text": delta},
-                        turn_id=self.turn_id,
-                    )
 
-                elif model_event.type == ModelEventType.MESSAGE_COMPLETED:
-                    if not isinstance(model_event.payload, ModelTextPayload):
-                        raise LLMProtocolError(
-                            "completed message has an invalid payload"
-                        )
-                    if assistant_parts or completed_message is not None:
-                        raise LLMProtocolError(
-                            "provider mixed streamed and completed message events"
-                        )
-                    completed_message = model_event.payload.text
-                    await self.session.emit(
-                        RuntimeEventType.ASSISTANT_MESSAGE,
-                        {"text": completed_message},
-                        turn_id=self.turn_id,
-                    )
-                    self.session.conversation.append_assistant_message(
-                        completed_message
-                    )
+        response.completed_message = model_event.payload.text
+        await self.session.emit(
+            RuntimeEventType.ASSISTANT_MESSAGE,
+            {"text": response.completed_message},
+            turn_id=self.turn_id,
+        )
+        self.session.conversation.append_assistant_message(response.completed_message)
 
-                elif model_event.type == ModelEventType.TOKEN_COUNT:
-                    if not isinstance(model_event.payload, ModelTokenCountPayload):
-                        raise LLMProtocolError("token count has an invalid payload")
-                    await self.session.emit(
-                        RuntimeEventType.TOKEN_COUNT,
-                        model_event.payload.model_dump(mode="json"),
-                        turn_id=self.turn_id,
-                    )
+    async def _handle_token_count(self, model_event: ModelEvent) -> None:
+        if not isinstance(model_event.payload, ModelTokenCountPayload):
+            raise LLMProtocolError("token count has an invalid payload")
+        await self.session.emit(
+            RuntimeEventType.TOKEN_COUNT,
+            model_event.payload.model_dump(mode="json"),
+            turn_id=self.turn_id,
+        )
 
-                elif model_event.type == ModelEventType.TOOL_CALL:
-                    if not isinstance(model_event.payload, ToolCall):
-                        raise LLMProtocolError("tool call has an invalid payload")
-                    tool_calls.append(model_event.payload)
+    async def _process_tool_calls(self, response: _ModelResponse) -> bool:
+        await self._flush_streamed_message(
+            response.assistant_parts,
+            response.completed_message,
+        )
+        if (
+            self.tool_call_count + len(response.tool_calls)
+            > self.context.max_tool_calls
+        ):
+            await self._abort_for_tool_call_limit(response.tool_calls)
+            return False
+        await self._record_tool_calls(response.tool_calls)
+        return await self._run_tool_batch(response.tool_calls)
 
-                elif model_event.type == ModelEventType.COMPLETED:
-                    response_completed = True
-                    break
+    async def _abort_for_tool_call_limit(self, tool_calls: list[ToolCall]) -> None:
+        await self.abort(
+            "max_tool_calls_exceeded",
+            "Turn requested more tool calls than the configured limit.",
+            metadata={
+                "requested_tool_calls": [
+                    call.model_dump(mode="json") for call in tool_calls
+                ],
+                "remaining_tool_calls": (
+                    self.context.max_tool_calls - self.tool_call_count
+                ),
+            },
+        )
 
-            if not response_completed:
-                raise LLMProtocolError(
-                    "model event stream ended without a completed event"
+    async def _final_answer(self, response: _ModelResponse) -> str:
+        completed_message = response.completed_message
+        if completed_message is None:
+            completed_message = "".join(response.assistant_parts)
+            if completed_message:
+                await self.session.emit(
+                    RuntimeEventType.ASSISTANT_MESSAGE,
+                    {"text": completed_message},
+                    turn_id=self.turn_id,
                 )
+                self.session.conversation.append_assistant_message(completed_message)
 
-            if tool_calls:
-                await self._flush_streamed_message(
-                    assistant_parts,
-                    completed_message,
-                )
-                if self.tool_call_count + len(tool_calls) > self.context.max_tool_calls:
-                    await self.abort(
-                        "max_tool_calls_exceeded",
-                        "Turn requested more tool calls than the configured limit.",
-                        metadata={
-                            "requested_tool_calls": [
-                                call.model_dump(mode="json") for call in tool_calls
-                            ],
-                            "remaining_tool_calls": (
-                                self.context.max_tool_calls - self.tool_call_count
-                            ),
-                        },
-                    )
-                    return
-                await self._record_tool_calls(tool_calls)
-                if not await self._run_tool_batch(tool_calls):
-                    return
-                continue
-
-            if completed_message is None:
-                completed_message = "".join(assistant_parts)
-                if completed_message:
-                    await self.session.emit(
-                        RuntimeEventType.ASSISTANT_MESSAGE,
-                        {"text": completed_message},
-                        turn_id=self.turn_id,
-                    )
-                    self.session.conversation.append_assistant_message(
-                        completed_message
-                    )
-
-            if not completed_message:
-                raise LLMProtocolError(
-                    "model completed without an assistant message or tool call"
-                )
-            answer = completed_message
-            break
-
-        await self.finish(answer)
+        if not completed_message:
+            raise LLMProtocolError(
+                "model completed without an assistant message or tool call"
+            )
+        return completed_message
 
     async def finish(self, answer: str) -> None:
         await self.session.emit(

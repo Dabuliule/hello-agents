@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 import asyncio
 from pathlib import Path
+from typing import Any
 
 from codecraft.approval.manager import ApprovalManager
 from codecraft.core.event_bus import EventBus
@@ -115,7 +116,7 @@ class AgentRuntime:
                 f"failed to close {len(errors)} runtime resource group(s)"
             ) from errors[0]
 
-    def _skill_snapshot(self) -> dict | None:
+    def _skill_snapshot(self) -> dict[str, list[dict[str, Any]]] | None:
         available = [
             metadata.model_dump(mode="json") for metadata in self.skill_registry.list()
         ]

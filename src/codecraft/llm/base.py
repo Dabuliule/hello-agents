@@ -49,7 +49,7 @@ class LLMProvider(ABC):
     name: str
 
     @abstractmethod
-    async def stream(
+    def stream(
         self,
         request: ModelRequest,
     ) -> AsyncIterator[ModelEvent]: ...

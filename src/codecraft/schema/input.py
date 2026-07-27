@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Any
+from typing import Any, cast
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -69,7 +69,7 @@ class SessionInput(BaseModel):
     def validate_payload_for_type(cls, value: Any) -> Any:
         if not isinstance(value, dict):
             return value
-        input_type = SessionInputType(value.get("type"))
+        input_type = SessionInputType(cast(str, value.get("type")))
         payload_type: type[BaseModel]
         if input_type == SessionInputType.USER_MESSAGE:
             payload_type = UserMessagePayload

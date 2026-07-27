@@ -122,58 +122,18 @@ class ChatCompletionsProvider(OpenAIClientProvider):
             if usage:
                 latest_usage = usage
 
-            choices = list(get_field(chunk, "choices", []) or [])
-            if len(choices) > 1:
-                raise LLMProtocolError("multiple chat choices are not supported")
-            for choice in choices:
-                choice_index = get_field(choice, "index", 0)
-                if choice_index != 0:
-                    raise LLMProtocolError("multiple chat choices are not supported")
-                reason = get_field(choice, "finish_reason")
-                if reason is not None:
-                    if finish_reason is not None and finish_reason != reason:
-                        raise LLMProtocolError(
-                            "chat finish_reason changed within a stream"
-                        )
-                    finish_reason = str(reason)
+            choice = self._stream_choice(chunk)
+            if choice is None:
+                continue
 
-                delta = get_field(choice, "delta", {}) or {}
-                content = get_field(delta, "content")
-                if content is not None:
-                    if not isinstance(content, str):
-                        raise LLMProtocolError("chat content delta must be text")
-                    if content:
-                        yield ModelEvent(
-                            type=ModelEventType.MESSAGE_DELTA,
-                            payload={"text": content},
-                        )
-
-                for raw_call in get_field(delta, "tool_calls", []) or []:
-                    index = get_field(raw_call, "index", 0)
-                    if (
-                        not isinstance(index, int)
-                        or isinstance(index, bool)
-                        or index < 0
-                    ):
-                        raise LLMProtocolError("tool call index must be non-negative")
-                    part = tool_parts.setdefault(
-                        index,
-                        {"call_id": None, "name": None, "arguments": []},
-                    )
-                    call_id = get_field(raw_call, "id")
-                    if call_id is not None:
-                        _set_tool_part(part, "call_id", call_id)
-                    function = get_field(raw_call, "function", {}) or {}
-                    name = get_field(function, "name")
-                    if name is not None:
-                        _set_tool_part(part, "name", name)
-                    arguments = get_field(function, "arguments")
-                    if arguments is not None:
-                        if not isinstance(arguments, str):
-                            raise LLMProtocolError(
-                                "streamed tool arguments must be strings"
-                            )
-                        part["arguments"].append(arguments)
+            finish_reason = self._stream_finish_reason(finish_reason, choice)
+            content = self._stream_content(choice)
+            if content:
+                yield ModelEvent(
+                    type=ModelEventType.MESSAGE_DELTA,
+                    payload={"text": content},
+                )
+            self._merge_stream_tool_calls(tool_parts, choice)
 
         calls = [
             ToolCall(
@@ -190,6 +150,65 @@ class ChatCompletionsProvider(OpenAIClientProvider):
         for call in calls:
             yield ModelEvent(type=ModelEventType.TOOL_CALL, payload=call)
         yield ModelEvent(type=ModelEventType.COMPLETED)
+
+    @staticmethod
+    def _stream_choice(chunk: Any) -> Any | None:
+        choices = list(get_field(chunk, "choices", []) or [])
+        if len(choices) > 1:
+            raise LLMProtocolError("multiple chat choices are not supported")
+        if not choices:
+            return None
+
+        choice = choices[0]
+        if get_field(choice, "index", 0) != 0:
+            raise LLMProtocolError("multiple chat choices are not supported")
+        return choice
+
+    @staticmethod
+    def _stream_finish_reason(previous: str | None, choice: Any) -> str | None:
+        reason = get_field(choice, "finish_reason")
+        if reason is None:
+            return previous
+        if previous is not None and previous != reason:
+            raise LLMProtocolError("chat finish_reason changed within a stream")
+        return str(reason)
+
+    @staticmethod
+    def _stream_content(choice: Any) -> str | None:
+        delta = get_field(choice, "delta", {}) or {}
+        content = get_field(delta, "content")
+        if content is None:
+            return None
+        if not isinstance(content, str):
+            raise LLMProtocolError("chat content delta must be text")
+        return content or None
+
+    @staticmethod
+    def _merge_stream_tool_calls(
+        tool_parts: dict[int, dict[str, Any]],
+        choice: Any,
+    ) -> None:
+        delta = get_field(choice, "delta", {}) or {}
+        for raw_call in get_field(delta, "tool_calls", []) or []:
+            index = get_field(raw_call, "index", 0)
+            if not isinstance(index, int) or isinstance(index, bool) or index < 0:
+                raise LLMProtocolError("tool call index must be non-negative")
+            part = tool_parts.setdefault(
+                index,
+                {"call_id": None, "name": None, "arguments": []},
+            )
+            call_id = get_field(raw_call, "id")
+            if call_id is not None:
+                _set_tool_part(part, "call_id", call_id)
+            function = get_field(raw_call, "function", {}) or {}
+            name = get_field(function, "name")
+            if name is not None:
+                _set_tool_part(part, "name", name)
+            arguments = get_field(function, "arguments")
+            if arguments is not None:
+                if not isinstance(arguments, str):
+                    raise LLMProtocolError("streamed tool arguments must be strings")
+                part["arguments"].append(arguments)
 
     def _events_from_chat_response(self, response: Any) -> list[ModelEvent]:
         choices = list(get_field(response, "choices", []) or [])

@@ -39,30 +39,37 @@ class ModelMessage(BaseModel):
     def validate_shape(self) -> ModelMessage:
         """保证每种输入项只有一种明确、完整的表示。"""
         if self.type == ModelMessageType.MESSAGE:
-            if self.role == ModelRole.TOOL:
-                raise ValueError("ordinary messages cannot use the tool role")
-            if not self.content:
-                raise ValueError("ordinary messages require non-empty content")
-            if any(
-                value is not None
-                for value in (self.name, self.tool_call_id, self.arguments)
-            ):
-                raise ValueError("ordinary messages cannot include tool fields")
-            return self
+            self._validate_message()
+        elif self.type == ModelMessageType.TOOL_CALL:
+            self._validate_tool_call()
+        else:
+            self._validate_tool_result()
+        return self
 
-        if self.type == ModelMessageType.TOOL_CALL:
-            if self.role != ModelRole.ASSISTANT:
-                raise ValueError("tool calls must use the assistant role")
-            if self.content is not None:
-                raise ValueError("tool calls cannot include text content")
-            if not self.name or not self.name.strip():
-                raise ValueError("tool calls require a name")
-            if not self.tool_call_id or not self.tool_call_id.strip():
-                raise ValueError("tool calls require a call id")
-            if self.arguments is None:
-                raise ValueError("tool calls require structured arguments")
-            return self
+    def _validate_message(self) -> None:
+        if self.role == ModelRole.TOOL:
+            raise ValueError("ordinary messages cannot use the tool role")
+        if not self.content:
+            raise ValueError("ordinary messages require non-empty content")
+        if any(
+            value is not None
+            for value in (self.name, self.tool_call_id, self.arguments)
+        ):
+            raise ValueError("ordinary messages cannot include tool fields")
 
+    def _validate_tool_call(self) -> None:
+        if self.role != ModelRole.ASSISTANT:
+            raise ValueError("tool calls must use the assistant role")
+        if self.content is not None:
+            raise ValueError("tool calls cannot include text content")
+        if not self.name or not self.name.strip():
+            raise ValueError("tool calls require a name")
+        if not self.tool_call_id or not self.tool_call_id.strip():
+            raise ValueError("tool calls require a call id")
+        if self.arguments is None:
+            raise ValueError("tool calls require structured arguments")
+
+    def _validate_tool_result(self) -> None:
         if self.role != ModelRole.TOOL:
             raise ValueError("tool results must use the tool role")
         if self.content is None:
@@ -71,4 +78,3 @@ class ModelMessage(BaseModel):
             raise ValueError("tool results require a call id")
         if self.name is not None or self.arguments is not None:
             raise ValueError("tool results cannot include call fields")
-        return self
