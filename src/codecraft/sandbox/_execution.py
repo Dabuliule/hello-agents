@@ -5,6 +5,7 @@ import os
 import re
 import signal
 from pathlib import Path
+from typing import TypedDict
 
 from codecraft.sandbox.backend import (
     SandboxBackendError,
@@ -29,6 +30,10 @@ _SAFE_ENV_NAMES = frozenset(
         "WINDIR",
     }
 )
+
+
+class ProcessGroupOptions(TypedDict, total=False):
+    start_new_session: bool
 
 
 async def communicate(
@@ -61,7 +66,7 @@ def kill_process_group(process: asyncio.subprocess.Process) -> None:
     process.kill()
 
 
-def process_group_options() -> dict[str, bool]:
+def process_group_options() -> ProcessGroupOptions:
     return {"start_new_session": True} if os.name != "nt" else {}
 
 

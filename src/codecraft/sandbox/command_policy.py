@@ -270,10 +270,17 @@ class CommandPolicy:
         if not parts or parts[0] != "rm":
             return False
 
+        has_recursive, has_force = CommandPolicy._rm_flags(parts[1:])
+        if not (has_recursive and has_force):
+            return False
+
+        return CommandPolicy._rm_target(parts[1:]) in _BROAD_RM_TARGETS
+
+    @staticmethod
+    def _rm_flags(arguments: list[str]) -> tuple[bool, bool]:
         has_recursive = False
         has_force = False
-
-        for part in parts[1:]:
+        for part in arguments:
             if part in {"-r", "-R", "--recursive"}:
                 has_recursive = True
                 continue
@@ -286,19 +293,15 @@ class CommandPolicy:
                     has_recursive = True
                 if "f" in flags:
                     has_force = True
-                continue
+        return has_recursive, has_force
 
-        if not (has_recursive and has_force):
-            return False
-
-        target = ""
-        for part in reversed(parts[1:]):
+    @staticmethod
+    def _rm_target(arguments: list[str]) -> str:
+        for part in reversed(arguments):
             if part.startswith("-"):
                 continue
-            target = part
-            break
-
-        return target in _BROAD_RM_TARGETS
+            return part
+        return ""
 
     @staticmethod
     def _git_requires_network(parts: list[str]) -> bool:

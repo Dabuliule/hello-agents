@@ -12,12 +12,13 @@ from datetime import timedelta
 from hashlib import sha256
 from importlib.metadata import version
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from jsonschema import Draft202012Validator
 from mcp import ClientSession, StdioServerParameters, types
 from mcp.client.stdio import get_default_environment, stdio_client
 from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic.json_schema import GenerateJsonSchema, JsonSchemaMode
 
 from codecraft.core.errors import CodecraftError
 from codecraft.mcp.config import MCPServerSettings
@@ -289,7 +290,15 @@ def mcp_args_model(name: str, schema: dict[str, Any]) -> type[BaseModel]:
             return value
 
         @classmethod
-        def model_json_schema(cls, **kwargs: Any) -> dict[str, Any]:
+        def model_json_schema(
+            cls,
+            by_alias: bool = True,
+            ref_template: str = "#/$defs/{model}",
+            schema_generator: type[GenerateJsonSchema] = GenerateJsonSchema,
+            mode: JsonSchemaMode = "validation",
+            *,
+            union_format: Literal["any_of", "primitive_type_array"] = "any_of",
+        ) -> dict[str, Any]:
             return deepcopy(input_schema)
 
     MCPArguments.__name__ = f"{name}_arguments"

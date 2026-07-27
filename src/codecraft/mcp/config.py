@@ -17,8 +17,12 @@ MCPToolEffect = Literal[
 ]
 
 
+def _default_tool_effects() -> set[MCPToolEffect]:
+    return {"network", "external"}
+
+
 class MCPToolPolicySettings(BaseModel):
-    effects: set[MCPToolEffect] = Field(default_factory=lambda: {"network", "external"})
+    effects: set[MCPToolEffect] = Field(default_factory=_default_tool_effects)
     requires_approval: bool = True
 
 
@@ -31,9 +35,7 @@ class MCPServerSettings(BaseModel):
     env_allowlist: list[str] = Field(default_factory=list)
     timeout_seconds: int = Field(default=30, ge=1, le=300)
     max_tools: int = Field(default=128, ge=1, le=1024)
-    default_effects: set[MCPToolEffect] = Field(
-        default_factory=lambda: {"network", "external"}
-    )
+    default_effects: set[MCPToolEffect] = Field(default_factory=_default_tool_effects)
     requires_approval: bool = True
     tools: dict[str, MCPToolPolicySettings] = Field(default_factory=dict)
 

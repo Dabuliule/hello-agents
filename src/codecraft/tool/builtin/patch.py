@@ -135,42 +135,45 @@ class ApplyPatchTool(BaseTool):
             if not lines[index].startswith("--- "):
                 index += 1
                 continue
-
-            if index + 1 >= len(lines) or not lines[index + 1].startswith("+++ "):
-                raise ValueError("missing +++ file header")
-
-            path = ApplyPatchTool._normalize_patch_path(lines[index + 1][4:].strip())
-            index += 2
-            hunks: list[list[str]] = []
-
-            while index < len(lines):
-                if lines[index].startswith("--- "):
-                    break
-                if not lines[index].startswith("@@"):
-                    index += 1
-                    continue
-
-                hunk: list[str] = []
-                hunk.append(lines[index])
-                index += 1
-                while index < len(lines):
-                    line = lines[index]
-                    if line.startswith("@@") or line.startswith("--- "):
-                        break
-                    if line.startswith(("+", "-", " ", "\\")):
-                        hunk.append(line)
-                        index += 1
-                        continue
-                    raise ValueError(f"unsupported patch line: {line.rstrip()}")
-                hunks.append(hunk)
-
-            if not hunks:
-                raise ValueError(f"patch for {path} has no hunks")
-            files.append(PatchFile(path=path, hunks=hunks))
+            patch_file, index = ApplyPatchTool._parse_patch_file(lines, index)
+            files.append(patch_file)
 
         if not files:
             raise ValueError("patch contains no file changes")
         return files
+
+    @staticmethod
+    def _parse_patch_file(lines: list[str], index: int) -> tuple[PatchFile, int]:
+        if index + 1 >= len(lines) or not lines[index + 1].startswith("+++ "):
+            raise ValueError("missing +++ file header")
+
+        path = ApplyPatchTool._normalize_patch_path(lines[index + 1][4:].strip())
+        index += 2
+        hunks: list[list[str]] = []
+        while index < len(lines) and not lines[index].startswith("--- "):
+            if not lines[index].startswith("@@"):
+                index += 1
+                continue
+            hunk, index = ApplyPatchTool._parse_hunk(lines, index)
+            hunks.append(hunk)
+
+        if not hunks:
+            raise ValueError(f"patch for {path} has no hunks")
+        return PatchFile(path=path, hunks=hunks), index
+
+    @staticmethod
+    def _parse_hunk(lines: list[str], index: int) -> tuple[list[str], int]:
+        hunk = [lines[index]]
+        index += 1
+        while index < len(lines):
+            line = lines[index]
+            if line.startswith("@@") or line.startswith("--- "):
+                break
+            if not line.startswith(("+", "-", " ", "\\")):
+                raise ValueError(f"unsupported patch line: {line.rstrip()}")
+            hunk.append(line)
+            index += 1
+        return hunk, index
 
     @staticmethod
     def _normalize_patch_path(raw_path: str) -> str:

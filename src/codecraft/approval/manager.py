@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel
 
@@ -26,7 +26,7 @@ class ApprovalRequest(BaseModel):
     turn_id: str
     call_id: str
     tool_name: str
-    arguments: dict
+    arguments: dict[str, Any]
     reason: str
     risk: str
 

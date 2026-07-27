@@ -30,43 +30,72 @@ class InstructionLoader:
         if matched_root is None:
             return None
 
-        directories = list(reversed(_walk_up(current, matched_root)))
-        for target in target_paths:
-            resolved = _resolve_target(target, cwd=current, roots=roots)
-            if resolved is None:
-                continue
-            target_root = _find_containing_root(resolved, roots)
-            if target_root is None:
-                continue
-            target_directory = resolved if resolved.is_dir() else resolved.parent
-            directories.extend(reversed(_walk_up(target_directory, target_root)))
-
-        sections: list[str] = []
-        seen: set[Path] = set()
-        for directory in directories:
-            directory_root = _find_containing_root(directory, roots)
-            if directory_root is None:
-                continue
-            for filename in self.filenames:
-                path = directory / filename
-                safe_path = _safe_instruction_path(path, directory_root)
-                if safe_path is None or safe_path in seen:
-                    continue
-                seen.add(safe_path)
-                content = _read_text(safe_path, max_chars=self.max_chars)
-                if content is None or not content.strip():
-                    continue
-                source = path.relative_to(directory_root)
-                scope = path.parent.relative_to(directory_root)
-                scope_label = str(scope) if scope.parts else "."
-                sections.append(
-                    f"# {source} (scope: {scope_label})\n\n{content.strip()}"
-                )
+        directories = _instruction_directories(
+            current=current,
+            current_root=matched_root,
+            roots=roots,
+            target_paths=target_paths,
+        )
+        sections = _load_instruction_sections(
+            directories=directories,
+            roots=roots,
+            filenames=self.filenames,
+            max_chars=self.max_chars,
+        )
 
         if not sections:
             return None
 
         return _bounded_sections(sections, max_chars=self.max_chars)
+
+
+def _instruction_directories(
+    *,
+    current: Path,
+    current_root: Path,
+    roots: list[Path],
+    target_paths: Iterable[Path],
+) -> list[Path]:
+    directories = list(reversed(_walk_up(current, current_root)))
+    for target in target_paths:
+        resolved = _resolve_target(target, cwd=current, roots=roots)
+        if resolved is None:
+            continue
+        target_root = _find_containing_root(resolved, roots)
+        if target_root is None:
+            continue
+        target_directory = resolved if resolved.is_dir() else resolved.parent
+        directories.extend(reversed(_walk_up(target_directory, target_root)))
+    return directories
+
+
+def _load_instruction_sections(
+    *,
+    directories: list[Path],
+    roots: list[Path],
+    filenames: tuple[str, ...],
+    max_chars: int,
+) -> list[str]:
+    sections: list[str] = []
+    seen: set[Path] = set()
+    for directory in directories:
+        directory_root = _find_containing_root(directory, roots)
+        if directory_root is None:
+            continue
+        for filename in filenames:
+            path = directory / filename
+            safe_path = _safe_instruction_path(path, directory_root)
+            if safe_path is None or safe_path in seen:
+                continue
+            seen.add(safe_path)
+            content = _read_text(safe_path, max_chars=max_chars)
+            if content is None or not content.strip():
+                continue
+            source = path.relative_to(directory_root)
+            scope = path.parent.relative_to(directory_root)
+            scope_label = str(scope) if scope.parts else "."
+            sections.append(f"# {source} (scope: {scope_label})\n\n{content.strip()}")
+    return sections
 
 
 def _find_containing_root(path: Path, roots: list[Path]) -> Path | None:

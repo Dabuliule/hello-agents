@@ -25,7 +25,9 @@ class ThreadApprovalReviewer(ApprovalReviewer):
         if request.approval_id in self.pending:
             raise RuntimeError(f"duplicate approval request: {request.approval_id}")
 
-        future = asyncio.get_running_loop().create_future()
+        future: asyncio.Future[ApprovalDecision] = (
+            asyncio.get_running_loop().create_future()
+        )
         self.pending[request.approval_id] = future
         self.requests[request.approval_id] = request
         try:

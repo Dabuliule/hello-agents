@@ -5,10 +5,16 @@ from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
 import json
 from time import monotonic
+from typing import Any
 
 from pydantic import ValidationError
 
-from codecraft.approval.manager import ApprovalManager
+from codecraft.approval.manager import (
+    ApprovalDecision,
+    ApprovalEvaluation,
+    ApprovalManager,
+    ApprovalRequest,
+)
 from codecraft.core.errors import CodecraftError
 from codecraft.core.token_budget import estimate_text_tokens, truncate_text_to_tokens
 from codecraft.core.turn_context import TurnContext
@@ -23,7 +29,26 @@ from codecraft.tool.registry import ToolRegistry
 @dataclass(frozen=True)
 class ToolRunnerEvent:
     type: RuntimeEventType
-    payload: dict
+    payload: dict[str, Any]
+
+
+@dataclass
+class _ToolRunState:
+    started_at: float
+    result: ToolResult | None = None
+    approved: bool = False
+    approval_wait_ms: int = 0
+    execution_ms: int = 0
+    observer_ms: int = 0
+    execution_deadline: asyncio.Timeout | None = None
+
+
+@dataclass(frozen=True)
+class _ApprovalOutcome:
+    decision: ApprovalDecision
+    wait_ms: int
+    error: str | None = None
+    exception_type: str | None = None
 
 
 class ToolRunner:
@@ -61,219 +86,23 @@ class ToolRunner:
             },
         )
 
-        started_at = monotonic()
-        result: ToolResult
-        approved = False
-        approval_wait_ms = 0
-        execution_ms = 0
-        observer_ms = 0
-        execution_deadline: asyncio.Timeout | None = None
-        try:
-            tool = self.registry.get(call.name)
-            args = tool.args_schema.model_validate(call.arguments)
-            sandbox_evaluation = self._sandbox_policy(context).evaluate_effects(
-                tool.effects
-            )
-            if not sandbox_evaluation.allowed:
-                # sandbox 是硬边界；不进入 approval，也不执行 tool。
-                result = ToolResult(
-                    success=False,
-                    content="Tool execution denied by sandbox policy.",
-                    error="sandbox_denied",
-                    suggestion=sandbox_evaluation.reason,
-                    metadata={
-                        "tool": call.name,
-                        "sandbox_mode": context.sandbox_mode,
-                        "denied_effect": sandbox_evaluation.denied_effect,
-                    },
-                )
-                result = self._limit_output(
-                    result,
-                    context.max_tool_output_chars,
-                    context.max_tool_output_tokens,
-                )
-                yield ToolRunnerEvent(
-                    RuntimeEventType.TOOL_CALL_FINISHED,
-                    self._finished_payload(
-                        call,
-                        result,
-                        started_at=started_at,
-                    ),
-                )
-                return
+        state = _ToolRunState(started_at=monotonic())
+        async for event in self._run_pipeline(call, context, state):
+            yield event
 
-            evaluation = await self.approval_manager.evaluate(tool, call, args, context)
-            if evaluation.requires_approval:
-                # approval 是可交互边界，通常由 UI 把请求展示给用户处理。
-                approval_request = self.approval_manager.build_request(
-                    call=call,
-                    context=context,
-                    evaluation=evaluation,
-                )
-                yield ToolRunnerEvent(
-                    RuntimeEventType.APPROVAL_REQUESTED,
-                    approval_request.model_dump(mode="json"),
-                )
-                approval_started_at = monotonic()
-                approval_error: str | None = None
-                approval_exception_type: str | None = None
-                approval_deadline = asyncio.timeout(context.approval_timeout_seconds)
-                try:
-                    async with approval_deadline:
-                        approval_decision = await self.approval_manager.request(
-                            approval_request
-                        )
-                except TimeoutError as exc:
-                    approval_error = (
-                        "approval_timeout"
-                        if approval_deadline.expired()
-                        else "approval_error"
-                    )
-                    approval_exception_type = type(exc).__name__
-                    approval_decision = (
-                        self.approval_manager.build_reviewer_failure_decision(
-                            approval_request,
-                            timed_out=approval_deadline.expired(),
-                        )
-                    )
-                except Exception as exc:
-                    approval_error = "approval_error"
-                    approval_exception_type = type(exc).__name__
-                    approval_decision = (
-                        self.approval_manager.build_reviewer_failure_decision(
-                            approval_request,
-                            timed_out=False,
-                        )
-                    )
-                finally:
-                    approval_wait_ms = int((monotonic() - approval_started_at) * 1000)
-                yield ToolRunnerEvent(
-                    RuntimeEventType.APPROVAL_DECIDED,
-                    approval_decision.model_dump(mode="json"),
-                )
-                if not approval_decision.approved:
-                    result = ToolResult(
-                        success=False,
-                        content=(
-                            "Tool approval timed out."
-                            if approval_error == "approval_timeout"
-                            else "Tool execution denied by approval."
-                        ),
-                        error=approval_error or "approval_denied",
-                        suggestion=approval_decision.reason,
-                        metadata={
-                            "approval_id": approval_decision.approval_id,
-                            "tool": call.name,
-                            **(
-                                {"exception_type": approval_exception_type}
-                                if approval_exception_type is not None
-                                else {}
-                            ),
-                        },
-                    )
-                    result = self._limit_output(
-                        result,
-                        context.max_tool_output_chars,
-                        context.max_tool_output_tokens,
-                    )
-                    yield ToolRunnerEvent(
-                        RuntimeEventType.TOOL_CALL_FINISHED,
-                        self._finished_payload(
-                            call,
-                            result,
-                            started_at=started_at,
-                            approval_wait_ms=approval_wait_ms,
-                        ),
-                    )
-                    return
-                approved = True
-            execution_started_at = monotonic()
-            execution_deadline = asyncio.timeout(context.tool_timeout_seconds)
-            try:
-                async with execution_deadline:
-                    result = await tool.arun(
-                        args,
-                        ToolContext(
-                            context=context,
-                            call=call,
-                            approved=approved,
-                            command_decision=evaluation.command_decision,
-                        ),
-                    )
-            finally:
-                execution_ms = int((monotonic() - execution_started_at) * 1000)
-        except TimeoutError as exc:
-            if execution_deadline is not None and execution_deadline.expired():
-                result = ToolResult(
-                    success=False,
-                    content="Tool execution timed out.",
-                    error="tool_timeout",
-                    suggestion="Retry with a narrower operation or increase the tool timeout.",
-                    metadata={"timeout_seconds": context.tool_timeout_seconds},
-                )
-            else:
-                result = ToolResult(
-                    success=False,
-                    content="Tool execution failed.",
-                    error="tool_execution_error",
-                    suggestion="Check the tool arguments or runtime environment.",
-                    metadata={"exception_type": type(exc).__name__},
-                )
-        except ValidationError as exc:
-            result = ToolResult(
-                success=False,
-                content="Tool argument validation failed.",
-                error="invalid_tool_arguments",
-                suggestion="Check the tool schema and retry with valid arguments.",
-                metadata={
-                    "validation_errors": [
-                        {
-                            "location": ".".join(str(part) for part in error["loc"]),
-                            "message": error["msg"],
-                            "type": error["type"],
-                        }
-                        for error in exc.errors(include_url=False, include_input=False)
-                    ]
-                },
-            )
-        except CodecraftError as exc:
-            result = ToolResult(
-                success=False,
-                content=exc.message,
-                error=exc.code,
-                suggestion=exc.suggestion,
-                metadata=exc.metadata,
-            )
-        except Exception as exc:
-            result = ToolResult(
-                success=False,
-                content="Tool execution failed.",
-                error="tool_execution_error",
-                suggestion="Check the tool arguments, workspace permissions, or runtime environment.",
-                metadata={"exception_type": type(exc).__name__},
-            )
+        result = state.result
+        if result is None:  # pragma: no cover - internal pipeline invariant
+            raise RuntimeError("tool execution pipeline produced no result")
 
-        if result.success and self.observers:
-            observer_started_at = monotonic()
-            post_actions = await self._run_observers(call, result, context)
-            observer_ms = int((monotonic() - observer_started_at) * 1000)
-            if post_actions:
-                result.metadata["post_actions"] = post_actions
-
-        result = self._limit_output(
-            result,
-            context.max_tool_output_chars,
-            context.max_tool_output_tokens,
-        )
         yield ToolRunnerEvent(
             RuntimeEventType.TOOL_CALL_FINISHED,
             self._finished_payload(
                 call,
                 result,
-                started_at=started_at,
-                approval_wait_ms=approval_wait_ms,
-                execution_ms=execution_ms,
-                observer_ms=observer_ms,
+                started_at=state.started_at,
+                approval_wait_ms=state.approval_wait_ms,
+                execution_ms=state.execution_ms,
+                observer_ms=state.observer_ms,
             ),
         )
 
@@ -290,13 +119,248 @@ class ToolRunner:
                 },
             )
 
+    async def _run_pipeline(
+        self,
+        call: ToolCall,
+        context: TurnContext,
+        state: _ToolRunState,
+    ) -> AsyncIterator[ToolRunnerEvent]:
+        try:
+            async for event in self._prepare_and_execute(call, context, state):
+                yield event
+        except TimeoutError as exc:
+            state.result = self._timeout_result(exc, context, state)
+        except ValidationError as exc:
+            state.result = self._validation_result(exc)
+        except CodecraftError as exc:
+            state.result = ToolResult(
+                success=False,
+                content=exc.message,
+                error=exc.code,
+                suggestion=exc.suggestion,
+                metadata=exc.metadata,
+            )
+        except Exception as exc:
+            state.result = ToolResult(
+                success=False,
+                content="Tool execution failed.",
+                error="tool_execution_error",
+                suggestion="Check the tool arguments, workspace permissions, or runtime environment.",
+                metadata={"exception_type": type(exc).__name__},
+            )
+
+        result = state.result
+        if result is None:  # pragma: no cover - internal pipeline invariant
+            raise RuntimeError("tool execution stage produced no result")
+
+        if result.success and self.observers:
+            observer_started_at = monotonic()
+            post_actions = await self._run_observers(call, result, context)
+            state.observer_ms = int((monotonic() - observer_started_at) * 1000)
+            if post_actions:
+                result.metadata["post_actions"] = post_actions
+
+        state.result = self._limit_output(
+            result,
+            context.max_tool_output_chars,
+            context.max_tool_output_tokens,
+        )
+
+    async def _prepare_and_execute(
+        self,
+        call: ToolCall,
+        context: TurnContext,
+        state: _ToolRunState,
+    ) -> AsyncIterator[ToolRunnerEvent]:
+        tool = self.registry.get(call.name)
+        args = tool.args_schema.model_validate(call.arguments)
+        sandbox_evaluation = self._sandbox_policy(context).evaluate_effects(
+            tool.effects
+        )
+        if not sandbox_evaluation.allowed:
+            # sandbox 是硬边界；不进入 approval，也不执行 tool。
+            state.result = ToolResult(
+                success=False,
+                content="Tool execution denied by sandbox policy.",
+                error="sandbox_denied",
+                suggestion=sandbox_evaluation.reason,
+                metadata={
+                    "tool": call.name,
+                    "sandbox_mode": context.sandbox_mode,
+                    "denied_effect": sandbox_evaluation.denied_effect,
+                },
+            )
+            return
+
+        evaluation = await self.approval_manager.evaluate(tool, call, args, context)
+        if evaluation.requires_approval:
+            async for event in self._handle_approval(call, context, evaluation, state):
+                yield event
+            if state.result is not None:
+                return
+
+        execution_started_at = monotonic()
+        state.execution_deadline = asyncio.timeout(context.tool_timeout_seconds)
+        try:
+            async with state.execution_deadline:
+                state.result = await tool.arun(
+                    args,
+                    ToolContext(
+                        context=context,
+                        call=call,
+                        approved=state.approved,
+                        command_decision=evaluation.command_decision,
+                    ),
+                )
+        finally:
+            state.execution_ms = int((monotonic() - execution_started_at) * 1000)
+
+    async def _handle_approval(
+        self,
+        call: ToolCall,
+        context: TurnContext,
+        evaluation: ApprovalEvaluation,
+        state: _ToolRunState,
+    ) -> AsyncIterator[ToolRunnerEvent]:
+        # approval 是可交互边界，先产出请求，再等待 UI 或 reviewer 处理。
+        request = self.approval_manager.build_request(
+            call=call,
+            context=context,
+            evaluation=evaluation,
+        )
+        yield ToolRunnerEvent(
+            RuntimeEventType.APPROVAL_REQUESTED,
+            request.model_dump(mode="json"),
+        )
+
+        outcome = await self._review_approval(
+            request,
+            timeout_seconds=context.approval_timeout_seconds,
+        )
+        state.approval_wait_ms = outcome.wait_ms
+        yield ToolRunnerEvent(
+            RuntimeEventType.APPROVAL_DECIDED,
+            outcome.decision.model_dump(mode="json"),
+        )
+        if outcome.decision.approved:
+            state.approved = True
+            return
+
+        state.result = self._approval_denied_result(call, outcome)
+
+    async def _review_approval(
+        self,
+        request: ApprovalRequest,
+        *,
+        timeout_seconds: int,
+    ) -> _ApprovalOutcome:
+        started_at = monotonic()
+        error: str | None = None
+        exception_type: str | None = None
+        deadline = asyncio.timeout(timeout_seconds)
+        try:
+            async with deadline:
+                decision = await self.approval_manager.request(request)
+        except TimeoutError as exc:
+            timed_out = deadline.expired()
+            error = "approval_timeout" if timed_out else "approval_error"
+            exception_type = type(exc).__name__
+            decision = self.approval_manager.build_reviewer_failure_decision(
+                request,
+                timed_out=timed_out,
+            )
+        except Exception as exc:
+            error = "approval_error"
+            exception_type = type(exc).__name__
+            decision = self.approval_manager.build_reviewer_failure_decision(
+                request,
+                timed_out=False,
+            )
+        finally:
+            wait_ms = int((monotonic() - started_at) * 1000)
+
+        return _ApprovalOutcome(
+            decision=decision,
+            wait_ms=wait_ms,
+            error=error,
+            exception_type=exception_type,
+        )
+
+    @staticmethod
+    def _approval_denied_result(
+        call: ToolCall,
+        outcome: _ApprovalOutcome,
+    ) -> ToolResult:
+        metadata = {
+            "approval_id": outcome.decision.approval_id,
+            "tool": call.name,
+        }
+        if outcome.exception_type is not None:
+            metadata["exception_type"] = outcome.exception_type
+
+        return ToolResult(
+            success=False,
+            content=(
+                "Tool approval timed out."
+                if outcome.error == "approval_timeout"
+                else "Tool execution denied by approval."
+            ),
+            error=outcome.error or "approval_denied",
+            suggestion=outcome.decision.reason,
+            metadata=metadata,
+        )
+
+    @staticmethod
+    def _timeout_result(
+        exc: TimeoutError,
+        context: TurnContext,
+        state: _ToolRunState,
+    ) -> ToolResult:
+        if state.execution_deadline is not None and state.execution_deadline.expired():
+            return ToolResult(
+                success=False,
+                content="Tool execution timed out.",
+                error="tool_timeout",
+                suggestion="Retry with a narrower operation or increase the tool timeout.",
+                metadata={"timeout_seconds": context.tool_timeout_seconds},
+            )
+        return ToolResult(
+            success=False,
+            content="Tool execution failed.",
+            error="tool_execution_error",
+            suggestion="Check the tool arguments or runtime environment.",
+            metadata={"exception_type": type(exc).__name__},
+        )
+
+    @staticmethod
+    def _validation_result(exc: ValidationError) -> ToolResult:
+        return ToolResult(
+            success=False,
+            content="Tool argument validation failed.",
+            error="invalid_tool_arguments",
+            suggestion="Check the tool schema and retry with valid arguments.",
+            metadata={
+                "validation_errors": [
+                    {
+                        "location": ".".join(str(part) for part in error["loc"]),
+                        "message": error["msg"],
+                        "type": error["type"],
+                    }
+                    for error in exc.errors(include_url=False, include_input=False)
+                ]
+            },
+        )
+
     async def _run_observers(
         self,
         call: ToolCall,
         result: ToolResult,
         context: TurnContext,
-    ) -> dict:
-        async def run(observer: ToolResultObserver) -> tuple[str, dict | None]:
+    ) -> dict[str, dict[str, Any]]:
+        async def run(
+            observer: ToolResultObserver,
+        ) -> tuple[str, dict[str, Any] | None]:
+            details: dict[str, Any] | None
             deadline = asyncio.timeout(context.tool_timeout_seconds)
             try:
                 async with deadline:
@@ -445,7 +509,9 @@ class ToolRunner:
         return result.model_copy(update={"content": "", "suggestion": None})
 
     @staticmethod
-    def _limit_mapping(value: dict, max_chars: int, *, label: str) -> dict:
+    def _limit_mapping(
+        value: dict[str, Any], max_chars: int, *, label: str
+    ) -> dict[str, Any]:
         original_chars = ToolRunner._json_chars(value)
         if original_chars <= max_chars:
             return value
@@ -474,7 +540,7 @@ class ToolRunner:
         approval_wait_ms: int = 0,
         execution_ms: int = 0,
         observer_ms: int = 0,
-    ) -> dict:
+    ) -> dict[str, Any]:
         total_ms = int((monotonic() - started_at) * 1000)
         governance_ms = max(
             0,

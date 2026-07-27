@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import builtins
 from collections.abc import Iterable
 
 from codecraft.core.errors import ToolNotFoundError
@@ -114,12 +115,12 @@ class ToolRegistry:
                 metadata={"tool": name},
             ) from exc
 
-    def list(self) -> list[BaseTool]:
-        return list(self._tools.values())
+    def list(self) -> builtins.list[BaseTool]:
+        return builtins.list(self._tools.values())
 
-    def specs(self) -> list[ToolSpec]:
+    def specs(self) -> builtins.list[ToolSpec]:
         """返回所有 tool 的模型可见描述。"""
         return [tool.spec() for tool in self.list()]
 
-    def async_provider_names(self) -> list[str]:
-        return list(self._async_providers)
+    def async_provider_names(self) -> builtins.list[str]:
+        return builtins.list(self._async_providers)
