@@ -6,6 +6,7 @@ from pathlib import Path
 from codecraft.retrieval.errors import RetrievalUnavailableError
 from codecraft.retrieval.index import RepositoryIndex
 from codecraft.retrieval.models import (
+    MatchType,
     RetrievalMatch,
     RetrievalRequest,
     RetrievalResponse,
@@ -33,7 +34,7 @@ class LexicalRetriever(Retriever):
         )
         if result.stale_file_count:
             raise RetrievalUnavailableError("indexed matches include stale files")
-        match_type = "path" if request.mode == "path" else "content"
+        match_type: MatchType = "path" if request.mode == "path" else "content"
         return RetrievalResponse(
             matches=tuple(
                 RetrievalMatch(

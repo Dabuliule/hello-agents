@@ -7,8 +7,9 @@ from contextlib import closing
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TypedDict
 
-from codecraft.retrieval.chunking import TreeSitterChunker
+from codecraft.retrieval.chunking import CodeChunk, CodeSymbol, TreeSitterChunker
 from codecraft.retrieval.errors import RetrievalUnavailableError
 from codecraft.retrieval.files import (
     is_inside_workspace,
@@ -49,6 +50,24 @@ class IndexQueryResult:
     indexed_file_count: int
     stale_file_count: int
     truncated: bool
+
+
+@dataclass(frozen=True, slots=True)
+class _FileRefreshResult:
+    updated_file_count: int = 0
+    unchanged_file_count: int = 0
+    deleted_file_count: int = 0
+    skipped_binary_count: int = 0
+    skipped_large_count: int = 0
+    indexed_bytes: int = 0
+
+
+class _IndexRow(TypedDict):
+    path: str
+    line: int
+    snippet: str
+    mtime_ns: int
+    size: int
 
 
 class RepositoryIndex:
@@ -187,75 +206,18 @@ class RepositoryIndex:
         if not database.is_file():
             raise RetrievalUnavailableError("repository index has not been built")
 
-        selected: list[Path] = []
-        for path in paths:
-            candidate = path.expanduser()
-            if not candidate.is_absolute():
-                candidate = root / candidate
-            candidate = candidate.resolve(strict=False)
-            if not is_inside_workspace(candidate, (root,)):
-                continue
-            if is_inside_workspace(candidate, (self.index_root,)):
-                continue
-            if candidate not in selected:
-                selected.append(candidate)
-
-        updated = 0
-        unchanged = 0
-        deleted = 0
-        skipped_binary = 0
-        skipped_large = 0
-        indexed_bytes = 0
+        selected = self._select_refresh_paths(root, paths)
         root, connection = self._open_existing(root)
         with closing(connection):
-            for file_path in selected:
-                relative = str(file_path.relative_to(root))
-                previous = connection.execute(
-                    "SELECT mtime_ns, size, digest FROM files WHERE path = ?",
-                    (relative,),
-                ).fetchone()
-                if not file_path.is_file():
-                    self._delete_file(connection, relative)
-                    deleted += int(previous is not None)
-                    continue
-                stat = file_path.stat()
-                if stat.st_size > max_file_bytes:
-                    skipped_large += 1
-                    self._delete_file(connection, relative)
-                    continue
-                if previous and (previous["mtime_ns"], previous["size"]) == (
-                    stat.st_mtime_ns,
-                    stat.st_size,
-                ):
-                    unchanged += 1
-                    continue
-                raw = file_path.read_bytes()
-                if looks_binary(raw):
-                    skipped_binary += 1
-                    self._delete_file(connection, relative)
-                    continue
-                digest = hashlib.sha256(raw).hexdigest()
-                if previous and previous["digest"] == digest:
-                    connection.execute(
-                        "UPDATE files SET mtime_ns = ?, size = ? WHERE path = ?",
-                        (stat.st_mtime_ns, stat.st_size, relative),
-                    )
-                    unchanged += 1
-                    continue
-                content = raw.decode("utf-8", errors="replace")
-                chunked = self.chunker.chunk(file_path, content)
-                self._replace_file(
+            results = [
+                self._refresh_file(
                     connection,
-                    path=relative,
-                    mtime_ns=stat.st_mtime_ns,
-                    size=stat.st_size,
-                    digest=digest,
-                    language=chunked.language,
-                    chunks=chunked.chunks,
-                    symbols=chunked.symbols,
+                    root,
+                    file_path,
+                    max_file_bytes=max_file_bytes,
                 )
-                updated += 1
-                indexed_bytes += len(raw)
+                for file_path in selected
+            ]
 
             connection.execute(
                 "INSERT OR REPLACE INTO metadata(key, value) VALUES('indexed_at', ?)",
@@ -275,15 +237,89 @@ class RepositoryIndex:
         return IndexSyncStats(
             candidate_file_count=len(selected),
             indexed_file_count=indexed_file_count,
-            updated_file_count=updated,
-            unchanged_file_count=unchanged,
-            deleted_file_count=deleted,
+            updated_file_count=sum(item.updated_file_count for item in results),
+            unchanged_file_count=sum(item.unchanged_file_count for item in results),
+            deleted_file_count=sum(item.deleted_file_count for item in results),
             chunk_count=chunk_count,
             symbol_count=symbol_count,
-            skipped_binary_count=skipped_binary,
-            skipped_large_count=skipped_large,
-            indexed_bytes=indexed_bytes,
+            skipped_binary_count=sum(item.skipped_binary_count for item in results),
+            skipped_large_count=sum(item.skipped_large_count for item in results),
+            indexed_bytes=sum(item.indexed_bytes for item in results),
             database_path=str(database),
+        )
+
+    def _select_refresh_paths(self, root: Path, paths: list[Path]) -> list[Path]:
+        selected: list[Path] = []
+        for path in paths:
+            candidate = path.expanduser()
+            if not candidate.is_absolute():
+                candidate = root / candidate
+            candidate = candidate.resolve(strict=False)
+            if not is_inside_workspace(candidate, (root,)):
+                continue
+            if is_inside_workspace(candidate, (self.index_root,)):
+                continue
+            if candidate not in selected:
+                selected.append(candidate)
+        return selected
+
+    def _refresh_file(
+        self,
+        connection: sqlite3.Connection,
+        root: Path,
+        file_path: Path,
+        *,
+        max_file_bytes: int,
+    ) -> _FileRefreshResult:
+        relative = str(file_path.relative_to(root))
+        previous = connection.execute(
+            "SELECT mtime_ns, size, digest FROM files WHERE path = ?",
+            (relative,),
+        ).fetchone()
+        if not file_path.is_file():
+            self._delete_file(connection, relative)
+            return _FileRefreshResult(
+                deleted_file_count=int(previous is not None),
+            )
+
+        stat = file_path.stat()
+        if stat.st_size > max_file_bytes:
+            self._delete_file(connection, relative)
+            return _FileRefreshResult(skipped_large_count=1)
+        if previous and (previous["mtime_ns"], previous["size"]) == (
+            stat.st_mtime_ns,
+            stat.st_size,
+        ):
+            return _FileRefreshResult(unchanged_file_count=1)
+
+        raw = file_path.read_bytes()
+        if looks_binary(raw):
+            self._delete_file(connection, relative)
+            return _FileRefreshResult(skipped_binary_count=1)
+
+        digest = hashlib.sha256(raw).hexdigest()
+        if previous and previous["digest"] == digest:
+            connection.execute(
+                "UPDATE files SET mtime_ns = ?, size = ? WHERE path = ?",
+                (stat.st_mtime_ns, stat.st_size, relative),
+            )
+            return _FileRefreshResult(unchanged_file_count=1)
+
+        content = raw.decode("utf-8", errors="replace")
+        chunked = self.chunker.chunk(file_path, content)
+        self._replace_file(
+            connection,
+            path=relative,
+            mtime_ns=stat.st_mtime_ns,
+            size=stat.st_size,
+            digest=digest,
+            language=chunked.language,
+            chunks=chunked.chunks,
+            symbols=chunked.symbols,
+        )
+        return _FileRefreshResult(
+            updated_file_count=1,
+            indexed_bytes=len(raw),
         )
 
     def search_lexical(
@@ -455,8 +491,8 @@ class RepositoryIndex:
         size: int,
         digest: str,
         language: str,
-        chunks: tuple,
-        symbols: tuple,
+        chunks: tuple[CodeChunk, ...],
+        symbols: tuple[CodeSymbol, ...],
     ) -> None:
         self._delete_file(connection, path)
         connection.execute(
@@ -505,7 +541,7 @@ class RepositoryIndex:
         expression: str,
         scope: str,
         limit: int,
-    ) -> list[sqlite3.Row]:
+    ) -> list[_IndexRow]:
         scope_sql, scope_args = _scope_clause(scope, column="chunks.path")
         sql = f"""
             SELECT chunks.path, chunks.start_line AS line, chunks.content,
@@ -518,15 +554,17 @@ class RepositoryIndex:
             LIMIT ?
         """
         rows = connection.execute(sql, [expression, *scope_args, limit]).fetchall()
-        results = []
+        results: list[_IndexRow] = []
         for row in rows:
-            line_offset, snippet = _matching_line(row["content"], expression)
+            line_offset, snippet = _matching_line(str(row["content"]), expression)
             results.append(
-                dict(row)
-                | {
-                    "line": int(row["line"]) + line_offset,
-                    "snippet": snippet,
-                }
+                _IndexRow(
+                    path=str(row["path"]),
+                    line=int(row["line"]) + line_offset,
+                    snippet=snippet,
+                    mtime_ns=int(row["mtime_ns"]),
+                    size=int(row["size"]),
+                )
             )
         return results
 
@@ -538,7 +576,7 @@ class RepositoryIndex:
         scope: str,
         case_sensitive: bool,
         limit: int,
-    ) -> list[sqlite3.Row]:
+    ) -> list[_IndexRow]:
         scope_sql, scope_args = _scope_clause(scope, column="files.path")
         predicate = (
             "instr(files.path, ?) > 0"
@@ -551,12 +589,22 @@ class RepositoryIndex:
             FROM files WHERE {predicate} {scope_sql}
             ORDER BY files.path LIMIT ?
         """
-        return connection.execute(sql, [query, *scope_args, limit]).fetchall()
+        rows = connection.execute(sql, [query, *scope_args, limit]).fetchall()
+        return [
+            _IndexRow(
+                path=str(row["path"]),
+                line=int(row["line"]),
+                snippet=str(row["snippet"]),
+                mtime_ns=int(row["mtime_ns"]),
+                size=int(row["size"]),
+            )
+            for row in rows
+        ]
 
     @staticmethod
     def _validated_result(
         root: Path,
-        rows: list,
+        rows: list[_IndexRow],
         *,
         indexed_file_count: int,
         max_results: int,

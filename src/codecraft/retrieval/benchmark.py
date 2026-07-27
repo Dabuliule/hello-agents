@@ -64,14 +64,14 @@ async def run_retrieval_benchmark(
         if strategy == "scan":
             search_tool: SearchTool = WorkspaceSearchTool()
         else:
-            index = RepositoryIndex(output_dir / "indexes")
-            index.sync(workspace)
+            repository_index = RepositoryIndex(output_dir / "indexes")
+            repository_index.sync(workspace)
             search_tool = WorkspaceSearchTool(
                 ContextEngine(
                     [
                         ScanRetriever(),
-                        LexicalRetriever(index),
-                        SymbolRetriever(index),
+                        LexicalRetriever(repository_index),
+                        SymbolRetriever(repository_index),
                     ]
                 )
             )
@@ -81,7 +81,7 @@ async def run_retrieval_benchmark(
     started = monotonic()
     schedule = [(case, attempt) for case in cases for attempt in range(1, repeat + 1)]
     results: list[dict[str, Any]] = []
-    for index, (case, attempt) in enumerate(schedule, start=1):
+    for case_number, (case, attempt) in enumerate(schedule, start=1):
         result = await _run_case(
             search_tool,
             case,
@@ -91,7 +91,7 @@ async def run_retrieval_benchmark(
         )
         results.append(result)
         if on_case_complete is not None:
-            on_case_complete(index, len(schedule), result)
+            on_case_complete(case_number, len(schedule), result)
 
     finished_at = datetime.now(UTC)
     return {

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
+import os
+from pathlib import Path
 
 from typer.testing import CliRunner
 
@@ -134,6 +136,69 @@ def test_repository_index_skips_escaped_symlinks_and_its_database(tmp_path):
     assert first.indexed_file_count == 1
     assert second.indexed_file_count == 1
     assert second.unchanged_file_count == 1
+
+
+def test_repository_index_refresh_paths_preserves_selection_and_skip_semantics(
+    tmp_path,
+):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    digest_unchanged = workspace / "digest.txt"
+    deleted = workspace / "deleted.txt"
+    binary = workspace / "binary.txt"
+    large = workspace / "large.txt"
+    digest_unchanged.write_text("stable\n", encoding="utf-8")
+    deleted.write_text("delete\n", encoding="utf-8")
+    binary.write_text("binary\n", encoding="utf-8")
+    large.write_text("small\n", encoding="utf-8")
+    outside = tmp_path / "outside.txt"
+    outside.write_text("outside\n", encoding="utf-8")
+
+    index = RepositoryIndex(tmp_path / "indexes")
+    assert index.sync(workspace).indexed_file_count == 4
+
+    previous_stat = digest_unchanged.stat()
+    os.utime(
+        digest_unchanged,
+        ns=(previous_stat.st_atime_ns, previous_stat.st_mtime_ns + 1_000_000_000),
+    )
+    assert digest_unchanged.stat().st_mtime_ns != previous_stat.st_mtime_ns
+    deleted.unlink()
+    binary.write_bytes(b"\0bin\n")
+    large.write_text("too-large\n", encoding="utf-8")
+
+    refreshed = index.refresh_paths(
+        workspace,
+        [
+            Path("digest.txt"),
+            digest_unchanged,
+            Path("deleted.txt"),
+            binary,
+            large,
+            outside,
+            outside,
+        ],
+        max_file_bytes=8,
+    )
+
+    assert refreshed.candidate_file_count == 4
+    assert refreshed.indexed_file_count == 1
+    assert refreshed.updated_file_count == 0
+    assert refreshed.unchanged_file_count == 1
+    assert refreshed.deleted_file_count == 1
+    assert refreshed.skipped_binary_count == 1
+    assert refreshed.skipped_large_count == 1
+    assert refreshed.indexed_bytes == 0
+    remaining = index.search_lexical(workspace, query=".txt", mode="path")
+    assert [match.path for match in remaining.matches] == ["digest.txt"]
+
+    fast_path = index.refresh_paths(
+        workspace,
+        [digest_unchanged],
+        max_file_bytes=8,
+    )
+    assert fast_path.candidate_file_count == 1
+    assert fast_path.unchanged_file_count == 1
 
 
 def test_context_engine_falls_back_when_index_match_is_stale(tmp_path):

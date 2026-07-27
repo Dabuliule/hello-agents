@@ -39,6 +39,7 @@ class QueryRouter:
 
     def route(self, request: RetrievalRequest) -> RetrievalPlan:
         query = request.query.strip()
+        retrievers: tuple[str, ...]
         if request.mode == "path":
             return RetrievalPlan(("lexical", "scan"), "path_mode")
         if _looks_like_path(query):
