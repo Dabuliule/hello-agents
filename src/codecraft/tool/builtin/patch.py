@@ -2,12 +2,14 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from dataclasses import dataclass
+from pathlib import Path
 
 from pydantic import BaseModel
 
 from codecraft.core.errors import WorkspaceAccessError
 from codecraft.schema.event import RuntimeEventType
 from codecraft.schema.tool import ToolEffect, ToolResult, ToolRuntimeEvent
+from codecraft.tool.atomic import atomic_write_text
 from codecraft.tool.base import BaseTool, ToolArguments, ToolContext
 from codecraft.tool.workspace import WorkspaceGuard
 
@@ -20,6 +22,38 @@ class ApplyPatchArgs(ToolArguments):
 class PatchFile:
     path: str
     hunks: list[list[str]]
+
+
+@dataclass(frozen=True)
+class PreparedPatch:
+    path: Path
+    before: str
+    after: str
+
+
+class PatchApplicationError(Exception):
+    def __init__(
+        self,
+        *,
+        content: str,
+        error: str,
+        metadata: dict[str, object] | None = None,
+        suggestion: str | None = None,
+    ) -> None:
+        super().__init__(content)
+        self.content = content
+        self.error = error
+        self.metadata = metadata or {}
+        self.suggestion = suggestion
+
+    def as_result(self) -> ToolResult:
+        return ToolResult(
+            success=False,
+            content=self.content,
+            error=self.error,
+            suggestion=self.suggestion,
+            metadata=self.metadata,
+        )
 
 
 class ApplyPatchTool(BaseTool):
@@ -51,47 +85,14 @@ class ApplyPatchTool(BaseTool):
                 metadata={"reason": str(exc)},
             )
 
-        changed_files: list[str] = []
-        for patch_file in files:
-            try:
-                path = guard.resolve_write_path(patch_file.path)
-            except WorkspaceAccessError as exc:
-                return ToolResult(
-                    success=False,
-                    content=exc.message,
-                    error=exc.code,
-                    suggestion=exc.suggestion,
-                    metadata=exc.metadata,
-                )
-            if not path.exists():
-                return ToolResult(
-                    success=False,
-                    content="Patch target does not exist.",
-                    error="patch_target_missing",
-                    metadata={"path": str(path)},
-                )
-            if path.is_dir():
-                return ToolResult(
-                    success=False,
-                    content="Patch target is a directory.",
-                    error="path_is_directory",
-                    metadata={"path": str(path)},
-                )
+        try:
+            prepared = self._prepare_changes(files, guard)
+            self._verify_targets_unchanged(prepared)
+            self._commit_changes(prepared)
+        except PatchApplicationError as exc:
+            return exc.as_result()
 
-            before = path.read_text(encoding="utf-8")
-            try:
-                after = self._apply_hunks(before, patch_file.hunks)
-            except ValueError as exc:
-                return ToolResult(
-                    success=False,
-                    content="Patch could not be applied.",
-                    error="patch_conflict",
-                    metadata={"path": str(path), "reason": str(exc)},
-                )
-
-            if before != after:
-                path.write_text(after, encoding="utf-8")
-                changed_files.append(str(path))
+        changed_files = [str(change.path) for change in prepared]
 
         return ToolResult(
             success=True,
@@ -119,6 +120,124 @@ class ApplyPatchTool(BaseTool):
                 )
             ],
         )
+
+    @classmethod
+    def _prepare_changes(
+        cls,
+        files: list[PatchFile],
+        guard: WorkspaceGuard,
+    ) -> list[PreparedPatch]:
+        prepared: list[PreparedPatch] = []
+        seen: set[Path] = set()
+
+        for patch_file in files:
+            try:
+                path = guard.resolve_write_path(patch_file.path)
+            except WorkspaceAccessError as exc:
+                raise PatchApplicationError(
+                    content=exc.message,
+                    error=exc.code,
+                    suggestion=exc.suggestion,
+                    metadata=exc.metadata,
+                ) from exc
+
+            if path in seen:
+                raise PatchApplicationError(
+                    content="Patch contains the same target more than once.",
+                    error="duplicate_patch_target",
+                    metadata={"path": str(path)},
+                )
+            seen.add(path)
+            cls._validate_target(path)
+
+            try:
+                before = path.read_text(encoding="utf-8")
+            except OSError as exc:
+                raise PatchApplicationError(
+                    content="Patch target could not be read.",
+                    error="patch_read_failed",
+                    metadata={"path": str(path), "reason": str(exc)},
+                ) from exc
+
+            try:
+                after = cls._apply_hunks(before, patch_file.hunks)
+            except ValueError as exc:
+                raise PatchApplicationError(
+                    content="Patch could not be applied.",
+                    error="patch_conflict",
+                    metadata={"path": str(path), "reason": str(exc)},
+                ) from exc
+
+            if before != after:
+                prepared.append(PreparedPatch(path=path, before=before, after=after))
+
+        return prepared
+
+    @staticmethod
+    def _validate_target(path: Path) -> None:
+        if not path.exists():
+            raise PatchApplicationError(
+                content="Patch target does not exist.",
+                error="patch_target_missing",
+                metadata={"path": str(path)},
+            )
+        if path.is_dir():
+            raise PatchApplicationError(
+                content="Patch target is a directory.",
+                error="path_is_directory",
+                metadata={"path": str(path)},
+            )
+
+    @staticmethod
+    def _verify_targets_unchanged(prepared: list[PreparedPatch]) -> None:
+        for change in prepared:
+            try:
+                current = change.path.read_text(encoding="utf-8")
+            except OSError as exc:
+                raise PatchApplicationError(
+                    content="Patch target changed before it could be written.",
+                    error="patch_target_changed",
+                    metadata={"path": str(change.path), "reason": str(exc)},
+                ) from exc
+            if current != change.before:
+                raise PatchApplicationError(
+                    content="Patch target changed before it could be written.",
+                    error="patch_target_changed",
+                    metadata={"path": str(change.path)},
+                )
+
+    @staticmethod
+    def _commit_changes(prepared: list[PreparedPatch]) -> None:
+        committed: list[PreparedPatch] = []
+        try:
+            for change in prepared:
+                atomic_write_text(change.path, change.after)
+                committed.append(change)
+        except Exception as exc:
+            rollback_errors: list[dict[str, str]] = []
+            for change in reversed(committed):
+                try:
+                    atomic_write_text(change.path, change.before)
+                except Exception as rollback_exc:
+                    rollback_errors.append(
+                        {"path": str(change.path), "reason": str(rollback_exc)}
+                    )
+            metadata: dict[str, object] = {"reason": str(exc)}
+            if rollback_errors:
+                metadata["rollback_errors"] = rollback_errors
+                metadata["possibly_changed_files"] = [
+                    str(change.path) for change in committed
+                ]
+            raise PatchApplicationError(
+                content="Patch changes could not be committed.",
+                error="patch_write_failed",
+                metadata=metadata,
+                suggestion=(
+                    "Inspect possibly_changed_files before retrying."
+                    if rollback_errors
+                    else "Fix the filesystem error and retry the patch."
+                ),
+            ) from exc
 
     @staticmethod
     def _parse_patch(patch: str) -> list[PatchFile]:
