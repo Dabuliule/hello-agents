@@ -443,7 +443,6 @@ class Turn:
     def _project_instructions(self) -> str | None:
         return self.instruction_loader.load_project_instructions(
             cwd=self.context.cwd,
-            workspace_roots=self.context.workspace_roots,
             target_paths=self._instruction_target_paths(),
         )
 
@@ -519,7 +518,6 @@ class Turn:
             session_id=config.session_id,
             turn_id=self.turn_id,
             cwd=config.cwd,
-            workspace_roots=config.workspace_roots,
             model=config.model,
             model_provider=config.model_provider,
             approval_policy=config.approval_policy,

@@ -41,7 +41,6 @@ class SessionConfig(BaseModel):
     source: SessionSource
 
     cwd: Path
-    workspace_roots: list[Path]
     codecraft_home: Path
 
     model: str = Field(min_length=1)
@@ -92,19 +91,6 @@ class SessionConfig(BaseModel):
     def normalize_codecraft_home(cls, value: Path) -> Path:
         return value.expanduser().resolve()
 
-    @field_validator("workspace_roots")
-    @classmethod
-    def validate_workspace_roots(cls, value: list[Path]) -> list[Path]:
-        if not value:
-            raise ValueError("workspace_roots must include at least one directory")
-
-        roots = [path.expanduser().resolve() for path in value]
-        missing = [path for path in roots if not path.exists() or not path.is_dir()]
-        if missing:
-            raise ValueError(f"workspace_roots must be directories: {missing}")
-
-        return list(dict.fromkeys(roots))
-
     @field_validator("model_api_key_env")
     @classmethod
     def validate_model_api_key_env(cls, value: str | None) -> str | None:
@@ -137,12 +123,7 @@ class SessionConfig(BaseModel):
         return MCPSettings(servers=values).servers
 
     @model_validator(mode="after")
-    def validate_workspace_boundary(self) -> SessionConfig:
-        if not any(
-            self.cwd == root or root in self.cwd.parents
-            for root in self.workspace_roots
-        ):
-            raise ValueError("cwd must be inside a workspace root")
+    def validate_model_token_budget(self) -> SessionConfig:
         reserved = self.model_max_output_tokens + self.context_safety_margin_tokens
         if reserved >= self.model_context_window_tokens:
             raise ValueError(

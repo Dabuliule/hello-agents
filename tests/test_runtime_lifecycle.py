@@ -30,7 +30,6 @@ def make_config(tmp_path) -> SessionConfig:
         session_id="ses_lifecycle",
         source=SessionSource.TEST,
         cwd=tmp_path,
-        workspace_roots=[tmp_path],
         codecraft_home=tmp_path / ".codecraft",
         model="mock-model",
         model_provider="mock",

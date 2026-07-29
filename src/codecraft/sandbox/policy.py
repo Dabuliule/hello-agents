@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from enum import StrEnum
-from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict
 
@@ -23,7 +22,6 @@ class SandboxPolicy(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     mode: SandboxMode
-    workspace_roots: list[Path]
     network_access: bool = False
 
     def evaluate_effects(self, effects: set[ToolEffect]) -> "SandboxEvaluation":

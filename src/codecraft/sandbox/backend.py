@@ -19,7 +19,7 @@ class SandboxBackendType(StrEnum):
 class SandboxExecutionRequest:
     command: str
     cwd: Path
-    workspace_roots: tuple[Path, ...]
+    workspace_root: Path
     sandbox_mode: SandboxMode
     network_access: bool
     timeout_seconds: int

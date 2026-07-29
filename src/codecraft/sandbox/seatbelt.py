@@ -8,7 +8,7 @@ from codecraft.sandbox._execution import (
     communicate,
     process_group_options,
     sandbox_environment,
-    workspace_paths,
+    workspace_path,
 )
 from codecraft.sandbox.backend import (
     SandboxBackend,
@@ -30,12 +30,13 @@ class SeatbeltSandboxBackend(SandboxBackend):
         self.executable = executable
 
     async def execute(self, request: SandboxExecutionRequest) -> SandboxExecutionResult:
+        _, cwd = workspace_path(request)
         with tempfile.TemporaryDirectory(prefix="codecraft-seatbelt-") as temp:
             command = self.build_command(request, temp_root=Path(temp))
             try:
                 process = await asyncio.create_subprocess_exec(
                     *command,
-                    cwd=str(request.cwd),
+                    cwd=str(cwd),
                     env=sandbox_environment(request, Path(temp)),
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
@@ -70,7 +71,7 @@ class SeatbeltSandboxBackend(SandboxBackend):
         *,
         temp_root: Path,
     ) -> list[str]:
-        roots, _ = workspace_paths(request)
+        root, _ = workspace_path(request)
         policy = ["(version 1)", "(allow default)"]
         definitions = [("TEMP_ROOT", temp_root.resolve())]
 
@@ -79,10 +80,8 @@ class SeatbeltSandboxBackend(SandboxBackend):
             policy.append('(allow file-write* (literal "/dev/null"))')
             policy.append('(allow file-write* (subpath (param "TEMP_ROOT")))')
             if request.sandbox_mode == SandboxMode.WORKSPACE_WRITE:
-                for index, root in enumerate(roots):
-                    key = f"WRITABLE_ROOT_{index}"
-                    definitions.append((key, root))
-                    policy.append(f'(allow file-write* (subpath (param "{key}")))')
+                definitions.append(("WRITABLE_ROOT", root))
+                policy.append('(allow file-write* (subpath (param "WRITABLE_ROOT")))')
 
         if not request.network_access:
             policy.append("(deny network*)")

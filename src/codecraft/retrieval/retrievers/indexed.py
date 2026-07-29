@@ -93,15 +93,11 @@ class SymbolRetriever(Retriever):
 
 def _workspace_and_scope(request: RetrievalRequest) -> tuple[Path, str]:
     resolved = request.root.resolve(strict=False)
-    roots = sorted(
-        (root.resolve(strict=False) for root in request.workspace_roots),
-        key=lambda root: len(root.parts),
-        reverse=True,
-    )
-    for root in roots:
-        try:
-            relative = resolved.relative_to(root)
-        except ValueError:
-            continue
-        return root, str(relative) if relative.parts else "."
-    raise RetrievalUnavailableError("request root is outside indexed workspaces")
+    workspace_root = request.workspace_root.resolve(strict=False)
+    try:
+        relative = resolved.relative_to(workspace_root)
+    except ValueError as exc:
+        raise RetrievalUnavailableError(
+            "request root is outside indexed workspace"
+        ) from exc
+    return workspace_root, str(relative) if relative.parts else "."

@@ -66,7 +66,6 @@ def _config(tmp_path, *, approval_policy=ApprovalPolicy.NEVER) -> SessionConfig:
         session_id="ses_tui",
         source=SessionSource.CLI_TUI,
         cwd=tmp_path,
-        workspace_roots=[tmp_path],
         codecraft_home=tmp_path / ".codecraft",
         model="mock-model",
         model_provider="mock",

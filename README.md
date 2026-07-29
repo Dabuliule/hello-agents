@@ -333,6 +333,11 @@ AGENTS.md
 CODECRAFT.md
 ```
 
+The resolved session `cwd` is both the base for relative paths and the single
+workspace boundary used by built-in file tools, retrieval, project instructions,
+and sandbox writes. A bash call may choose a nested working directory, but that
+does not change or expand the session boundary.
+
 They are reloaded for every turn. Root rules apply first; instructions discovered
 for accessed nested paths carry directory scopes, and deeper scopes take precedence.
 Symlinks that resolve outside the workspace are ignored.
@@ -471,7 +476,7 @@ tmpfs_mb = 256
 
 The image must already exist locally because CodeCraft runs Docker with `--pull never`. Use a custom image when a repository needs another language or toolchain.
 
-The Docker backend creates an ephemeral container per bash command. It uses a read-only container root, a bounded `/tmp` tmpfs, the host UID/GID, dropped Linux capabilities, `no-new-privileges`, CPU/memory/PID limits, workspace-only bind mounts, `sandbox.env_allowlist` for explicit environment forwarding, and `--network none` when network is disabled. Timed-out containers are force removed.
+The Docker backend creates an ephemeral container per bash command. It uses a read-only container root, a bounded `/tmp` tmpfs, the host UID/GID, dropped Linux capabilities, `no-new-privileges`, CPU/memory/PID limits, one workspace bind mount, `sandbox.env_allowlist` for explicit environment forwarding, and `--network none` when network is disabled. Timed-out containers are force removed.
 
 Important boundary: Docker isolates bash processes, not the mounted repository from intentional writes. In `workspace_write` mode the real workspace is mounted read-write, while built-in file tools continue to run on the host behind `WorkspaceGuard`. Approval and command policy remain part of the security model.
 

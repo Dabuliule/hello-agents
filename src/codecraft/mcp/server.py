@@ -61,7 +61,7 @@ def create_repository_mcp_server(
             SymbolRetriever(index),
         ]
     )
-    guard = WorkspaceGuard([root])
+    guard = WorkspaceGuard(root)
     server = FastMCP(
         "CodeCraft Repository Context",
         instructions=(
@@ -93,14 +93,14 @@ def create_repository_mcp_server(
         max_results: Annotated[int, Field(ge=1, le=100)] = 20,
         max_file_bytes: Annotated[int, Field(ge=1, le=10_000_000)] = 1_000_000,
     ) -> RepositorySearchResult:
-        search_root = guard.resolve_read_path(path, root)
+        search_root = guard.resolve_read_path(path)
         if not search_root.is_dir():
             raise ValueError(f"search path must be a directory: {path}")
         response = await engine.retrieve(
             RetrievalRequest(
                 query=query,
                 root=search_root,
-                workspace_roots=(root,),
+                workspace_root=root,
                 mode=mode,
                 case_sensitive=case_sensitive,
                 max_results=max_results,
@@ -153,10 +153,7 @@ def create_repository_mcp_server(
     )
     def workspace_instructions() -> str:
         return (
-            InstructionLoader().load_project_instructions(
-                cwd=root,
-                workspace_roots=[root],
-            )
+            InstructionLoader().load_project_instructions(cwd=root)
             or "No project instructions found."
         )
 

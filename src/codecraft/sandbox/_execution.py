@@ -98,15 +98,11 @@ def validated_environment_names(names: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(dict.fromkeys(names))
 
 
-def workspace_paths(
+def workspace_path(
     request: SandboxExecutionRequest,
-) -> tuple[tuple[Path, ...], Path]:
-    roots = tuple(
-        dict.fromkeys(root.expanduser().resolve() for root in request.workspace_roots)
-    )
-    if not roots:
-        raise SandboxBackendError("sandbox requires a workspace root")
+) -> tuple[Path, Path]:
+    root = request.workspace_root.expanduser().resolve()
     cwd = request.cwd.expanduser().resolve()
-    if not any(cwd == root or root in cwd.parents for root in roots):
-        raise SandboxBackendError("command cwd is outside workspace roots")
-    return roots, cwd
+    if cwd != root and root not in cwd.parents:
+        raise SandboxBackendError("command cwd is outside workspace root")
+    return root, cwd

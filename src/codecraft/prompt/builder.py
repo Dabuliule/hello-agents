@@ -44,7 +44,6 @@ class PromptBuilder:
         return "\n".join(
             [
                 f"cwd: {context.cwd}",
-                f"workspace_roots: {', '.join(str(root) for root in context.workspace_roots)}",
                 f"approval_policy: {context.approval_policy}",
                 f"sandbox_mode: {context.sandbox_mode}",
                 f"network_access: {str(context.network_access).lower()}",

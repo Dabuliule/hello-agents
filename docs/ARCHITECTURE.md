@@ -211,7 +211,10 @@ This keeps side-effect governance in one place.
 | `apply_patch` | `workspace_write` | requires approval, emits patch metadata |
 | `bash` | `process_exec` | command policy + approval + pluggable process sandbox |
 
-`WorkspaceGuard` prevents filesystem path escape for workspace tools and bash cwd.
+The resolved session `cwd` is both the relative-path base and the single workspace
+boundary used by built-in file tools, retrieval, project instructions, and sandbox
+writes. `WorkspaceGuard` prevents path escape for workspace tools and bash cwd; a
+bash call may select a nested cwd without expanding that boundary.
 
 `ToolRunner` applies both character and token limits to model-facing content, plus
 character limits to structured data, metadata, and tool-emitted event payloads
@@ -253,7 +256,7 @@ The default `auto` selection uses `SeatbeltSandboxBackend` on macOS and `Bubblew
 
 Sandbox code is split by responsibility: `backend.py` defines the execution contract, `_execution.py` owns shared process lifecycle and validation, `factory.py` resolves configured backends, and `process.py`, `seatbelt.py`, `bubblewrap.py`, and `docker.py` contain platform-specific adapters. Platform modules depend on the contract and shared execution primitives; the contract does not depend on concrete backends.
 
-The optional `DockerSandboxBackend` creates an ephemeral container per command with workspace-only bind mounts, a read-only root filesystem, bounded tmpfs, host UID/GID, dropped capabilities, `no-new-privileges`, CPU/memory/PID limits, explicit environment forwarding, and no container network when `network_access=false`. It never pulls an image implicitly and force removes timed-out containers.
+The optional `DockerSandboxBackend` creates an ephemeral container per command with one workspace bind mount, a read-only root filesystem, bounded tmpfs, host UID/GID, dropped capabilities, `no-new-privileges`, CPU/memory/PID limits, explicit environment forwarding, and no container network when `network_access=false`. It never pulls an image implicitly and force removes timed-out containers.
 
 Native and Docker backends isolate the bash process but do not make a writable workspace immutable. Built-in file tools still execute on the host behind `WorkspaceGuard`, and command policy plus approval remain in force for every backend.
 
@@ -287,9 +290,10 @@ turn_context
 ```
 
 Project instructions come from `AGENTS.md` and `CODECRAFT.md`. `Turn` reloads the
-cwd chain and scopes discovered through previously accessed paths before each
-provider request. Real paths must remain inside a workspace, reads are bounded,
-root rules appear before deeper scoped rules, and escaped symlinks are ignored.
+session-cwd root rules and scopes discovered through previously accessed nested
+paths before each provider request. Real paths must remain inside the workspace,
+reads are bounded, root rules appear before deeper scoped rules, and escaped symlinks
+are ignored.
 `PromptBuilder` only assembles the resolved text. Tool schemas are not written
 into the prompt; providers receive them as structured `tools`.
 

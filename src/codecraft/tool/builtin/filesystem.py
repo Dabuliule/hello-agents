@@ -28,8 +28,8 @@ class ReadFileTool(BaseTool):
 
     async def arun(self, args: BaseModel, context: ToolContext) -> ToolResult:
         read_args = ReadFileArgs.model_validate(args)
-        guard = WorkspaceGuard(context.context.workspace_roots)
-        path = guard.resolve_read_path(read_args.path, context.context.cwd)
+        guard = WorkspaceGuard(context.context.cwd)
+        path = guard.resolve_read_path(read_args.path)
 
         if path.is_dir():
             return ToolResult(
@@ -96,8 +96,8 @@ class WriteFileTool(BaseTool):
 
     async def arun(self, args: BaseModel, context: ToolContext) -> ToolResult:
         write_args = WriteFileArgs.model_validate(args)
-        guard = WorkspaceGuard(context.context.workspace_roots)
-        path = guard.resolve_write_path(write_args.path, context.context.cwd)
+        guard = WorkspaceGuard(context.context.cwd)
+        path = guard.resolve_write_path(write_args.path)
 
         if path.exists() and path.is_dir():
             return ToolResult(
@@ -173,8 +173,8 @@ class ListFilesTool(BaseTool):
 
     async def arun(self, args: BaseModel, context: ToolContext) -> ToolResult:
         list_args = ListFilesArgs.model_validate(args)
-        guard = WorkspaceGuard(context.context.workspace_roots)
-        path = guard.resolve_read_path(list_args.path, context.context.cwd)
+        guard = WorkspaceGuard(context.context.cwd)
+        path = guard.resolve_read_path(list_args.path)
 
         if not path.exists():
             return ToolResult(
@@ -263,8 +263,8 @@ class WorkspaceSearchTool(BaseTool):
 
     async def arun(self, args: BaseModel, context: ToolContext) -> ToolResult:
         search_args = WorkspaceSearchArgs.model_validate(args)
-        guard = WorkspaceGuard(context.context.workspace_roots)
-        root = guard.resolve_read_path(search_args.path, context.context.cwd)
+        guard = WorkspaceGuard(context.context.cwd)
+        root = guard.resolve_read_path(search_args.path)
 
         if not root.exists():
             return ToolResult(
@@ -278,7 +278,7 @@ class WorkspaceSearchTool(BaseTool):
             RetrievalRequest(
                 query=search_args.query,
                 root=root,
-                workspace_roots=tuple(guard.workspace_roots),
+                workspace_root=context.context.cwd,
                 mode=search_args.mode,
                 case_sensitive=search_args.case_sensitive,
                 max_results=search_args.max_results,

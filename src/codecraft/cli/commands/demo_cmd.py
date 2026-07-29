@@ -123,7 +123,6 @@ def _demo_config(
         session_id=session_id,
         source=SessionSource.CLI_DEMO,
         cwd=workspace,
-        workspace_roots=[workspace],
         codecraft_home=codecraft_home,
         model="deterministic-demo",
         model_provider="mock",

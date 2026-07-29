@@ -6,6 +6,7 @@ from typing import Any
 
 from codecraft.core.turn_context import TurnContext
 from codecraft.retrieval.errors import RetrievalUnavailableError
+from codecraft.retrieval.files import is_inside_workspace
 from codecraft.retrieval.index import RepositoryIndex
 from codecraft.schema.tool import ToolCall, ToolResult
 
@@ -26,24 +27,25 @@ class WorkspaceIndexObserver:
         if not paths:
             return None
 
-        grouped = _group_by_workspace(paths, context.workspace_roots)
-        if not grouped:
+        root = context.cwd.expanduser().resolve()
+        changed = _paths_in_workspace(paths, root)
+        if not changed:
             return None
 
-        async def refresh(root: Path, changed: list[Path]) -> dict[str, Any]:
-            try:
-                stats = await asyncio.to_thread(
-                    self.index.refresh_paths,
-                    root,
-                    changed,
-                )
-            except RetrievalUnavailableError:
-                return {
-                    "workspace": str(root),
-                    "status": "skipped",
-                    "reason": "index_not_built",
-                }
-            return {
+        try:
+            stats = await asyncio.to_thread(
+                self.index.refresh_paths,
+                root,
+                changed,
+            )
+        except RetrievalUnavailableError:
+            update: dict[str, Any] = {
+                "workspace": str(root),
+                "status": "skipped",
+                "reason": "index_not_built",
+            }
+        else:
+            update = {
                 "workspace": str(root),
                 "status": "updated",
                 "updated_files": stats.updated_file_count,
@@ -51,11 +53,7 @@ class WorkspaceIndexObserver:
                 "deleted_files": stats.deleted_file_count,
                 "indexed_bytes": stats.indexed_bytes,
             }
-
-        updates = await asyncio.gather(
-            *(refresh(root, changed) for root, changed in grouped.items())
-        )
-        return {"workspaces": updates}
+        return update
 
 
 def _changed_paths(call: ToolCall, result: ToolResult) -> list[Path]:
@@ -74,19 +72,10 @@ def _changed_paths(call: ToolCall, result: ToolResult) -> list[Path]:
     return []
 
 
-def _group_by_workspace(
-    paths: list[Path], workspace_roots: list[Path]
-) -> dict[Path, list[Path]]:
-    roots = sorted(
-        (root.expanduser().resolve() for root in workspace_roots),
-        key=lambda root: len(root.parts),
-        reverse=True,
-    )
-    grouped: dict[Path, list[Path]] = {}
+def _paths_in_workspace(paths: list[Path], workspace_root: Path) -> list[Path]:
+    selected: list[Path] = []
     for path in paths:
         resolved = path.expanduser().resolve(strict=False)
-        for root in roots:
-            if resolved == root or root in resolved.parents:
-                grouped.setdefault(root, []).append(resolved)
-                break
-    return grouped
+        if is_inside_workspace(resolved, workspace_root):
+            selected.append(resolved)
+    return selected

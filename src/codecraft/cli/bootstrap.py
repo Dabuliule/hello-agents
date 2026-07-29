@@ -96,12 +96,10 @@ def load_session_config(
         ),
     )
     cwd = Path.cwd().resolve()
-    workspace_roots = [cwd]
     return SessionConfig(
         session_id=new_id("ses_"),
         source=source,
         cwd=cwd,
-        workspace_roots=workspace_roots,
         codecraft_home=settings.paths.codecraft_home,
         model=settings.model.name,
         model_provider=settings.model.provider,

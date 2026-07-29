@@ -8,7 +8,7 @@ from codecraft.sandbox._execution import (
     communicate,
     process_group_options,
     sandbox_environment,
-    workspace_paths,
+    workspace_path,
 )
 from codecraft.sandbox.backend import (
     SandboxBackend,
@@ -26,12 +26,12 @@ class ProcessSandboxBackend(SandboxBackend):
     isolation = "none"
 
     async def execute(self, request: SandboxExecutionRequest) -> SandboxExecutionResult:
-        workspace_paths(request)
+        _, cwd = workspace_path(request)
         with tempfile.TemporaryDirectory(prefix="codecraft-process-") as temp:
             try:
                 process = await asyncio.create_subprocess_shell(
                     request.command,
-                    cwd=str(request.cwd),
+                    cwd=str(cwd),
                     env=sandbox_environment(request, Path(temp)),
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,

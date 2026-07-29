@@ -38,7 +38,7 @@ class ApplyPatchTool(BaseTool):
     async def arun(self, args: BaseModel, context: ToolContext) -> ToolResult:
         """解析 patch、逐文件应用 hunk，并返回变更文件列表。"""
         patch_args = ApplyPatchArgs.model_validate(args)
-        guard = WorkspaceGuard(context.context.workspace_roots)
+        guard = WorkspaceGuard(context.context.cwd)
 
         try:
             files = self._parse_patch(patch_args.patch)
@@ -54,7 +54,7 @@ class ApplyPatchTool(BaseTool):
         changed_files: list[str] = []
         for patch_file in files:
             try:
-                path = guard.resolve_write_path(patch_file.path, context.context.cwd)
+                path = guard.resolve_write_path(patch_file.path)
             except WorkspaceAccessError as exc:
                 return ToolResult(
                     success=False,

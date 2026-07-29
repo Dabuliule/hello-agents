@@ -65,7 +65,6 @@ def make_config(tmp_path) -> SessionConfig:
         session_id="ses_test",
         source=SessionSource.TEST,
         cwd=tmp_path,
-        workspace_roots=[tmp_path],
         codecraft_home=tmp_path / ".codecraft",
         model="mock-model",
         model_provider="mock",
@@ -412,7 +411,7 @@ def test_command_policy_expanded_safe_git_subcommands():
     assert policy.classify("git commit -m wip").risk == CommandRisk.PROMPT
 
 
-def test_instruction_loader_reads_workspace_instruction_files(tmp_path):
+def test_instruction_loader_uses_cwd_as_instruction_boundary(tmp_path):
     workspace = tmp_path / "workspace"
     package = workspace / "pkg"
     package.mkdir(parents=True)
@@ -421,15 +420,13 @@ def test_instruction_loader_reads_workspace_instruction_files(tmp_path):
 
     loaded = InstructionLoader().load_project_instructions(
         cwd=package,
-        workspace_roots=[workspace],
     )
 
     assert loaded is not None
-    assert "# pkg/CODECRAFT.md" in loaded
+    assert "# CODECRAFT.md" in loaded
     assert "package codecraft" in loaded
-    assert "# AGENTS.md" in loaded
-    assert "scope: pkg" in loaded
-    assert loaded.index("root agents") < loaded.index("package codecraft")
+    assert "root agents" not in loaded
+    assert "scope: ." in loaded
 
 
 def test_instruction_loader_applies_target_scopes_and_skips_escaped_symlinks(
@@ -446,7 +443,6 @@ def test_instruction_loader_applies_target_scopes_and_skips_escaped_symlinks(
 
     loaded = InstructionLoader().load_project_instructions(
         cwd=workspace,
-        workspace_roots=[workspace],
         target_paths=[Path("pkg/source.py"), outside],
     )
 
@@ -462,7 +458,6 @@ def test_instruction_loader_bounds_large_files(tmp_path):
 
     loaded = InstructionLoader(max_chars=200).load_project_instructions(
         cwd=tmp_path,
-        workspace_roots=[tmp_path],
     )
 
     assert loaded is not None
@@ -471,10 +466,10 @@ def test_instruction_loader_bounds_large_files(tmp_path):
 
 
 def test_workspace_guard_rejects_path_escape(tmp_path):
-    guard = WorkspaceGuard([tmp_path])
+    guard = WorkspaceGuard(tmp_path)
 
     with pytest.raises(Exception, match="outside workspace"):
-        guard.resolve_read_path("../outside.txt", tmp_path)
+        guard.resolve_read_path("../outside.txt")
 
 
 def test_read_file_and_list_files_tools(tmp_path):
@@ -488,7 +483,6 @@ def test_read_file_and_list_files_tools(tmp_path):
             session_id=config.session_id,
             turn_id="turn_test",
             cwd=config.cwd,
-            workspace_roots=config.workspace_roots,
             model=config.model,
             model_provider=config.model_provider,
             approval_policy=config.approval_policy,
@@ -554,7 +548,6 @@ def test_tool_runner_rejects_unknown_arguments_with_stable_error(tmp_path):
             session_id=config.session_id,
             turn_id="turn_strict_args",
             cwd=config.cwd,
-            workspace_roots=config.workspace_roots,
             model=config.model,
             model_provider=config.model_provider,
             approval_policy=config.approval_policy,
@@ -599,7 +592,6 @@ def test_bash_command_risk_is_classified_once_by_tool_runner(tmp_path):
             session_id=config.session_id,
             turn_id="turn_command_policy",
             cwd=config.cwd,
-            workspace_roots=config.workspace_roots,
             model=config.model,
             model_provider=config.model_provider,
             approval_policy=config.approval_policy,
@@ -648,7 +640,6 @@ def test_workspace_search_finds_paths_and_content_while_skipping_noise(tmp_path)
             session_id=config.session_id,
             turn_id="turn_test",
             cwd=config.cwd,
-            workspace_roots=config.workspace_roots,
             model=config.model,
             model_provider=config.model_provider,
             approval_policy=config.approval_policy,
@@ -693,7 +684,6 @@ def test_workspace_search_rejects_path_escape(tmp_path):
             session_id=config.session_id,
             turn_id="turn_test",
             cwd=config.cwd,
-            workspace_roots=config.workspace_roots,
             model=config.model,
             model_provider=config.model_provider,
             approval_policy=config.approval_policy,
@@ -727,7 +717,6 @@ def test_write_file_tool_creates_and_updates_workspace_file(tmp_path):
             session_id=config.session_id,
             turn_id="turn_test",
             cwd=config.cwd,
-            workspace_roots=config.workspace_roots,
             model=config.model,
             model_provider=config.model_provider,
             approval_policy=config.approval_policy,
@@ -783,7 +772,6 @@ def test_write_file_tool_rejects_missing_parent_by_default(tmp_path):
             session_id=config.session_id,
             turn_id="turn_test",
             cwd=config.cwd,
-            workspace_roots=config.workspace_roots,
             model=config.model,
             model_provider=config.model_provider,
             approval_policy=config.approval_policy,
@@ -822,7 +810,6 @@ def test_apply_patch_tool_modifies_workspace_file(tmp_path):
             session_id=config.session_id,
             turn_id="turn_test",
             cwd=config.cwd,
-            workspace_roots=config.workspace_roots,
             model=config.model,
             model_provider=config.model_provider,
             approval_policy=config.approval_policy,
@@ -895,7 +882,6 @@ def test_apply_patch_tool_rejects_workspace_escape(tmp_path):
             session_id=config.session_id,
             turn_id="turn_test",
             cwd=config.cwd,
-            workspace_roots=config.workspace_roots,
             model=config.model,
             model_provider=config.model_provider,
             approval_policy=config.approval_policy,
@@ -937,7 +923,6 @@ def test_bash_tool_runs_safe_command_and_blocks_prompt_or_denied(tmp_path):
             session_id=config.session_id,
             turn_id="turn_test",
             cwd=config.cwd,
-            workspace_roots=config.workspace_roots,
             model=config.model,
             model_provider=config.model_provider,
             approval_policy=config.approval_policy,
@@ -1001,10 +986,9 @@ def test_bash_tool_runs_safe_command_and_blocks_prompt_or_denied(tmp_path):
     asyncio.run(run_test())
 
 
-def test_sandbox_policy_denies_side_effects_in_read_only(tmp_path):
+def test_sandbox_policy_denies_side_effects_in_read_only():
     policy = SandboxPolicy(
         mode=SandboxMode.READ_ONLY,
-        workspace_roots=[tmp_path],
         network_access=False,
     )
 
@@ -1026,7 +1010,6 @@ def test_tool_runner_denies_workspace_write_in_read_only_sandbox(tmp_path):
             session_id=config.session_id,
             turn_id="turn_test",
             cwd=config.cwd,
-            workspace_roots=config.workspace_roots,
             model=config.model,
             model_provider=config.model_provider,
             approval_policy=config.approval_policy,
@@ -1079,7 +1062,6 @@ def test_tool_runner_denies_bash_in_read_only_sandbox(tmp_path):
             session_id=config.session_id,
             turn_id="turn_test",
             cwd=config.cwd,
-            workspace_roots=config.workspace_roots,
             model=config.model,
             model_provider=config.model_provider,
             approval_policy=config.approval_policy,
@@ -1123,7 +1105,6 @@ def test_session_config_normalizes_paths(tmp_path):
     config = make_config(tmp_path)
 
     assert config.cwd == tmp_path.resolve()
-    assert config.workspace_roots == [tmp_path.resolve()]
     assert config.codecraft_home == (tmp_path / ".codecraft").resolve()
 
 
@@ -1143,11 +1124,9 @@ def test_session_config_requires_known_policy_names(tmp_path):
         SessionConfig.model_validate({**config_data, "sandbox_mode": "half_trusted"})
 
 
-def test_session_config_rejects_stale_fields_invalid_boundaries_and_budgets(tmp_path):
+def test_session_config_rejects_stale_fields_and_invalid_budgets(tmp_path):
     workspace = tmp_path / "workspace"
-    outside = tmp_path / "outside"
     workspace.mkdir()
-    outside.mkdir()
     config_data = make_config(workspace).model_dump(mode="python")
 
     with pytest.raises(ValueError, match="thread_id"):
@@ -1156,8 +1135,8 @@ def test_session_config_rejects_stale_fields_invalid_boundaries_and_budgets(tmp_
         SessionConfig.model_validate(
             {**config_data, "project_instructions": "stale snapshot"}
         )
-    with pytest.raises(ValueError, match="inside a workspace root"):
-        SessionConfig.model_validate({**config_data, "cwd": outside})
+    with pytest.raises(ValueError, match="workspace_roots"):
+        SessionConfig.model_validate({**config_data, "workspace_roots": [workspace]})
     with pytest.raises(ValueError, match="max_tool_calls"):
         SessionConfig.model_validate({**config_data, "max_tool_calls": 0})
     with pytest.raises(ValueError, match="max_tool_output_chars"):
@@ -1187,7 +1166,6 @@ def test_turn_context_is_immutable(tmp_path):
         session_id=config.session_id,
         turn_id="turn_test",
         cwd=config.cwd,
-        workspace_roots=config.workspace_roots,
         model=config.model,
         model_provider=config.model_provider,
         approval_policy=config.approval_policy,
@@ -1229,7 +1207,6 @@ def test_llm_provider_stream_contract(tmp_path):
         session_id=config.session_id,
         turn_id="turn_test",
         cwd=config.cwd,
-        workspace_roots=config.workspace_roots,
         model=config.model,
         model_provider=config.model_provider,
         approval_policy=config.approval_policy,
@@ -1301,7 +1278,6 @@ def test_openai_provider_converts_response_to_model_events(tmp_path):
             session_id=config.session_id,
             turn_id="turn_test",
             cwd=config.cwd,
-            workspace_roots=config.workspace_roots,
             model="gpt-test",
             model_provider="openai",
             approval_policy=config.approval_policy,
@@ -1664,7 +1640,6 @@ def test_qwen_provider_streams_chat_completion_tool_calls(tmp_path):
             session_id=config.session_id,
             turn_id="turn_test",
             cwd=config.cwd,
-            workspace_roots=config.workspace_roots,
             model="qwen-plus",
             model_provider="qwen",
             approval_policy=config.approval_policy,

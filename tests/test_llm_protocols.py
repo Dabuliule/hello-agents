@@ -471,7 +471,6 @@ def test_unknown_provider_is_rejected_before_session_file_creation(tmp_path):
         session_id="ses_unknown_provider",
         source=SessionSource.TEST,
         cwd=tmp_path,
-        workspace_roots=[tmp_path],
         codecraft_home=tmp_path / ".codecraft",
         model="test-model",
         model_provider=" missing ",

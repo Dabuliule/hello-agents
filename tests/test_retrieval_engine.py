@@ -11,6 +11,7 @@ from codecraft.retrieval import (
     RetrievalRequest,
     RetrievalResponse,
     RetrievalStats,
+    RetrievalUnavailableError,
     Retriever,
     ScanRetriever,
 )
@@ -43,7 +44,7 @@ def test_scan_retriever_preserves_path_content_and_costs(tmp_path):
     request = RetrievalRequest(
         query="agent",
         root=tmp_path,
-        workspace_roots=(tmp_path,),
+        workspace_root=tmp_path,
     )
 
     response = asyncio.run(ScanRetriever().retrieve(request))
@@ -63,11 +64,42 @@ def test_scan_retriever_preserves_path_content_and_costs(tmp_path):
     assert response.stats.scanned_bytes == source.stat().st_size
 
 
+def test_scan_retriever_uses_workspace_relative_paths_for_scoped_search(tmp_path):
+    source = tmp_path / "src" / "agent.py"
+    source.parent.mkdir()
+    source.write_text("class Agent: pass\n", encoding="utf-8")
+    request = RetrievalRequest(
+        query="Agent",
+        root=source.parent,
+        workspace_root=tmp_path,
+        mode="content",
+    )
+
+    response = asyncio.run(ScanRetriever().retrieve(request))
+
+    assert response.matches[0].path == "src/agent.py"
+
+
+def test_scan_retriever_rejects_scope_outside_workspace(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    request = RetrievalRequest(
+        query="secret",
+        root=outside,
+        workspace_root=workspace,
+    )
+
+    with pytest.raises(RetrievalUnavailableError, match="outside workspace"):
+        asyncio.run(ScanRetriever().retrieve(request))
+
+
 def test_context_engine_selects_configured_retrievers(tmp_path):
     request = RetrievalRequest(
         query="needle",
         root=tmp_path,
-        workspace_roots=(tmp_path,),
+        workspace_root=tmp_path,
     )
     engine = ContextEngine(
         [ScanRetriever(), StaticRetriever()],
@@ -99,7 +131,7 @@ def test_query_router_builds_deterministic_sequential_plans(tmp_path):
             RetrievalRequest(
                 query=query,
                 root=tmp_path,
-                workspace_roots=(tmp_path,),
+                workspace_root=tmp_path,
                 mode=mode,
                 case_sensitive=case_sensitive,
             )
@@ -127,7 +159,7 @@ def test_context_engine_auto_route_skips_unconfigured_retrievers(tmp_path):
     request = RetrievalRequest(
         query="Agent",
         root=tmp_path,
-        workspace_roots=(tmp_path,),
+        workspace_root=tmp_path,
         mode="content",
     )
 

@@ -10,7 +10,7 @@ from codecraft.sandbox._execution import (
     communicate,
     process_group_options,
     validated_environment_names,
-    workspace_paths,
+    workspace_path,
 )
 from codecraft.sandbox.backend import (
     SandboxBackend,
@@ -98,7 +98,7 @@ class DockerSandboxBackend(SandboxBackend):
         *,
         container_name: str,
     ) -> list[str]:
-        mounts, container_cwd = _workspace_mounts(request)
+        mount, container_cwd = _workspace_mount(request)
         command = [
             self.executable,
             "run",
@@ -132,15 +132,15 @@ class DockerSandboxBackend(SandboxBackend):
             command.extend(["--network", "none"])
         if hasattr(os, "getuid") and hasattr(os, "getgid"):
             command.extend(["--user", f"{os.getuid()}:{os.getgid()}"])
-        for host_path, container_path, access in mounts:
-            if "," in host_path:
-                raise SandboxBackendError(
-                    "workspace paths containing commas cannot be mounted safely"
-                )
-            mount = f"type=bind,source={host_path},target={container_path}"
-            if access == "ro":
-                mount += ",readonly"
-            command.extend(["--mount", mount])
+        host_path, container_path, access = mount
+        if "," in host_path:
+            raise SandboxBackendError(
+                "workspace path containing a comma cannot be mounted safely"
+            )
+        mount_spec = f"type=bind,source={host_path},target={container_path}"
+        if access == "ro":
+            mount_spec += ",readonly"
+        command.extend(["--mount", mount_spec])
         for name in validated_environment_names(request.env_allowlist):
             if name in os.environ:
                 command.extend(["--env", name])
@@ -162,28 +162,13 @@ class DockerSandboxBackend(SandboxBackend):
             return
 
 
-def _workspace_mounts(
+def _workspace_mount(
     request: SandboxExecutionRequest,
-) -> tuple[list[tuple[str, str, str]], str]:
-    roots, resolved_cwd = workspace_paths(request)
+) -> tuple[tuple[str, str, str], str]:
+    root, resolved_cwd = workspace_path(request)
     access = "ro" if request.sandbox_mode == SandboxMode.READ_ONLY else "rw"
-    mounts: list[tuple[str, str, str]] = []
-    mapped_cwd: str | None = None
-    ordered_roots = sorted(roots, key=lambda root: len(root.parts), reverse=True)
-    target_by_root = {
-        root: "/workspace" if len(roots) == 1 else f"/workspaces/{index}"
-        for index, root in enumerate(roots)
-    }
-    for root in roots:
-        mounts.append((str(root), target_by_root[root], access))
-    for root in ordered_roots:
-        try:
-            relative = resolved_cwd.relative_to(root)
-        except ValueError:
-            continue
-        base = target_by_root[root]
-        mapped_cwd = base if not relative.parts else f"{base}/{relative.as_posix()}"
-        break
-    if mapped_cwd is None:
-        raise SandboxBackendError("command cwd is outside mounted workspaces")
-    return mounts, mapped_cwd
+    relative = resolved_cwd.relative_to(root)
+    mapped_cwd = "/workspace"
+    if relative.parts:
+        mapped_cwd = f"{mapped_cwd}/{relative.as_posix()}"
+    return (str(root), "/workspace", access), mapped_cwd

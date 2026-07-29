@@ -395,7 +395,6 @@ class ToolRunner:
     def _sandbox_policy(context: TurnContext) -> SandboxPolicy:
         return SandboxPolicy(
             mode=context.sandbox_mode,
-            workspace_roots=context.workspace_roots,
             network_access=context.network_access,
         )
 

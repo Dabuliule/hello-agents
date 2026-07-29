@@ -34,7 +34,6 @@ def _turn_context(tmp_path, *, sandbox_mode=SandboxMode.READ_ONLY) -> TurnContex
         session_id="ses_mcp",
         turn_id="turn_mcp",
         cwd=tmp_path,
-        workspace_roots=[tmp_path],
         model="none",
         model_provider="test",
         approval_policy=ApprovalPolicy.NEVER,

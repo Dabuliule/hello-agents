@@ -45,7 +45,7 @@ class BashTool(BaseTool):
     async def arun(self, args: BaseModel, context: ToolContext) -> ToolResult:
         """执行命令并返回 stdout/stderr、exit code 和截断信息。"""
         bash_args = BashArgs.model_validate(args)
-        guard = WorkspaceGuard(context.context.workspace_roots)
+        guard = WorkspaceGuard(context.context.cwd)
         cwd = self._resolve_cwd(bash_args.cwd, context, guard)
         decision = context.command_decision
         if decision is None:
@@ -78,7 +78,7 @@ class BashTool(BaseTool):
                 SandboxExecutionRequest(
                     command=bash_args.command,
                     cwd=cwd,
-                    workspace_roots=tuple(context.context.workspace_roots),
+                    workspace_root=context.context.cwd,
                     sandbox_mode=context.context.sandbox_mode,
                     network_access=context.context.network_access,
                     timeout_seconds=bash_args.timeout_seconds,
@@ -143,7 +143,7 @@ class BashTool(BaseTool):
         """解析命令工作目录，确保 cwd 是 workspace 内的目录。"""
         if cwd is None:
             return context.context.cwd
-        resolved = guard.resolve_read_path(cwd, context.context.cwd)
+        resolved = guard.resolve_read_path(cwd)
         if not resolved.is_dir():
             raise NotADirectoryError(str(resolved))
         return resolved

@@ -37,7 +37,7 @@ def test_docker_backend_enforces_runtime_boundaries(tmp_path, monkeypatch):
             "mount | head -n 1"
         ),
         cwd=tmp_path,
-        workspace_roots=(tmp_path,),
+        workspace_root=tmp_path,
         sandbox_mode=SandboxMode.WORKSPACE_WRITE,
         network_access=False,
         timeout_seconds=30,

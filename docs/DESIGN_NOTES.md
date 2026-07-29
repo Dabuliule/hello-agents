@@ -122,7 +122,11 @@ The policy layers enforce:
 - network effects are denied when `network_access=false`;
 - command policy denies or prompts for risky shell commands.
 
-The default local backend executes approved commands on the host and therefore remains an application-level boundary. The optional Docker backend creates an ephemeral, resource-limited container with a read-only root, bounded tmpfs, dropped capabilities, `no-new-privileges`, explicit environment forwarding, workspace-only mounts, and optional network removal.
+The resolved session `cwd` is the base for relative paths and the single workspace
+boundary used by built-in file tools and sandbox writes. Bash may execute from a
+nested directory, but cannot use that option to widen the writable boundary.
+
+The default local backend executes approved commands on the host and therefore remains an application-level boundary. The optional Docker backend creates an ephemeral, resource-limited container with a read-only root, bounded tmpfs, dropped capabilities, `no-new-privileges`, explicit environment forwarding, one workspace bind mount, and optional network removal.
 
 This boundary is intentionally precise: Docker isolates bash processes, while a workspace mounted read-write can still be changed by those processes. Built-in file tools remain host-side behind `WorkspaceGuard`. Approval and command policy are still required because process isolation is not intent validation.
 

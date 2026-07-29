@@ -17,7 +17,6 @@ class TurnContext(BaseModel):
     turn_id: str
 
     cwd: Path
-    workspace_roots: list[Path]
 
     model: str
     model_provider: str

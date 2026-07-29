@@ -100,7 +100,7 @@ class RepositoryIndex:
         files = [
             path
             for path in iter_workspace_files(root)
-            if not is_inside_workspace(path, (self.index_root,))
+            if not is_inside_workspace(path, self.index_root)
         ]
         updated = 0
         unchanged = 0
@@ -255,9 +255,9 @@ class RepositoryIndex:
             if not candidate.is_absolute():
                 candidate = root / candidate
             candidate = candidate.resolve(strict=False)
-            if not is_inside_workspace(candidate, (root,)):
+            if not is_inside_workspace(candidate, root):
                 continue
-            if is_inside_workspace(candidate, (self.index_root,)):
+            if is_inside_workspace(candidate, self.index_root):
                 continue
             if candidate not in selected:
                 selected.append(candidate)

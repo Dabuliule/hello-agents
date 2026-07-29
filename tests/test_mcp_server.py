@@ -23,7 +23,6 @@ def _turn_context(tmp_path) -> TurnContext:
         session_id="ses_mcp_server",
         turn_id="turn_mcp_server",
         cwd=tmp_path,
-        workspace_roots=[tmp_path],
         model="none",
         model_provider="test",
         approval_policy=ApprovalPolicy.NEVER,

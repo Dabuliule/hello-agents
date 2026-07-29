@@ -40,7 +40,7 @@ def test_seatbelt_enforces_write_network_and_environment_boundaries(
             ">/dev/null 2>&1 && printf ' network=open' || printf ' network=blocked'"
         ),
         cwd=workspace,
-        workspace_roots=(workspace,),
+        workspace_root=workspace,
         sandbox_mode=SandboxMode.WORKSPACE_WRITE,
         network_access=False,
         timeout_seconds=30,
@@ -87,7 +87,7 @@ def test_bubblewrap_enforces_write_network_and_environment_boundaries(
                 "&& printf ' network=open' || printf ' network=blocked'"
             ),
             cwd=workspace,
-            workspace_roots=(workspace,),
+            workspace_root=workspace,
             sandbox_mode=SandboxMode.WORKSPACE_WRITE,
             network_access=False,
             timeout_seconds=30,

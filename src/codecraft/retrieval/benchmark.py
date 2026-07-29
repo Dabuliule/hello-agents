@@ -183,7 +183,6 @@ def _tool_context(workspace: Path, call: ToolCall) -> Any:
         session_id=new_id("ses_retrieval_"),
         turn_id=new_id("turn_retrieval_"),
         cwd=workspace,
-        workspace_roots=[workspace],
         model="none",
         model_provider="benchmark",
         approval_policy=ApprovalPolicy.NEVER,

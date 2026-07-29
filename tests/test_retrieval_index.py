@@ -34,7 +34,6 @@ def _turn_context(workspace) -> TurnContext:
         session_id="ses_index",
         turn_id="turn_index",
         cwd=workspace,
-        workspace_roots=[workspace],
         model="none",
         model_provider="test",
         approval_policy=ApprovalPolicy.NEVER,
@@ -215,7 +214,7 @@ def test_context_engine_falls_back_when_index_match_is_stale(tmp_path):
     request = RetrievalRequest(
         query="validate_access_token",
         root=workspace,
-        workspace_roots=(workspace,),
+        workspace_root=workspace,
         mode="content",
     )
 
@@ -251,7 +250,7 @@ def test_context_engine_falls_back_when_only_some_index_matches_are_stale(tmp_pa
     request = RetrievalRequest(
         query="validate_access_token",
         root=workspace,
-        workspace_roots=(workspace,),
+        workspace_root=workspace,
         mode="content",
     )
 
@@ -307,7 +306,7 @@ def test_tool_runner_refreshes_index_after_write_and_patch(tmp_path):
         )
         assert write_result["success"] is True
         update = write_result["metadata"]["post_actions"]["workspace_index"]
-        assert update["workspaces"][0]["updated_files"] == 1
+        assert update["updated_files"] == 1
         assert index.search_symbols(workspace, query="indexed_after_write").matches
 
         patch_events = [

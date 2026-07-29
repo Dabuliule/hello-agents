@@ -49,7 +49,6 @@ def make_config(tmp_path: Path) -> SessionConfig:
         session_id="ses_skills",
         source=SessionSource.TEST,
         cwd=tmp_path,
-        workspace_roots=[tmp_path],
         codecraft_home=tmp_path / "user-home",
         model="mock-model",
         model_provider="mock",

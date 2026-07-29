@@ -119,7 +119,6 @@ async def _run_task(
             "session_id": session_id,
             "source": SessionSource.CLI_EVAL,
             "cwd": workspace,
-            "workspace_roots": [workspace],
             "codecraft_home": output_dir / ".codecraft",
             "approval_policy": ApprovalPolicy.NEVER,
             "sandbox_mode": SandboxMode.WORKSPACE_WRITE,

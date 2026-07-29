@@ -38,7 +38,7 @@ def _request(tmp_path, **updates) -> SandboxExecutionRequest:
     values = {
         "command": "python --version",
         "cwd": tmp_path,
-        "workspace_roots": (tmp_path,),
+        "workspace_root": tmp_path,
         "sandbox_mode": SandboxMode.WORKSPACE_WRITE,
         "network_access": False,
         "timeout_seconds": 30,
@@ -52,7 +52,6 @@ def _tool_context(tmp_path) -> ToolContext:
         session_id="ses_sandbox",
         turn_id="turn_sandbox",
         cwd=tmp_path,
-        workspace_roots=[tmp_path],
         model="none",
         model_provider="test",
         approval_policy=ApprovalPolicy.NEVER,
@@ -138,19 +137,19 @@ def test_docker_command_uses_read_only_mount_and_rejects_unsafe_inputs(tmp_path)
             _request(tmp_path, env_allowlist=("BAD-NAME",)),
             container_name="codecraft-bad-env",
         )
-    with pytest.raises(SandboxBackendError, match="outside workspace roots"):
+    with pytest.raises(SandboxBackendError, match="outside workspace root"):
         backend.build_command(
             _request(tmp_path, cwd=tmp_path.parent),
             container_name="codecraft-escaped",
         )
 
 
-def test_docker_command_deduplicates_workspace_mounts(tmp_path):
+def test_docker_command_mounts_single_workspace(tmp_path):
     backend = DockerSandboxBackend()
 
     command = backend.build_command(
-        _request(tmp_path, workspace_roots=(tmp_path, tmp_path)),
-        container_name="codecraft-deduplicated",
+        _request(tmp_path),
+        container_name="codecraft-single-workspace",
     )
 
     assert command.count("--mount") == 1
@@ -268,9 +267,9 @@ def test_seatbelt_command_enforces_workspace_write_and_network_policy(tmp_path):
 
     profile = command[command.index("-p") + 1]
     assert "(deny file-write*)" in profile
-    assert '(subpath (param "WRITABLE_ROOT_0"))' in profile
+    assert '(subpath (param "WRITABLE_ROOT"))' in profile
     assert "(deny network*)" in profile
-    assert f"-DWRITABLE_ROOT_0={workspace}" in command
+    assert f"-DWRITABLE_ROOT={workspace}" in command
     assert f"-DTEMP_ROOT={temp_root}" in command
     assert command[-4:] == ["--", "/bin/sh", "-lc", "pytest -q"]
 
@@ -283,7 +282,7 @@ def test_seatbelt_read_only_does_not_allow_workspace_writes(tmp_path):
         temp_root=temp_root,
     )
 
-    assert not any(argument.startswith("-DWRITABLE_ROOT") for argument in command)
+    assert not any(argument.startswith("-DWRITABLE_ROOT=") for argument in command)
 
 
 def test_bubblewrap_command_uses_os_namespaces_and_bind_mounts(tmp_path):
@@ -394,7 +393,7 @@ def test_bash_tool_delegates_execution_to_backend(tmp_path):
     assert result.success is True
     assert result.content == "Python 3.11\n"
     assert result.metadata["backend"] == "recording"
-    assert backend.requests[0].workspace_roots == (tmp_path,)
+    assert backend.requests[0].workspace_root == tmp_path
 
 
 def test_runtime_settings_parse_docker_backend():

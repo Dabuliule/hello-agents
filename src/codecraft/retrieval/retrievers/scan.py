@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from codecraft.retrieval.errors import RetrievalUnavailableError
 from codecraft.retrieval.files import (
     display_path,
     is_inside_workspace,
@@ -36,6 +37,8 @@ class ScanRetriever(Retriever):
     name = "scan"
 
     async def retrieve(self, request: RetrievalRequest) -> RetrievalResponse:
+        if not is_inside_workspace(request.root, request.workspace_root):
+            raise RetrievalUnavailableError("request root is outside workspace")
         files = (
             [request.root]
             if request.root.is_file()
@@ -71,12 +74,12 @@ class ScanRetriever(Retriever):
         query: str,
         state: _ScanState,
     ) -> None:
-        if not is_inside_workspace(file_path, request.workspace_roots):
+        if not is_inside_workspace(file_path, request.workspace_root):
             state.skipped["escaped"] += 1
             return
 
         state.scanned_file_count += 1
-        visible_path = display_path(file_path, request.workspace_roots)
+        visible_path = display_path(file_path, request.workspace_root)
         self._append_path_match(visible_path, request, query, state)
         if state.is_full(request.max_results):
             return

@@ -12,7 +12,7 @@ MatchType = Literal["content", "path"]
 class RetrievalRequest:
     query: str
     root: Path
-    workspace_roots: tuple[Path, ...]
+    workspace_root: Path
     mode: RetrievalMode = "both"
     case_sensitive: bool = False
     max_results: int = 100

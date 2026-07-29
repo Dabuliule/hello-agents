@@ -8,7 +8,7 @@ from codecraft.sandbox._execution import (
     communicate,
     process_group_options,
     sandbox_environment,
-    workspace_paths,
+    workspace_path,
 )
 from codecraft.sandbox.backend import (
     SandboxBackend,
@@ -69,7 +69,7 @@ class BubblewrapSandboxBackend(SandboxBackend):
         *,
         temp_root: Path,
     ) -> list[str]:
-        roots, cwd = workspace_paths(request)
+        root, cwd = workspace_path(request)
         root_mount = (
             "--bind"
             if request.sandbox_mode == SandboxMode.DANGER_FULL_ACCESS
@@ -100,7 +100,6 @@ class BubblewrapSandboxBackend(SandboxBackend):
             ]
         )
         if request.sandbox_mode == SandboxMode.WORKSPACE_WRITE:
-            for root in sorted(roots, key=lambda value: len(value.parts)):
-                command.extend(["--bind", str(root), str(root)])
+            command.extend(["--bind", str(root), str(root)])
         command.extend(["--chdir", str(cwd), "--", "/bin/sh", "-lc", request.command])
         return command
