@@ -24,6 +24,7 @@ class SandboxExecutionRequest:
     network_access: bool
     timeout_seconds: int
     env_allowlist: tuple[str, ...] = ()
+    allow_workspace_path_entries: bool = False
 
 
 @dataclass(frozen=True, slots=True)

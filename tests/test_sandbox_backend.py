@@ -292,6 +292,15 @@ def test_process_backend_removes_workspace_and_relative_path_entries(
     _, kwargs = captured[0]
     assert kwargs["env"]["PATH"] == "/usr/bin"
 
+    asyncio.run(
+        ProcessSandboxBackend().execute(
+            _request(tmp_path, allow_workspace_path_entries=True)
+        )
+    )
+
+    _, approved_kwargs = captured[1]
+    assert approved_kwargs["env"]["PATH"] == os.environ["PATH"]
+
 
 def test_seatbelt_command_enforces_workspace_write_and_network_policy(tmp_path):
     workspace = tmp_path / "workspace"
@@ -434,6 +443,15 @@ def test_bash_tool_delegates_execution_to_backend(tmp_path):
     assert result.content == "Python 3.11\n"
     assert result.metadata["backend"] == "recording"
     assert backend.requests[0].workspace_root == tmp_path
+    assert backend.requests[0].allow_workspace_path_entries is False
+
+    asyncio.run(
+        tool.arun(
+            tool.args_schema.model_validate({"command": "python --version"}),
+            _tool_context(tmp_path).model_copy(update={"approved": True}),
+        )
+    )
+    assert backend.requests[1].allow_workspace_path_entries is True
 
 
 def test_runtime_settings_parse_docker_backend():

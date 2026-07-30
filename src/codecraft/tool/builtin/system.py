@@ -83,6 +83,7 @@ class BashTool(BaseTool):
                     network_access=context.context.network_access,
                     timeout_seconds=bash_args.timeout_seconds,
                     env_allowlist=tuple(context.context.sandbox_env_allowlist),
+                    allow_workspace_path_entries=context.approved,
                 )
             )
         except SandboxBackendError as exc:

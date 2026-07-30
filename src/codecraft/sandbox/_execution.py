@@ -78,10 +78,12 @@ def sandbox_environment(
         validated_environment_names(request.env_allowlist)
     )
     environment = {name: os.environ[name] for name in names if name in os.environ}
-    environment["PATH"] = _sandbox_path(
-        environment.get("PATH", os.defpath),
-        workspace_root=request.workspace_root,
-    )
+    environment.setdefault("PATH", os.defpath)
+    if not request.allow_workspace_path_entries:
+        environment["PATH"] = _sandbox_path(
+            environment["PATH"],
+            workspace_root=request.workspace_root,
+        )
     cache_root = temp_root / ".cache"
     cache_root.mkdir(exist_ok=True)
     environment.update(
