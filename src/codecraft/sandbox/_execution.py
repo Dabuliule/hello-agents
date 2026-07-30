@@ -78,7 +78,10 @@ def sandbox_environment(
         validated_environment_names(request.env_allowlist)
     )
     environment = {name: os.environ[name] for name in names if name in os.environ}
-    environment.setdefault("PATH", os.defpath)
+    environment["PATH"] = _sandbox_path(
+        environment.get("PATH", os.defpath),
+        workspace_root=request.workspace_root,
+    )
     cache_root = temp_root / ".cache"
     cache_root.mkdir(exist_ok=True)
     environment.update(
@@ -89,6 +92,26 @@ def sandbox_environment(
         }
     )
     return environment
+
+
+def _sandbox_path(value: str, *, workspace_root: Path) -> str:
+    """Drop PATH entries that allow a workspace-local executable to shadow tools."""
+    root = workspace_root.expanduser().resolve(strict=False)
+    selected: list[str] = []
+    for entry in value.split(os.pathsep):
+        if not entry:
+            continue
+        candidate = Path(entry).expanduser()
+        if not candidate.is_absolute():
+            continue
+        try:
+            resolved = candidate.resolve(strict=False)
+        except (OSError, RuntimeError):
+            continue
+        if resolved == root or root in resolved.parents:
+            continue
+        selected.append(entry)
+    return os.pathsep.join(dict.fromkeys(selected))
 
 
 def validated_environment_names(names: tuple[str, ...]) -> tuple[str, ...]:

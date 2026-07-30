@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-import re
+from dataclasses import dataclass
+import posixpath
 import shlex
 from enum import StrEnum
 
@@ -19,87 +20,149 @@ class CommandDecision(BaseModel):
     requires_approval: bool
 
 
-_SHELL_CHAIN_RE = re.compile(r"(&&|\|\||[;|])")
+@dataclass(frozen=True)
+class _ShellScan:
+    segments: tuple[str, ...]
+    operators: tuple[str, ...]
+    has_expansion: bool
+    has_substitution: bool
 
-_BROAD_RM_TARGETS = frozenset({"/", "/*", "~", "*", "..", "../", "/.", "./.."})
+
+_BROAD_RM_TARGETS = frozenset(
+    {"/", "//", "/*", ".", "./", "./*", "~", "*", "..", "../", "../*"}
+)
 
 _GIT_NETWORK_SUBCOMMANDS = frozenset({"clone", "fetch", "ls-remote", "pull", "push"})
 
+_GIT_GLOBAL_OPTIONS_WITH_VALUE = frozenset(
+    {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env"}
+)
+
+_NETWORK_COMMANDS = frozenset({"curl", "wget", "ssh", "scp"})
+
+_DENIED_COMMANDS = frozenset({"sudo", "dd", "mkfs"})
+
+_EXACT_READ_ONLY_COMMANDS = frozenset(
+    {
+        ("pwd",),
+        ("pwd", "-L"),
+        ("pwd", "-P"),
+        ("python", "--version"),
+        ("python", "-V"),
+        ("python3", "--version"),
+        ("python3", "-V"),
+        ("git", "status"),
+        ("git", "branch"),
+        ("git", "branch", "--show-current"),
+        ("git", "stash", "list"),
+        ("git", "tag"),
+        ("git", "tag", "--list"),
+        ("git", "remote"),
+        ("git", "remote", "-v"),
+    }
+)
+
+_READ_ONLY_LS_FLAGS = frozenset("aAlh1Fp")
+
+_READ_ONLY_RG_FLAGS = frozenset(
+    {
+        "-F",
+        "--fixed-strings",
+        "-i",
+        "--ignore-case",
+        "-n",
+        "--line-number",
+        "-w",
+        "--word-regexp",
+        "-x",
+        "--line-regexp",
+    }
+)
+
+_DOUBLE_SHELL_OPERATORS = frozenset(
+    {"&&", "||", ">>", "<<", "<&", ">&", "|&", ";;", ";&"}
+)
+
 
 class CommandPolicy:
-    """对 shell command 做静态风险分类。
+    """Classify shell commands with a small, fail-closed read-only allowlist.
 
-    这里不执行命令，只根据可执行文件、常见子命令、网络需求和明显危险的
-    `rm -rf` 目标给出 safe/prompt/deny。真正是否运行还要看 approval 和
-    sandbox 的结果。
+    A command is safe only when its complete argv matches a rule below. Unknown
+    arguments and shell evaluation features require approval; opaque command or
+    process substitution is denied. The sandbox remains the execution boundary.
     """
-
-    SAFE_COMMANDS = {
-        "pwd",
-        "ls",
-        "rg",
-        "grep",
-        "cat",
-        "git",
-        "pytest",
-        "python",
-        "uv",
-        "npm",
-        "mvn",
-    }
-    SAFE_READONLY_COMMANDS = {
-        "sed",
-    }
-    PROMPT_COMMANDS = {
-        "pip",
-        "poetry",
-        "curl",
-        "wget",
-        "ssh",
-        "scp",
-        "rm",
-        "mv",
-        "chmod",
-        "chown",
-        "git-clean",
-        "git-commit",
-        "git-push",
-    }
-    DENY_COMMANDS = {
-        "sudo",
-        "dd",
-        "mkfs",
-    }
-    NETWORK_COMMANDS = {
-        "curl",
-        "wget",
-        "ssh",
-        "scp",
-    }
 
     def classify(
         self, command: str, *, network_access: bool = False
     ) -> CommandDecision:
-        """返回命令风险等级，以及是否需要用户 approval。"""
-        parts = self._split(command)
-        if not parts:
+        """Return the risk and approval requirement for one shell command."""
+        scan = _scan_shell(command)
+        if scan.has_substitution:
+            return CommandDecision(
+                risk=CommandRisk.DENY,
+                reason="shell command or process substitution is denied",
+                requires_approval=False,
+            )
+
+        decisions: list[CommandDecision] = []
+        parsed_segments: list[list[str]] = []
+        for segment in scan.segments:
+            parts = self._split(segment)
+            if not parts:
+                return CommandDecision(
+                    risk=CommandRisk.DENY,
+                    reason="invalid shell syntax",
+                    requires_approval=False,
+                )
+            parsed_segments.append(parts)
+            decisions.append(
+                self._classify_single(parts, network_access=network_access)
+            )
+
+        if not decisions:
             return CommandDecision(
                 risk=CommandRisk.DENY,
                 reason="empty command",
                 requires_approval=False,
             )
 
-        sub_commands = self._split_raw_command(command)
-        if len(sub_commands) > 1:
-            # compound command 取子命令中的最高风险，避免安全命令掩盖危险片段。
-            return self._classify_compound(sub_commands, network_access=network_access)
+        denied = next(
+            (decision for decision in decisions if decision.risk == CommandRisk.DENY),
+            None,
+        )
+        if denied is not None:
+            return denied
 
-        return self._classify_single(parts, network_access=network_access)
+        if scan.has_expansion and any(
+            self._is_recursive_force_rm(parts) for parts in parsed_segments
+        ):
+            return CommandDecision(
+                risk=CommandRisk.DENY,
+                reason="rm -rf with shell expansion is denied",
+                requires_approval=False,
+            )
+
+        if scan.operators:
+            operators = ", ".join(scan.operators)
+            return CommandDecision(
+                risk=CommandRisk.PROMPT,
+                reason=f"shell control syntax requires approval: {operators}",
+                requires_approval=True,
+            )
+
+        if scan.has_expansion:
+            return CommandDecision(
+                risk=CommandRisk.PROMPT,
+                reason="shell expansion requires approval",
+                requires_approval=True,
+            )
+
+        return decisions[0]
 
     def _classify_single(
         self, parts: list[str], *, network_access: bool
     ) -> CommandDecision:
-        executable = parts[0]
+        executable = self._command_name(parts[0])
 
         if self._is_destructive_rm(parts):
             return CommandDecision(
@@ -108,89 +171,51 @@ class CommandPolicy:
                 requires_approval=False,
             )
 
-        if executable in self.DENY_COMMANDS:
+        if executable in _DENIED_COMMANDS or executable.startswith("mkfs."):
             return CommandDecision(
                 risk=CommandRisk.DENY,
                 reason=f"{executable} is denied",
                 requires_approval=False,
             )
 
-        if executable in self.NETWORK_COMMANDS and not network_access:
-            return CommandDecision(
-                risk=CommandRisk.DENY,
-                reason=f"{executable} requires network access",
-                requires_approval=False,
-            )
-
-        if executable == "git" and self._git_requires_network(parts):
-            subcommand = parts[1]
+        if executable in _NETWORK_COMMANDS:
             if not network_access:
                 return CommandDecision(
                     risk=CommandRisk.DENY,
-                    reason=f"git {subcommand} requires network access",
+                    reason=f"{executable} requires network access",
                     requires_approval=False,
                 )
             return CommandDecision(
                 risk=CommandRisk.PROMPT,
-                reason=f"git {subcommand} requires approval",
+                reason=f"{executable} requires approval",
                 requires_approval=True,
             )
 
-        compound = self._compound_name(parts)
-        if compound in self.PROMPT_COMMANDS or executable in self.PROMPT_COMMANDS:
+        git_subcommand = self._git_subcommand(parts) if executable == "git" else None
+        if git_subcommand in _GIT_NETWORK_SUBCOMMANDS:
+            if not network_access:
+                return CommandDecision(
+                    risk=CommandRisk.DENY,
+                    reason=f"git {git_subcommand} requires network access",
+                    requires_approval=False,
+                )
             return CommandDecision(
                 risk=CommandRisk.PROMPT,
-                reason=f"{compound} requires approval",
+                reason=f"git {git_subcommand} requires approval",
                 requires_approval=True,
             )
 
-        if self._is_known_safe(parts):
+        if self._is_exact_read_only(parts):
             return CommandDecision(
                 risk=CommandRisk.SAFE,
-                reason="command is classified as safe",
+                reason="command matches the read-only allowlist",
                 requires_approval=False,
             )
 
         return CommandDecision(
             risk=CommandRisk.PROMPT,
-            reason="unknown command requires approval",
+            reason="command is not on the exact read-only allowlist",
             requires_approval=True,
-        )
-
-    def _classify_compound(
-        self,
-        sub_commands: list[str],
-        *,
-        network_access: bool,
-    ) -> CommandDecision:
-        highest: CommandDecision | None = None
-        sub_reasons: list[str] = []
-
-        for sub_str in sub_commands:
-            sub_str = sub_str.strip()
-            if not sub_str:
-                continue
-            parts = self._split(sub_str)
-            if not parts:
-                continue
-            decision = self._classify_single(parts, network_access=network_access)
-            sub_reasons.append(f"{parts[0]}:{decision.risk.value}")
-            if highest is None or self._risk_rank(decision.risk) > self._risk_rank(
-                highest.risk
-            ):
-                highest = decision
-
-        if highest is None:
-            return CommandDecision(
-                risk=CommandRisk.DENY,
-                reason="empty compound command",
-                requires_approval=False,
-            )
-
-        return CommandDecision(
-            risk=highest.risk,
-            reason=f"compound command ({'; '.join(sub_reasons)})",
-            requires_approval=highest.requires_approval,
         )
 
     @staticmethod
@@ -201,80 +226,57 @@ class CommandPolicy:
             return []
 
     @staticmethod
-    def _split_raw_command(command: str) -> list[str]:
-        parts = _SHELL_CHAIN_RE.split(command)
-        return [
-            part
-            for part in parts
-            if part.strip() and part.strip() not in {"&&", "||", "|", ";"}
-        ]
+    def _is_exact_read_only(parts: list[str]) -> bool:
+        command = tuple(parts)
+        if command in _EXACT_READ_ONLY_COMMANDS:
+            return True
+
+        if parts[0] == "ls":
+            return CommandPolicy._is_read_only_ls(parts[1:])
+
+        if parts[0] == "rg":
+            return CommandPolicy._is_read_only_rg(parts[1:])
+
+        return False
 
     @staticmethod
-    def _compound_name(parts: list[str]) -> str:
-        if len(parts) >= 2:
-            return f"{parts[0]}-{parts[1]}"
-        return parts[0]
+    def _is_read_only_ls(arguments: list[str]) -> bool:
+        if not arguments:
+            return True
+        return all(
+            argument.startswith("-")
+            and not argument.startswith("--")
+            and len(argument) > 1
+            and set(argument[1:]) <= _READ_ONLY_LS_FLAGS
+            for argument in arguments
+        )
 
     @staticmethod
-    def _risk_rank(risk: CommandRisk) -> int:
-        return {CommandRisk.SAFE: 0, CommandRisk.PROMPT: 1, CommandRisk.DENY: 2}[risk]
-
-    def _is_known_safe(self, parts: list[str]) -> bool:
-        """识别项目内常见的只读或测试类命令。"""
-        executable = parts[0]
-
-        if executable == "sed":
-            return not self._sed_is_inplace(parts)
-
-        if executable not in self.SAFE_COMMANDS:
-            return False
-
-        if executable == "git" and len(parts) >= 2:
-            return parts[1] in {
-                "status",
-                "diff",
-                "show",
-                "log",
-                "branch",
-                "stash",
-                "tag",
-                "remote",
-            }
-
-        if executable == "uv" and len(parts) >= 3:
-            return parts[1:3] in (["run", "pytest"], ["run", "ruff"])
-
-        if executable == "npm" and len(parts) >= 2:
-            return parts[1] in {"test", "run"}
-
-        if executable == "python" and len(parts) >= 3:
-            return parts[1:3] == ["-m", "pytest"]
-
-        if executable == "python" and len(parts) == 2:
-            return parts[1] in {"--version", "-V"}
-
-        return executable in {"pwd", "ls", "rg", "grep", "cat", "pytest", "mvn"}
-
-    @staticmethod
-    def _sed_is_inplace(parts: list[str]) -> bool:
-        for part in parts[1:]:
-            if part in {"-i", "--in-place"}:
-                return True
-            if part.startswith("-") and not part.startswith("--") and "i" in part:
-                return True
+    def _is_read_only_rg(arguments: list[str]) -> bool:
+        if arguments == ["--files"]:
+            return True
+        if len(arguments) == 1:
+            return bool(arguments[0]) and not arguments[0].startswith("-")
+        if len(arguments) == 2 and arguments[0] in _READ_ONLY_RG_FLAGS:
+            return bool(arguments[1]) and not arguments[1].startswith("-")
         return False
 
     @staticmethod
     def _is_destructive_rm(parts: list[str]) -> bool:
-        """拦截 `rm -rf` 这类针对宽泛路径的破坏性命令。"""
-        if not parts or parts[0] != "rm":
+        if not CommandPolicy._is_recursive_force_rm(parts):
             return False
 
+        return any(
+            posixpath.normpath(target) in _BROAD_RM_TARGETS
+            for target in CommandPolicy._rm_targets(parts[1:])
+        )
+
+    @staticmethod
+    def _is_recursive_force_rm(parts: list[str]) -> bool:
+        if not parts or CommandPolicy._command_name(parts[0]) != "rm":
+            return False
         has_recursive, has_force = CommandPolicy._rm_flags(parts[1:])
-        if not (has_recursive and has_force):
-            return False
-
-        return CommandPolicy._rm_target(parts[1:]) in _BROAD_RM_TARGETS
+        return has_recursive and has_force
 
     @staticmethod
     def _rm_flags(arguments: list[str]) -> tuple[bool, bool]:
@@ -296,15 +298,179 @@ class CommandPolicy:
         return has_recursive, has_force
 
     @staticmethod
-    def _rm_target(arguments: list[str]) -> str:
-        for part in reversed(arguments):
-            if part.startswith("-"):
+    def _rm_targets(arguments: list[str]) -> list[str]:
+        targets: list[str] = []
+        parsing_options = True
+        for part in arguments:
+            if parsing_options and part == "--":
+                parsing_options = False
                 continue
-            return part
-        return ""
+            if parsing_options and part.startswith("-"):
+                continue
+            targets.append(part)
+        return targets
 
     @staticmethod
-    def _git_requires_network(parts: list[str]) -> bool:
-        if len(parts) < 2:
-            return False
-        return parts[1] in _GIT_NETWORK_SUBCOMMANDS
+    def _git_subcommand(parts: list[str]) -> str | None:
+        index = 1
+        while index < len(parts):
+            part = parts[index]
+            if part == "--":
+                index += 1
+                return parts[index] if index < len(parts) else None
+            if part in _GIT_GLOBAL_OPTIONS_WITH_VALUE:
+                index += 2
+                continue
+            if part.startswith(("-C", "-c")) and len(part) > 2:
+                index += 1
+                continue
+            if part.startswith(
+                (
+                    "--git-dir=",
+                    "--work-tree=",
+                    "--namespace=",
+                    "--config-env=",
+                )
+            ):
+                index += 1
+                continue
+            if part.startswith("-"):
+                index += 1
+                continue
+            return part
+        return None
+
+    @staticmethod
+    def _command_name(executable: str) -> str:
+        return executable.replace("\\", "/").rsplit("/", 1)[-1]
+
+
+class _ShellScanner:
+    def __init__(self, command: str) -> None:
+        self.command = command
+        self.segments: list[str] = []
+        self.operators: list[str] = []
+        self.current: list[str] = []
+        self.quote: str | None = None
+        self.escaped = False
+        self.has_expansion = False
+        self.has_substitution = False
+        self.index = 0
+
+    def scan(self) -> _ShellScan:
+        while self.index < len(self.command):
+            character = self.command[self.index]
+            following = (
+                self.command[self.index + 1]
+                if self.index + 1 < len(self.command)
+                else ""
+            )
+            if self.escaped:
+                self._consume_escaped(character)
+            elif self.quote is not None:
+                self._consume_quoted(character, following)
+            else:
+                self._consume_unquoted(character, following)
+
+        self._flush_segment()
+        return _ShellScan(
+            segments=tuple(self.segments),
+            operators=tuple(self.operators),
+            has_expansion=self.has_expansion,
+            has_substitution=self.has_substitution,
+        )
+
+    def _consume_escaped(self, character: str) -> None:
+        self.current.append(character)
+        self.escaped = False
+        self.index += 1
+
+    def _consume_quoted(self, character: str, following: str) -> None:
+        self.current.append(character)
+        if character == self.quote:
+            self.quote = None
+        elif self.quote == '"' and character == "`":
+            self.has_substitution = True
+        elif self.quote == '"' and character == "$":
+            if following == "(":
+                self.has_substitution = True
+            else:
+                self.has_expansion = True
+        self.index += 1
+
+    def _consume_unquoted(self, character: str, following: str) -> None:
+        if character == "\\":
+            self.current.append(character)
+            self.escaped = True
+            self.index += 1
+            return
+        if character in {"'", '"'}:
+            self.quote = character
+            self.current.append(character)
+            self.index += 1
+            return
+        if character == "`":
+            self.has_substitution = True
+            self.current.append(character)
+            self.index += 1
+            return
+        if character == "$":
+            self._consume_dollar(following)
+            return
+        if character in {"<", ">"} and following == "(":
+            self.has_substitution = True
+            self.current.append(character)
+            self.index += 1
+            return
+        if character in {"*", "?", "[", "{", "~"}:
+            self.has_expansion = True
+            self.current.append(character)
+            self.index += 1
+            return
+        if character in {"\n", "\r"}:
+            self._consume_newline(character, following)
+            return
+        if character in {";", "&", "|", "<", ">", "(", ")"}:
+            self._consume_operator(character, following)
+            return
+        self.current.append(character)
+        self.index += 1
+
+    def _consume_dollar(self, following: str) -> None:
+        if following == "(":
+            self.has_substitution = True
+        else:
+            self.has_expansion = True
+        self.current.append("$")
+        self.index += 1
+
+    def _consume_newline(self, character: str, following: str) -> None:
+        self._flush_segment()
+        self._add_operator("newline")
+        if character == "\r" and following == "\n":
+            self.index += 1
+        self.index += 1
+
+    def _consume_operator(self, character: str, following: str) -> None:
+        self._flush_segment()
+        pair = f"{character}{following}"
+        if pair in _DOUBLE_SHELL_OPERATORS:
+            self._add_operator(pair)
+            self.index += 2
+        else:
+            self._add_operator(character)
+            self.index += 1
+
+    def _flush_segment(self) -> None:
+        segment = "".join(self.current).strip()
+        if segment:
+            self.segments.append(segment)
+        self.current.clear()
+
+    def _add_operator(self, operator: str) -> None:
+        if operator not in self.operators:
+            self.operators.append(operator)
+
+
+def _scan_shell(command: str) -> _ShellScan:
+    return _ShellScanner(command).scan()

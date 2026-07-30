@@ -64,6 +64,20 @@ class AutoApprovalReviewer(ApprovalReviewer):
         return ApprovalDecision.deny(request.approval_id, self.reason)
 
 
+class DenyApprovalReviewer(ApprovalReviewer):
+    """Fail-closed reviewer used when no interactive reviewer is configured."""
+
+    def __init__(self) -> None:
+        self.requests: list[ApprovalRequest] = []
+
+    async def review(self, request: ApprovalRequest) -> ApprovalDecision:
+        self.requests.append(request)
+        return ApprovalDecision.deny(
+            request.approval_id,
+            "no approval reviewer is configured",
+        )
+
+
 class ApprovalManager:
     """根据 approval policy 决定 tool call 是否需要用户确认。
 
@@ -77,7 +91,7 @@ class ApprovalManager:
         reviewer: ApprovalReviewer | None = None,
         command_policy: CommandPolicy | None = None,
     ) -> None:
-        self.reviewer = reviewer or AutoApprovalReviewer()
+        self.reviewer = reviewer if reviewer is not None else DenyApprovalReviewer()
         self.command_policy = command_policy or CommandPolicy()
 
     async def evaluate(

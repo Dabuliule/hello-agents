@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
+import os
 from pathlib import Path
 
 import pytest
@@ -251,6 +252,45 @@ def test_process_backend_is_explicit_and_filters_environment(tmp_path, monkeypat
     assert kwargs["env"]["SAFE_TOKEN"] == "forwarded"
     assert "DASHSCOPE_API_KEY" not in kwargs["env"]
     assert "codecraft-process-" in kwargs["env"]["HOME"]
+
+
+def test_process_backend_removes_workspace_and_relative_path_entries(
+    tmp_path,
+    monkeypatch,
+):
+    captured = []
+
+    class FakeProcess:
+        returncode = 0
+
+        async def communicate(self):
+            return b"", b""
+
+        def kill(self):
+            raise AssertionError("completed process should not be killed")
+
+    async def fake_create_subprocess_shell(*arguments, **kwargs):
+        captured.append((arguments, kwargs))
+        return FakeProcess()
+
+    workspace_bin = tmp_path / "bin"
+    workspace_bin.mkdir()
+    monkeypatch.setenv(
+        "PATH",
+        f"{tmp_path}{os.pathsep}relative"
+        f"{os.pathsep}{workspace_bin}"
+        f"{os.pathsep}/usr/bin",
+    )
+    monkeypatch.setattr(
+        asyncio,
+        "create_subprocess_shell",
+        fake_create_subprocess_shell,
+    )
+
+    asyncio.run(ProcessSandboxBackend().execute(_request(tmp_path)))
+
+    _, kwargs = captured[0]
+    assert kwargs["env"]["PATH"] == "/usr/bin"
 
 
 def test_seatbelt_command_enforces_workspace_write_and_network_policy(tmp_path):

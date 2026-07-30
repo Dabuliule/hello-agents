@@ -10,7 +10,9 @@ from pydantic import BaseModel
 
 from codecraft.approval.manager import (
     ApprovalManager,
+    ApprovalRequest,
     AutoApprovalReviewer,
+    DenyApprovalReviewer,
 )
 from codecraft.approval.policy import ApprovalPolicy
 from codecraft.approval.thread_reviewer import ThreadApprovalReviewer
@@ -333,15 +335,105 @@ def test_command_policy_classifies_safe_prompt_and_deny_commands():
     assert policy.classify("sudo true").risk == CommandRisk.DENY
 
 
-def test_command_policy_sed_inplace_requires_approval():
-    """sed -i modifies files in-place and must not be classified as SAFE."""
+@pytest.mark.parametrize(
+    "command",
+    [
+        "pwd",
+        "pwd -P",
+        "ls",
+        "ls -la",
+        "rg --files",
+        "rg 'workspace root'",
+        "rg -n 'workspace root'",
+        "rg 'left|right'",
+        "python --version",
+        "git status",
+        "git branch --show-current",
+        "git stash list",
+        "git tag --list",
+        "git remote -v",
+    ],
+)
+def test_command_policy_allows_only_exact_read_only_shapes(command):
+    assert CommandPolicy().classify(command).risk == CommandRisk.SAFE
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cat README.md",
+        "grep needle README.md",
+        "sed 's/foo/bar/' README.md",
+        "sed -n '5,10p' file.txt",
+        "sed -i 's/foo/bar/' README.md",
+        "pytest -q",
+        "python -m pytest",
+        "uv run pytest",
+        "npm test",
+        "mvn test",
+        "git status --short",
+        "git branch feature/unsafe",
+        "git tag v1.0.0",
+        "git remote add origin https://example.com/repo.git",
+        "git -C /tmp status",
+        "rg --pre cat needle",
+        "rg needle src",
+        "rg needle /etc",
+        "ls src",
+        "ls /etc",
+    ],
+)
+def test_command_policy_requires_approval_for_non_exact_shapes(command):
+    decision = CommandPolicy().classify(command)
+
+    assert decision.risk == CommandRisk.PROMPT
+    assert decision.requires_approval is True
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "pwd > output.txt",
+        "pwd >> output.txt",
+        "cat < README.md",
+        "pwd &",
+        "pwd\nls",
+        "pwd | ls",
+        "pwd && ls",
+        "pwd; ls",
+        "ls *",
+        "pwd ${HOME}",
+    ],
+)
+def test_command_policy_shell_control_and_expansion_require_approval(command):
+    decision = CommandPolicy().classify(command)
+
+    assert decision.risk == CommandRisk.PROMPT
+    assert decision.requires_approval is True
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "echo $(id)",
+        "echo `id`",
+        "cat <(pwd)",
+        'echo "$(id)"',
+    ],
+)
+def test_command_policy_denies_opaque_shell_substitution(command):
+    decision = CommandPolicy().classify(command)
+
+    assert decision.risk == CommandRisk.DENY
+    assert decision.requires_approval is False
+
+
+def test_command_policy_sed_always_requires_approval():
+    """sed scripts are not parsed deeply enough to prove they cannot execute or edit."""
     policy = CommandPolicy()
 
-    # Read-only sed is safe (prints to stdout).
-    assert policy.classify("sed 's/foo/bar/' README.md").risk == CommandRisk.SAFE
-    assert policy.classify("sed -n '5,10p' file.txt").risk == CommandRisk.SAFE
-
-    # In-place edit requires approval.
+    assert policy.classify("sed 's/foo/bar/' README.md").risk == CommandRisk.PROMPT
+    assert policy.classify("sed -n '5,10p' file.txt").risk == CommandRisk.PROMPT
     assert policy.classify("sed -i 's/foo/bar/' README.md").risk == CommandRisk.PROMPT
     assert (
         policy.classify("sed --in-place 's/foo/bar/' README.md").risk
@@ -352,26 +444,29 @@ def test_command_policy_sed_inplace_requires_approval():
 
 
 def test_command_policy_detects_shell_metacharacters():
-    """Commands chained with ; && || | must be classified by the riskiest sub-command."""
+    """Control syntax prompts even when every segment is otherwise read-only."""
     policy = CommandPolicy()
 
     # Safe command chained with a dangerous one → DENY.
     result = policy.classify("pwd && sudo true")
     assert result.risk == CommandRisk.DENY
-    assert "compound command" in result.reason
+    assert result.reason == "sudo is denied"
 
     # Safe command chained with a prompt one → PROMPT.
     result = policy.classify("pwd; rm file.txt")
     assert result.risk == CommandRisk.PROMPT
-    assert "compound command" in result.reason
+    assert "shell control syntax" in result.reason
 
-    # Pipe through a safe command → still SAFE.
+    # Pipes and chains require approval instead of inheriting SAFE.
     result = policy.classify("ls | grep foo")
-    assert result.risk == CommandRisk.SAFE
+    assert result.risk == CommandRisk.PROMPT
 
-    # Two safe commands chained → SAFE.
     result = policy.classify("pwd && ls")
-    assert result.risk == CommandRisk.SAFE
+    assert result.risk == CommandRisk.PROMPT
+
+    # Newlines cannot conceal a denied second command.
+    result = policy.classify("pwd\nsudo true")
+    assert result.risk == CommandRisk.DENY
 
 
 def test_command_policy_destructive_rm_patterns_are_denied():
@@ -385,6 +480,15 @@ def test_command_policy_destructive_rm_patterns_are_denied():
     assert policy.classify("rm -fr /").risk == CommandRisk.DENY
     assert policy.classify("rm -r -f /").risk == CommandRisk.DENY
     assert policy.classify("rm --recursive --force /").risk == CommandRisk.DENY
+    assert policy.classify("/bin/rm -rf /").risk == CommandRisk.DENY
+    assert policy.classify("rm -rf /tmp/..").risk == CommandRisk.DENY
+    assert policy.classify("rm -rf ./build/..").risk == CommandRisk.DENY
+    assert policy.classify("rm -rf ./*").risk == CommandRisk.DENY
+    assert policy.classify("rm -rf ../*").risk == CommandRisk.DENY
+    assert policy.classify("rm -rf / specific-file").risk == CommandRisk.DENY
+    assert policy.classify("rm -rf specific-file /").risk == CommandRisk.DENY
+    assert policy.classify('rm -rf "$HOME"').risk == CommandRisk.DENY
+    assert policy.classify("rm -rf ${TARGET}").risk == CommandRisk.DENY
 
     # rm without -rf on a specific file is PROMPT, not DENY.
     assert policy.classify("rm file.txt").risk == CommandRisk.PROMPT
@@ -395,7 +499,7 @@ def test_command_policy_destructive_rm_patterns_are_denied():
 
 
 def test_command_policy_expanded_safe_git_subcommands():
-    """git read-only subcommands like branch, stash, tag are SAFE."""
+    """Only exact read-only git argv shapes are SAFE."""
     policy = CommandPolicy()
 
     assert policy.classify("git branch").risk == CommandRisk.SAFE
@@ -403,12 +507,113 @@ def test_command_policy_expanded_safe_git_subcommands():
     assert policy.classify("git tag").risk == CommandRisk.SAFE
     assert policy.classify("git remote -v").risk == CommandRisk.SAFE
 
+    assert policy.classify("git branch new-branch").risk == CommandRisk.PROMPT
+    assert policy.classify("git stash push").risk == CommandRisk.PROMPT
+    assert policy.classify("git tag v1").risk == CommandRisk.PROMPT
+    assert policy.classify("git remote add origin local").risk == CommandRisk.PROMPT
+
     # Network and destructive git subcommands are not SAFE.
     assert policy.classify("git fetch").risk == CommandRisk.DENY
     assert policy.classify("git fetch", network_access=True).risk == CommandRisk.PROMPT
     assert policy.classify("git push").risk == CommandRisk.DENY
     assert policy.classify("git push", network_access=True).risk == CommandRisk.PROMPT
     assert policy.classify("git commit -m wip").risk == CommandRisk.PROMPT
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "/usr/bin/sudo true",
+        "/bin/dd if=/dev/zero of=image",
+        "/sbin/mkfs.ext4 /dev/test",
+        "/usr/bin/curl https://example.com",
+        "/usr/bin/git fetch",
+        "git -C /tmp fetch",
+    ],
+)
+def test_command_policy_classifies_absolute_executable_paths(command):
+    assert CommandPolicy().classify(command).risk == CommandRisk.DENY
+
+
+def test_approval_manager_defaults_to_deny_reviewer():
+    manager = ApprovalManager()
+
+    assert isinstance(manager.reviewer, DenyApprovalReviewer)
+    decision = asyncio.run(
+        manager.request(
+            ApprovalRequest(
+                approval_id="appr_default_deny",
+                session_id="ses_default_deny",
+                turn_id="turn_default_deny",
+                call_id="call_default_deny",
+                tool_name="write_file",
+                arguments={"path": "blocked.txt"},
+                reason="write_file has side effects",
+                risk="prompt",
+            )
+        )
+    )
+
+    assert decision.approved is False
+    assert decision.reason == "no approval reviewer is configured"
+
+
+def test_runtime_and_tool_runner_inherit_deny_reviewer_default(tmp_path):
+    registry = ToolRegistry()
+    runner = ToolRunner(registry)
+    runtime = AgentRuntime(
+        session_store=SessionStore(tmp_path / ".codecraft"),
+        llm_providers=LLMProviderRegistry([MockProvider(script=[])]),
+        tool_registry=registry,
+    )
+
+    assert isinstance(runner.approval_manager.reviewer, DenyApprovalReviewer)
+    assert isinstance(runtime.approval_manager.reviewer, DenyApprovalReviewer)
+
+
+def test_tool_runner_default_reviewer_rejects_approval_request(tmp_path):
+    async def run_test() -> None:
+        config = make_config(tmp_path).model_copy(
+            update={"approval_policy": ApprovalPolicy.ON_REQUEST}
+        )
+        context = TurnContext(
+            session_id=config.session_id,
+            turn_id="turn_default_deny",
+            cwd=config.cwd,
+            model=config.model,
+            model_provider=config.model_provider,
+            approval_policy=config.approval_policy,
+            sandbox_mode=config.sandbox_mode,
+            network_access=config.network_access,
+            available_tools=[],
+            max_tool_calls=config.max_tool_calls,
+            max_tool_output_chars=config.max_tool_output_chars,
+            created_at=config.created_at,
+        )
+        events = [
+            event
+            async for event in ToolRunner(ToolRegistry([WriteFileTool()])).run(
+                ToolCall(
+                    call_id="call_default_deny",
+                    name="write_file",
+                    arguments={"path": "blocked.txt", "content": "blocked"},
+                ),
+                context,
+            )
+        ]
+
+        assert not (tmp_path / "blocked.txt").exists()
+        assert [event.type for event in events] == [
+            RuntimeEventType.TOOL_CALL_STARTED,
+            RuntimeEventType.APPROVAL_REQUESTED,
+            RuntimeEventType.APPROVAL_DECIDED,
+            RuntimeEventType.TOOL_CALL_FINISHED,
+        ]
+        assert events[2].payload["approved"] is False
+        assert events[2].payload["reason"] == "no approval reviewer is configured"
+        assert events[3].payload["result"]["error"] == "approval_denied"
+
+    asyncio.run(run_test())
 
 
 def test_instruction_loader_uses_cwd_as_instruction_boundary(tmp_path):
