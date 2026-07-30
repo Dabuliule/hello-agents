@@ -45,6 +45,7 @@ class AgentRuntime:
 
     async def create_thread(self, config: SessionConfig) -> AgentThread:
         """创建新 session，并返回可消费事件的 AgentThread。"""
+        config.ensure_runtime_ready()
         llm_provider = self.llm_providers.get(config.model_provider)
         await self.tool_registry.start()
         await self.session_store.create_session(config)
@@ -76,6 +77,7 @@ class AgentRuntime:
 
     async def _resume_snapshot(self, snapshot: SessionSnapshot) -> AgentThread:
         """从已加载的快照恢复 thread，避免重复读取同一份 session 日志。"""
+        snapshot.config.ensure_runtime_ready()
         llm_provider = self.llm_providers.get(snapshot.config.model_provider)
         await self.tool_registry.start()
         conversation = reconstruct_conversation(snapshot.events)

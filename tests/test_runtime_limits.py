@@ -46,7 +46,7 @@ def make_config(tmp_path, **updates) -> SessionConfig:
         sandbox_mode="workspace_write",
         base_instructions="Keep responses concise.",
     )
-    return config.model_copy(update=updates)
+    return SessionConfig.model_validate({**config.model_dump(), **updates})
 
 
 def make_context(config: SessionConfig, **updates) -> TurnContext:
@@ -145,7 +145,7 @@ def test_runtime_compacts_context_and_reconstructs_exact_snapshot(tmp_path):
             [
                 ModelEvent(
                     type=ModelEventType.MESSAGE_COMPLETED,
-                    payload={"text": "a" * 700},
+                    payload={"text": "detail " * 3000},
                 ),
                 ModelEvent(type=ModelEventType.COMPLETED),
                 ModelEvent(
@@ -157,9 +157,9 @@ def test_runtime_compacts_context_and_reconstructs_exact_snapshot(tmp_path):
         )
         config = make_config(
             tmp_path,
-            model_context_window_tokens=620,
-            model_max_output_tokens=80,
-            context_safety_margin_tokens=40,
+            model_context_window_tokens=4096,
+            model_max_output_tokens=512,
+            context_safety_margin_tokens=256,
             context_keep_recent_items=2,
         )
         runtime = AgentRuntime(
@@ -169,7 +169,7 @@ def test_runtime_compacts_context_and_reconstructs_exact_snapshot(tmp_path):
         )
         thread = await runtime.create_thread(config)
 
-        await thread.submit(SessionInput.user_message("inp_one", "u" * 350))
+        await thread.submit(SessionInput.user_message("inp_one", "u" * 2400))
         await thread.wait_until_idle()
         await thread.submit(SessionInput.user_message("inp_two", "new question"))
         await thread.wait_until_idle()
@@ -541,9 +541,9 @@ def test_runtime_caps_tool_results_to_remaining_model_context(tmp_path):
         )
         config = make_config(
             tmp_path,
-            model_context_window_tokens=900,
-            model_max_output_tokens=100,
-            context_safety_margin_tokens=50,
+            model_context_window_tokens=4096,
+            model_max_output_tokens=512,
+            context_safety_margin_tokens=256,
             max_tool_output_tokens=5000,
         )
         runtime = AgentRuntime(

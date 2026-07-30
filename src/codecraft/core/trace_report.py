@@ -346,7 +346,7 @@ def _event_row(event: RuntimeEvent) -> dict[str, Any]:
         "type": event.type.value,
         "turn_id": event.turn_id,
         "summary": _event_summary(event),
-        "payload": event.payload,
+        "payload": event.payload.model_dump(mode="json", exclude_unset=True),
     }
 
 

@@ -37,6 +37,7 @@ def _event(*, seq: int) -> RuntimeEvent:
         session_id="ses_io",
         seq=seq,
         type=RuntimeEventType.TURN_STARTED,
+        payload={"input_id": f"inp_{seq}"},
     )
 
 
@@ -72,7 +73,13 @@ def test_session_store_serializes_concurrent_appends(tmp_path):
         store = SessionStore(tmp_path / ".codecraft")
         await store.create_session(_config(tmp_path))
         events = [
-            _event(seq=index).model_copy(update={"payload": {"content": "x" * 200_000}})
+            RuntimeEvent(
+                event_id=f"evt_{index}",
+                session_id="ses_io",
+                seq=index,
+                type=RuntimeEventType.USER_MESSAGE,
+                payload={"input_id": f"inp_{index}", "text": "x" * 200_000},
+            )
             for index in range(1, 65)
         ]
 
@@ -123,7 +130,9 @@ def test_session_emit_broadcasts_a_persisted_event_before_cancellation(
             original(path, line)
 
         monkeypatch.setattr(store, "_append_line", blocked_append)
-        emit = asyncio.create_task(session.emit(RuntimeEventType.TURN_STARTED))
+        emit = asyncio.create_task(
+            session.emit(RuntimeEventType.TURN_STARTED, {"input_id": "inp_cancel"})
+        )
 
         while not entered.is_set():
             await asyncio.sleep(0)

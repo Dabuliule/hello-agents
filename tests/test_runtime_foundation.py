@@ -111,17 +111,25 @@ def test_runtime_event_sanitizes_invalid_unicode_payload():
         event_id="evt_test",
         session_id="ses_test",
         seq=1,
-        type=RuntimeEventType.USER_MESSAGE,
-        payload={"text": "bad\udce4text", "nested": {"\udce5": ["ok\udce6"]}},
+        type=RuntimeEventType.MODEL_TOOL_CALL,
+        payload={
+            "call_id": "call_test",
+            "name": "echo",
+            "arguments": {
+                "text": "bad\udce4text",
+                "nested": {"\udce5": ["ok\udce6"]},
+            },
+        },
     )
 
     encoded = event.model_dump_json()
     decoded = RuntimeEvent.model_validate_json(encoded)
 
-    assert "\udce4" not in decoded.payload["text"]
-    assert "bad?text" == decoded.payload["text"]
-    assert "?" in decoded.payload["nested"]
-    assert decoded.payload["nested"]["?"] == ["ok?"]
+    arguments = decoded.payload["arguments"]
+    assert "\udce4" not in arguments["text"]
+    assert "bad?text" == arguments["text"]
+    assert "?" in arguments["nested"]
+    assert arguments["nested"]["?"] == ["ok?"]
 
 
 def test_runtime_event_redacts_sensitive_fields_without_hiding_env_names():
@@ -131,17 +139,124 @@ def test_runtime_event_redacts_sensitive_fields_without_hiding_env_names():
         seq=1,
         type=RuntimeEventType.MODEL_TOOL_CALL,
         payload={
+            "call_id": "call_secret",
+            "name": "secret_tool",
             "arguments": {
                 "api_key": "secret-value",
                 "nested": {"access_token": "token-value"},
+                "model_api_key_env": "DASHSCOPE_API_KEY",
             },
-            "model_api_key_env": "DASHSCOPE_API_KEY",
         },
     )
 
     assert event.payload["arguments"]["api_key"] == "[REDACTED]"
     assert event.payload["arguments"]["nested"]["access_token"] == "[REDACTED]"
-    assert event.payload["model_api_key_env"] == "DASHSCOPE_API_KEY"
+    assert event.payload["arguments"]["model_api_key_env"] == "DASHSCOPE_API_KEY"
+
+
+def test_runtime_event_rejects_payload_for_the_wrong_event_type():
+    with pytest.raises(ValueError, match="input_id"):
+        RuntimeEvent(
+            event_id="evt_wrong_payload",
+            session_id="ses_test",
+            seq=1,
+            type=RuntimeEventType.USER_MESSAGE,
+            payload={"text": "missing input id"},
+        )
+
+    with pytest.raises(ValueError, match="Extra inputs are not permitted"):
+        RuntimeEvent(
+            event_id="evt_extra_payload",
+            session_id="ses_test",
+            seq=1,
+            type=RuntimeEventType.ASSISTANT_MESSAGE,
+            payload={"text": "hello", "unexpected": True},
+        )
+
+
+def test_runtime_event_payload_is_frozen():
+    event = RuntimeEvent(
+        event_id="evt_frozen",
+        session_id="ses_test",
+        turn_id="turn_test",
+        seq=1,
+        type=RuntimeEventType.ASSISTANT_MESSAGE,
+        payload={"text": "immutable"},
+    )
+
+    with pytest.raises(ValueError, match="frozen"):
+        event.payload.text = "changed"
+
+
+def test_runtime_event_rejects_non_object_payload():
+    with pytest.raises(ValueError, match="JSON object"):
+        RuntimeEvent(
+            event_id="evt_bad_payload",
+            session_id="ses_test",
+            seq=1,
+            type=RuntimeEventType.SESSION_CLOSED,
+            payload=["not", "an", "object"],
+        )
+
+
+def test_runtime_event_payload_serializer_respects_filters():
+    event = RuntimeEvent(
+        event_id="evt_error",
+        session_id="ses_test",
+        seq=1,
+        type=RuntimeEventType.ERROR,
+        payload={
+            "code": "runtime_error",
+            "message": "failed",
+            "metadata": {"detail": "test"},
+            "suggestion": None,
+        },
+    )
+
+    without_none = event.model_dump(mode="json", exclude_none=True)
+    without_metadata = event.model_dump(
+        mode="json",
+        exclude={"payload": {"metadata"}},
+    )
+
+    assert "suggestion" not in without_none["payload"]
+    assert "metadata" not in without_metadata["payload"]
+
+
+def test_session_started_payload_preserves_data_keys_that_look_sensitive(tmp_path):
+    config_data = make_config(tmp_path).model_dump(mode="json")
+    config_data["mcp_servers"] = {"token": {"command": "mcp-server"}}
+
+    event = RuntimeEvent(
+        event_id="evt_config",
+        session_id="ses_test",
+        seq=1,
+        type=RuntimeEventType.SESSION_STARTED,
+        payload={"config": config_data},
+    )
+
+    assert "token" in event.payload["config"]["mcp_servers"]
+
+
+def test_persisted_session_config_does_not_require_cwd_to_still_exist(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    config = make_config(workspace)
+    serialized = RuntimeEvent(
+        event_id="evt_started",
+        session_id=config.session_id,
+        seq=1,
+        type=RuntimeEventType.SESSION_STARTED,
+        payload={"config": config.model_dump(mode="json")},
+    ).model_dump_json()
+    workspace.rmdir()
+
+    restored = RuntimeEvent.model_validate_json(serialized)
+
+    assert restored.payload["config"]["cwd"] == str(workspace)
+    with pytest.raises(ValueError, match="existing directory"):
+        restored_config = SessionConfig.model_validate(restored.payload["config"])
+        restored_config.ensure_runtime_ready()
 
 
 def test_runtime_event_requires_positive_seq():
@@ -206,9 +321,15 @@ def test_session_emit_rolls_back_seq_when_append_fails(tmp_path):
         thread = await runtime.create_thread(config)
 
         with pytest.raises(RuntimeError, match="append failed"):
-            await thread.session.emit(RuntimeEventType.USER_MESSAGE, {"text": "failed"})
+            await thread.session.emit(
+                RuntimeEventType.USER_MESSAGE,
+                {"input_id": "inp_failed", "text": "failed"},
+            )
 
-        event = await thread.session.emit(RuntimeEventType.USER_MESSAGE, {"text": "ok"})
+        event = await thread.session.emit(
+            RuntimeEventType.USER_MESSAGE,
+            {"input_id": "inp_ok", "text": "ok"},
+        )
         loaded = await store.load_events(config.session_id)
 
         assert event.seq == 2
@@ -273,7 +394,7 @@ def test_event_bus_dispatches_runtime_events_in_subscription_order():
                 event_id="evt_test",
                 session_id="ses_test",
                 seq=1,
-                type=RuntimeEventType.SESSION_STARTED,
+                type=RuntimeEventType.SESSION_CLOSED,
             )
         )
 
@@ -2265,18 +2386,16 @@ def test_session_store_rejects_unknown_config_schema_version(tmp_path):
     async def run_test() -> None:
         config = make_config(tmp_path)
         store = SessionStore(config.codecraft_home)
-        await store.create_session(config)
-        config_payload = config.model_dump(mode="json")
-        config_payload["schema_version"] = 2
-        await store.append_event(
-            RuntimeEvent(
-                event_id="evt_started",
-                session_id=config.session_id,
-                seq=1,
-                type=RuntimeEventType.SESSION_STARTED,
-                payload={"config": config_payload},
-            )
-        )
+        path = await store.create_session(config)
+        event = RuntimeEvent(
+            event_id="evt_started",
+            session_id=config.session_id,
+            seq=1,
+            type=RuntimeEventType.SESSION_STARTED,
+            payload={"config": config.model_dump(mode="json")},
+        ).model_dump(mode="json")
+        event["payload"]["config"]["schema_version"] = 2
+        path.write_text(json.dumps(event) + "\n", encoding="utf-8")
 
         with pytest.raises(SessionRestoreError) as raised:
             await store.resume(config.session_id)
@@ -2292,15 +2411,14 @@ def test_session_store_rejects_missing_schema_versions(tmp_path):
         config = make_config(tmp_path)
         store = SessionStore(config.codecraft_home)
         path = await store.create_session(config)
-        config_payload = config.model_dump(mode="json")
-        config_payload.pop("schema_version")
         event = RuntimeEvent(
             event_id="evt_started",
             session_id=config.session_id,
             seq=1,
             type=RuntimeEventType.SESSION_STARTED,
-            payload={"config": config_payload},
+            payload={"config": config.model_dump(mode="json")},
         ).model_dump(mode="json")
+        event["payload"]["config"].pop("schema_version")
         event.pop("schema_version")
         path.write_text(json.dumps(event) + "\n", encoding="utf-8")
 
@@ -2730,7 +2848,7 @@ def test_runtime_resume_uses_context_compaction_summary(tmp_path):
                 turn_id="turn_one",
                 seq=2,
                 type=RuntimeEventType.USER_MESSAGE,
-                payload={"text": "old user"},
+                payload={"input_id": "inp_one", "text": "old user"},
             )
         )
         await store.append_event(
@@ -2742,6 +2860,10 @@ def test_runtime_resume_uses_context_compaction_summary(tmp_path):
                 type=RuntimeEventType.CONTEXT_COMPACTED,
                 payload={
                     "summary": "old conversation summary",
+                    "before_tokens": 10,
+                    "after_tokens": 5,
+                    "removed_items": 1,
+                    "retained_items": 0,
                     "conversation": {
                         "items": [
                             {

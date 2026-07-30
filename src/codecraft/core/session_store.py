@@ -136,6 +136,7 @@ class SessionStore:
                                 "version": version,
                             },
                         )
+                    self._validate_started_config_version(data, session_id)
                     try:
                         events.append(RuntimeEvent.model_validate(data))
                     except Exception as exc:
@@ -339,6 +340,18 @@ class SessionStore:
                 code="session_config_schema_unsupported",
                 metadata={"session_id": session_id, "version": version},
             )
+
+    def _validate_started_config_version(
+        self,
+        event_data: dict[str, Any],
+        session_id: str,
+    ) -> None:
+        if event_data.get("type") != RuntimeEventType.SESSION_STARTED.value:
+            return
+        payload = event_data.get("payload")
+        config_data = payload.get("config") if isinstance(payload, dict) else None
+        if isinstance(config_data, dict):
+            self._validate_config_version(config_data, session_id)
 
     def _path_for_session(self, session_id: str) -> Path:
         """定位 session 日志路径，并缓存 glob 的结果。"""

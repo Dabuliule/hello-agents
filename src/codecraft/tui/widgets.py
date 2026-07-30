@@ -10,6 +10,7 @@ from textual.widgets import Static
 
 from codecraft.schema.session import SessionConfig
 from codecraft.tui.rendering import runtime_status, session_header
+from codecraft.schema.event import EventPayload
 from codecraft.tui.theme import palette_for
 
 
@@ -129,7 +130,7 @@ class ActivityBlock(Static):
             self.status = "stopped"
             self.refresh(layout=True)
 
-    def finish(self, payload: dict[str, Any]) -> None:
+    def finish(self, payload: EventPayload) -> None:
         result = payload.get("result")
         success = isinstance(result, dict) and result.get("success") is True
         self.status = "completed" if success else "failed"

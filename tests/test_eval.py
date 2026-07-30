@@ -68,7 +68,13 @@ def test_eval_metrics_derive_tokens_and_classify_failures():
         session_id="ses_eval",
         seq=2,
         type=RuntimeEventType.TURN_ABORTED,
-        payload={"reason": "model_error"},
+        payload={
+            "reason": "model_error",
+            "message": "model error",
+            "tool_calls": 0,
+            "duration_ms": 1,
+            "metadata": {},
+        },
     )
 
     metrics = summarize_events([token_event])

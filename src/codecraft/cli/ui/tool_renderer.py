@@ -5,6 +5,7 @@ from typing import Any
 from rich.console import Console
 
 from codecraft.cli.ui.render_config import RenderConfig
+from codecraft.schema.event import EventPayload
 
 
 class ToolRenderer:
@@ -13,7 +14,7 @@ class ToolRenderer:
         self.config = config
         self._started_args: dict[str, dict[str, Any]] = {}
 
-    def render_started(self, payload: dict[str, Any]) -> None:
+    def render_started(self, payload: EventPayload) -> None:
         name = str(payload.get("name") or "tool")
         arguments = payload.get("arguments")
         if isinstance(arguments, dict):
@@ -24,7 +25,7 @@ class ToolRenderer:
             self._format_started(name, arguments), markup=False, soft_wrap=True
         )
 
-    def render_finished(self, payload: dict[str, Any]) -> None:
+    def render_finished(self, payload: EventPayload) -> None:
         name = str(payload.get("name") or "tool")
         result = payload.get("result")
         duration_ms = payload.get("duration_ms")
@@ -55,7 +56,7 @@ class ToolRenderer:
             )
             self.console.print(content)
 
-    def render_patch_applied(self, payload: dict[str, Any]) -> None:
+    def render_patch_applied(self, payload: EventPayload) -> None:
         self.console.print(
             f"✓ patch applied · {payload.get('modified', 0)} modified · "
             f"{payload.get('added', 0)} added · {payload.get('deleted', 0)} deleted",

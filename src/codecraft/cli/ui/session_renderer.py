@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from pathlib import Path
-from typing import Any
 
 from rich.console import Console
 from rich.panel import Panel
@@ -114,7 +113,7 @@ class SessionRenderer:
                     str(event.seq),
                     str(event.type),
                     event.turn_id or "-",
-                    str(event.payload),
+                    str(event.payload.get("message") or event.payload),
                 )
             elif event.type == RuntimeEventType.TOOL_CALL_FINISHED:
                 result = event.payload.get("result")
@@ -148,7 +147,7 @@ def last_answer(events: list[RuntimeEvent]) -> str | None:
 
 
 def event_summary(event: RuntimeEvent) -> str:
-    payload: dict[str, Any] = event.payload
+    payload = event.payload
     if event.type in {
         RuntimeEventType.ASSISTANT_MESSAGE,
         RuntimeEventType.ASSISTANT_MESSAGE_DELTA,

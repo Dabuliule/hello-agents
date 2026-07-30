@@ -81,10 +81,12 @@ class SessionConfig(BaseModel):
     @field_validator("cwd")
     @classmethod
     def validate_cwd(cls, value: Path) -> Path:
-        resolved = value.expanduser().resolve()
-        if not resolved.exists() or not resolved.is_dir():
+        return value.expanduser().resolve()
+
+    def ensure_runtime_ready(self) -> None:
+        """Validate environment-dependent preconditions at an execution boundary."""
+        if not self.cwd.exists() or not self.cwd.is_dir():
             raise ValueError("cwd must be an existing directory")
-        return resolved
 
     @field_validator("codecraft_home")
     @classmethod

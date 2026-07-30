@@ -55,7 +55,7 @@ def seed_session(tmp_path) -> SessionConfig:
                 turn_id="turn_cli",
                 seq=2,
                 type=RuntimeEventType.TURN_FINISHED,
-                payload={"answer": "done", "status": "success"},
+                payload={"answer": "done", "tool_calls": 0, "duration_ms": 1},
             )
         )
         return config
@@ -235,7 +235,7 @@ def test_trace_command_writes_json_and_html_reports(tmp_path):
                 turn_id="turn_trace",
                 seq=2,
                 type=RuntimeEventType.USER_MESSAGE,
-                payload={"text": "read README"},
+                payload={"input_id": "inp_trace", "text": "read README"},
             )
         )
         await store.append_event(
@@ -292,7 +292,7 @@ def test_trace_command_writes_json_and_html_reports(tmp_path):
                 turn_id="turn_trace",
                 seq=6,
                 type=RuntimeEventType.TURN_FINISHED,
-                payload={"answer": "done", "status": "success"},
+                payload={"answer": "done", "tool_calls": 1, "duration_ms": 12},
             )
         )
         return config
@@ -402,7 +402,11 @@ def test_inspect_command_prints_tool_and_error_summaries(tmp_path):
                 turn_id="turn_cli",
                 seq=4,
                 type=RuntimeEventType.ERROR,
-                payload={"message": "runtime failed"},
+                payload={
+                    "code": "runtime_error",
+                    "message": "runtime failed",
+                    "metadata": {},
+                },
             )
         )
         return config

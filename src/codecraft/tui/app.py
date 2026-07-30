@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
-from typing import Any
 
 from rich.text import Text
 from textual import events, on
@@ -18,7 +17,7 @@ from codecraft.core.ids import new_id
 from codecraft.core.runtime import AgentRuntime
 from codecraft.core.thread import AgentThread
 from codecraft.core.trace_report import build_trace_report
-from codecraft.schema.event import RuntimeEvent, RuntimeEventType
+from codecraft.schema.event import EventPayload, RuntimeEvent, RuntimeEventType
 from codecraft.schema.input import SessionInput
 from codecraft.schema.session import SessionConfig
 from codecraft.tui.commands import (
@@ -541,7 +540,7 @@ class CodeCraftTUI(App[None]):
         self._last_error_turn_id = None
         self._finish_turn("closed")
 
-    async def _request_approval(self, payload: dict[str, Any]) -> None:
+    async def _request_approval(self, payload: EventPayload) -> None:
         if self.thread is None:
             return
         activity = self._activity_for_payload(payload)
@@ -576,7 +575,7 @@ class CodeCraftTUI(App[None]):
         self.turn_status = "running"
         self._refresh_status()
 
-    async def _show_inline_approval(self, payload: dict[str, Any]) -> bool:
+    async def _show_inline_approval(self, payload: EventPayload) -> bool:
         if self._approval_result is not None:
             raise RuntimeError("another approval decision is already active")
 
@@ -626,7 +625,7 @@ class CodeCraftTUI(App[None]):
         self._scroll_conversation()
         return block
 
-    async def _render_tool_started(self, payload: dict[str, Any]) -> None:
+    async def _render_tool_started(self, payload: EventPayload) -> None:
         call_id_value = payload.get("call_id")
         call_id = call_id_value if isinstance(call_id_value, str) else None
         name = str(payload.get("name") or "tool")
@@ -641,7 +640,7 @@ class CodeCraftTUI(App[None]):
         if call_id is not None:
             self._activity_blocks[call_id] = block
 
-    async def _render_tool_finished(self, payload: dict[str, Any]) -> None:
+    async def _render_tool_finished(self, payload: EventPayload) -> None:
         call_id_value = payload.get("call_id")
         call_id = call_id_value if isinstance(call_id_value, str) else None
         name = str(payload.get("name") or "tool")
@@ -653,7 +652,7 @@ class CodeCraftTUI(App[None]):
         block.finish(payload)
         self._scroll_conversation()
 
-    def _activity_for_payload(self, payload: dict[str, Any]) -> ActivityBlock | None:
+    def _activity_for_payload(self, payload: EventPayload) -> ActivityBlock | None:
         call_id = payload.get("call_id")
         if not isinstance(call_id, str):
             return None
@@ -668,11 +667,11 @@ class CodeCraftTUI(App[None]):
                 return block
         return None
 
-    def _add_token_usage(self, payload: dict[str, Any]) -> None:
+    def _add_token_usage(self, payload: EventPayload) -> None:
         self._accumulate_token_usage(payload)
         self._refresh_status()
 
-    def _accumulate_token_usage(self, payload: dict[str, Any]) -> None:
+    def _accumulate_token_usage(self, payload: EventPayload) -> None:
         for name in self.token_usage:
             value = payload.get(name)
             if isinstance(value, int) and not isinstance(value, bool) and value >= 0:

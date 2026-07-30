@@ -99,7 +99,7 @@ async def _seed_session(config: SessionConfig) -> None:
             turn_id="turn_one",
             seq=2,
             type=RuntimeEventType.USER_MESSAGE,
-            payload={"text": "first question"},
+            payload={"input_id": "inp_one", "text": "first question"},
         ),
         RuntimeEvent(
             event_id="evt_tokens",
@@ -127,6 +127,7 @@ async def _seed_session(config: SessionConfig) -> None:
             turn_id="turn_one",
             seq=5,
             type=RuntimeEventType.TURN_FINISHED,
+            payload={"answer": "first answer", "tool_calls": 0, "duration_ms": 1},
         ),
     ]
     for event in events:
