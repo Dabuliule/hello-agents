@@ -55,6 +55,8 @@ class Turn:
 
     _TOOL_RESULT_OVERHEAD_TOKENS = 64
     _MIN_TOOL_RESULT_TOKENS = 32
+    _MAX_SKILL_CATALOGUE_TOKENS = 2048
+    _SKILL_CATALOGUE_BUDGET_DIVISOR = 8
 
     def __init__(
         self,
@@ -373,8 +375,15 @@ class Turn:
 
     async def _prepare_model_messages(self) -> list[ModelMessage] | None:
         project_instructions = self._project_instructions()
-        messages = self._build_model_messages(project_instructions)
         input_budget = self._model_input_budget_tokens()
+        fixed_usage = await self._ensure_fixed_input_fits(
+            project_instructions=project_instructions,
+            input_budget=input_budget,
+        )
+        if fixed_usage is None:
+            return None
+
+        messages = self._build_model_messages(project_instructions)
         before_tokens = self._model_input_tokens(messages)
         if before_tokens <= input_budget:
             return messages
@@ -402,14 +411,23 @@ class Turn:
                 "input_budget_tokens": input_budget,
                 "input_tokens": after_tokens,
                 "compaction_attempted": compaction is not None,
+                "fixed_input_tokens": fixed_usage["fixed_input_tokens"],
+                "component_tokens": fixed_usage["component_tokens"],
             },
         )
         return None
 
     async def _tool_result_token_limit(self, call_count: int) -> int | None:
         project_instructions = self._project_instructions()
-        messages = self._build_model_messages(project_instructions)
         input_budget = self._model_input_budget_tokens()
+        fixed_usage = await self._ensure_fixed_input_fits(
+            project_instructions=project_instructions,
+            input_budget=input_budget,
+        )
+        if fixed_usage is None:
+            return None
+
+        messages = self._build_model_messages(project_instructions)
         current_tokens = self._model_input_tokens(messages)
 
         if current_tokens > input_budget:
@@ -435,6 +453,8 @@ class Turn:
                     "input_budget_tokens": input_budget,
                     "input_tokens": current_tokens,
                     "tool_calls": call_count,
+                    "fixed_input_tokens": fixed_usage["fixed_input_tokens"],
+                    "component_tokens": fixed_usage["component_tokens"],
                 },
             )
             return None
@@ -459,11 +479,80 @@ class Turn:
             ),
             context=self.context,
             project_instructions=project_instructions,
-            available_skills=self.session.skill_registry.catalogue_prompt(),
-            active_skills=self.session.skill_registry.active_prompt(
-                self._active_skills.values()
-            ),
+            available_skills=self._available_skills_prompt(),
+            active_skills=self._active_skills_prompt(),
         )
+
+    def _available_skills_prompt(self) -> str | None:
+        return self.session.skill_registry.catalogue_prompt(
+            max_tokens=self._skill_catalogue_token_budget()
+        )
+
+    def _active_skills_prompt(self) -> str | None:
+        return self.session.skill_registry.active_prompt(self._active_skills.values())
+
+    def _skill_catalogue_token_budget(self) -> int:
+        return min(
+            self._MAX_SKILL_CATALOGUE_TOKENS,
+            self._model_input_budget_tokens() // self._SKILL_CATALOGUE_BUDGET_DIVISOR,
+        )
+
+    async def _ensure_fixed_input_fits(
+        self,
+        *,
+        project_instructions: str | None,
+        input_budget: int,
+    ) -> dict[str, Any] | None:
+        usage = self._fixed_input_usage(project_instructions)
+        if usage["fixed_input_tokens"] <= input_budget:
+            return usage
+
+        await self.abort(
+            "context_limit_exceeded",
+            (
+                "Fixed model input exceeds the configured context budget; reduce "
+                "instructions, active Skills, or registered tool schemas."
+            ),
+            metadata={
+                "detail": "fixed_input_exceeds_budget",
+                "context_window_tokens": self.context.model_context_window_tokens,
+                "input_budget_tokens": input_budget,
+                **usage,
+            },
+        )
+        return None
+
+    def _fixed_input_usage(
+        self,
+        project_instructions: str | None,
+    ) -> dict[str, Any]:
+        available_skills = self._available_skills_prompt()
+        active_skills = self._active_skills_prompt()
+        fixed_messages = self.prompt_builder.build(
+            config=self.session.config,
+            conversation=Conversation(),
+            context=self.context,
+            project_instructions=project_instructions,
+            available_skills=available_skills,
+            active_skills=active_skills,
+        )
+        component_tokens = self.prompt_builder.fixed_section_tokens(
+            config=self.session.config,
+            context=self.context,
+            project_instructions=project_instructions,
+            available_skills=available_skills,
+            active_skills=active_skills,
+        )
+        component_tokens["tool_schemas"] = estimate_serialized_tokens(
+            [tool.model_dump(mode="json") for tool in self.context.available_tools]
+        )
+        return {
+            "fixed_input_tokens": self._model_input_tokens(fixed_messages),
+            "component_tokens": component_tokens,
+            "skill_catalogue_budget_tokens": self._skill_catalogue_token_budget(),
+            "active_skills": list(self._active_skills),
+            "tool_count": len(self.context.available_tools),
+        }
 
     def _compact_model_context(
         self,

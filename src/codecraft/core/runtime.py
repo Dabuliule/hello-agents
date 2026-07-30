@@ -13,7 +13,7 @@ from codecraft.core.session_store import SessionStore
 from codecraft.core.thread import AgentThread
 from codecraft.llm.registry import LLMProviderRegistry
 from codecraft.schema.event import RuntimeEventType
-from codecraft.schema.session import SessionConfig, SessionSummary
+from codecraft.schema.session import SessionConfig, SessionSnapshot, SessionSummary
 from codecraft.skill import SkillRegistry
 from codecraft.tool.registry import ToolRegistry
 from codecraft.tool.observer import ToolResultObserver
@@ -72,6 +72,10 @@ class AgentRuntime:
     async def resume_thread(self, session_id: str) -> AgentThread:
         """根据 session 日志恢复 thread，并重建模型 conversation。"""
         snapshot = await self.session_store.resume(session_id)
+        return await self._resume_snapshot(snapshot)
+
+    async def _resume_snapshot(self, snapshot: SessionSnapshot) -> AgentThread:
+        """从已加载的快照恢复 thread，避免重复读取同一份 session 日志。"""
         llm_provider = self.llm_providers.get(snapshot.config.model_provider)
         await self.tool_registry.start()
         conversation = reconstruct_conversation(snapshot.events)
@@ -98,7 +102,7 @@ class AgentRuntime:
 
     async def resume_last(self, cwd: Path | None = None) -> AgentThread:
         snapshot = await self.session_store.resume_last(cwd=cwd)
-        return await self.resume_thread(snapshot.config.session_id)
+        return await self._resume_snapshot(snapshot)
 
     async def list_sessions(self, cwd: Path | None = None) -> list[SessionSummary]:
         return await self.session_store.list_sessions(cwd=cwd)

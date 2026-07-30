@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 
 from codecraft.cli.bootstrap import build_runtime
+from codecraft.core.token_budget import estimate_text_tokens
 from codecraft.llm import (
     LLMProviderRegistry,
     MockProvider,
@@ -224,6 +226,34 @@ def test_catalogue_escapes_section_delimiters_in_descriptions(tmp_path):
     assert catalogue is not None
     assert "</available_skills>" not in catalogue
     assert "\\u003c/available_skills\\u003e" in catalogue
+
+
+def test_catalogue_budget_removes_complete_entries_deterministically(tmp_path):
+    project_root = tmp_path / "project-skills"
+    for index in range(6):
+        write_skill(
+            project_root,
+            f"skill-{index}",
+            description=f"Workflow {index} " + "detail " * 20,
+            instructions=f"Follow workflow {index}.",
+        )
+    registry = SkillRegistry.discover(
+        user_root=tmp_path / "user-skills",
+        project_root=project_root,
+    )
+
+    bounded = registry.catalogue_prompt(max_tokens=180)
+
+    assert bounded is not None
+    assert estimate_text_tokens(bounded) <= 180
+    payload = json.loads(bounded)
+    assert isinstance(payload, dict)
+    selected_names = [item["name"] for item in payload["skills"]]
+    assert selected_names == [
+        metadata.name for metadata in registry.list()[: len(selected_names)]
+    ]
+    assert payload["omitted_count"] == len(registry.list()) - len(selected_names)
+    assert payload["omitted_count"] > 0
 
 
 def test_runtime_progressively_loads_skill_for_current_turn_only(tmp_path):
@@ -482,6 +512,53 @@ def test_explicit_skill_mentions_activate_before_the_first_model_request(tmp_pat
         assert not any(
             event.type == RuntimeEventType.MODEL_TOOL_CALL for event in snapshot.events
         )
+
+        await runtime.close()
+
+    asyncio.run(run_test())
+
+
+def test_oversized_active_skill_aborts_before_provider_call_with_diagnostics(
+    tmp_path,
+):
+    async def run_test() -> None:
+        write_skill(
+            tmp_path / ".codecraft" / "skills",
+            "oversized",
+            description="An intentionally large workflow.",
+            instructions="required step\n" * 3000,
+        )
+        provider = MockProvider()
+        config = make_config(tmp_path).model_copy(
+            update={
+                "model_context_window_tokens": 8192,
+                "model_max_output_tokens": 512,
+                "context_safety_margin_tokens": 256,
+            }
+        )
+        runtime = build_runtime(
+            config,
+            llm_providers=LLMProviderRegistry([provider]),
+        )
+        thread = await runtime.create_thread(config)
+
+        await thread.submit(
+            SessionInput.user_message("inp_oversized", "$oversized follow it")
+        )
+        await thread.wait_until_idle()
+
+        snapshot = await thread.read_snapshot()
+        aborted = snapshot.events[-1]
+        metadata = aborted.payload["metadata"]
+        assert aborted.type == RuntimeEventType.TURN_ABORTED
+        assert aborted.payload["reason"] == "context_limit_exceeded"
+        assert metadata["detail"] == "fixed_input_exceeds_budget"
+        assert metadata["active_skills"] == ["oversized"]
+        assert (
+            metadata["component_tokens"]["active_skills"]
+            > (metadata["input_budget_tokens"])
+        )
+        assert provider.calls == []
 
         await runtime.close()
 

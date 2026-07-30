@@ -474,6 +474,51 @@ class LargeSuggestionTool(BaseTool):
         )
 
 
+class OversizedSchemaTool(BaseTool):
+    name = "oversized_schema"
+    description = "schema detail " * 4000
+    args_schema = ValueArgs
+    effects = {ToolEffect.READ_ONLY}
+
+    async def arun(self, args: ValueArgs, context: ToolContext) -> ToolResult:
+        return ToolResult(success=True, content=args.value)
+
+
+def test_runtime_rejects_oversized_fixed_tool_schema_before_provider_call(tmp_path):
+    async def run_test() -> None:
+        provider = MockProvider()
+        config = make_config(
+            tmp_path,
+            model_context_window_tokens=4096,
+            model_max_output_tokens=512,
+            context_safety_margin_tokens=256,
+        )
+        runtime = AgentRuntime(
+            session_store=SessionStore(config.codecraft_home),
+            llm_providers=LLMProviderRegistry([provider]),
+            tool_registry=ToolRegistry([OversizedSchemaTool()]),
+        )
+
+        thread = await runtime.create_thread(config)
+        await thread.submit(SessionInput.user_message("inp_schema", "answer briefly"))
+        await thread.wait_until_idle()
+        snapshot = await thread.read_snapshot()
+
+        aborted = snapshot.events[-1]
+        assert aborted.type == RuntimeEventType.TURN_ABORTED
+        assert aborted.payload["reason"] == "context_limit_exceeded"
+        assert aborted.payload["metadata"]["detail"] == ("fixed_input_exceeds_budget")
+        assert (
+            aborted.payload["metadata"]["component_tokens"]["tool_schemas"]
+            > aborted.payload["metadata"]["input_budget_tokens"]
+        )
+        assert provider.calls == []
+
+        await runtime.close()
+
+    asyncio.run(run_test())
+
+
 def test_runtime_caps_tool_results_to_remaining_model_context(tmp_path):
     async def run_test() -> None:
         provider = MockProvider(

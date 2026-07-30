@@ -11,6 +11,7 @@ import yaml
 from yaml import YAMLError
 
 from codecraft.core.errors import CodecraftError
+from codecraft.core.token_budget import estimate_text_tokens
 from codecraft.skill.models import (
     Skill,
     SkillDiagnostic,
@@ -293,7 +294,8 @@ class SkillRegistry:
     def __bool__(self) -> bool:
         return bool(self._skills)
 
-    def catalogue_prompt(self) -> str | None:
+    def catalogue_prompt(self, *, max_tokens: int | None = None) -> str | None:
+        """返回确定性的 Skill 目录；超出预算时只移除完整条目。"""
         if not self._skills:
             return None
         catalogue = [
@@ -304,8 +306,37 @@ class SkillRegistry:
             }
             for metadata in self.list()
         ]
+        prompt = self._prompt_json(catalogue)
+        if max_tokens is None or estimate_text_tokens(prompt) <= max_tokens:
+            return prompt
+        if max_tokens <= 0:
+            return None
+
+        selected: list[dict[str, str]] = []
+        for entry in catalogue:
+            candidate_entries = [*selected, entry]
+            candidate = self._prompt_json(
+                {
+                    "skills": candidate_entries,
+                    "omitted_count": len(catalogue) - len(candidate_entries),
+                }
+            )
+            if estimate_text_tokens(candidate) > max_tokens:
+                break
+            selected = candidate_entries
+
+        bounded = self._prompt_json(
+            {
+                "skills": selected,
+                "omitted_count": len(catalogue) - len(selected),
+            }
+        )
+        return bounded if estimate_text_tokens(bounded) <= max_tokens else None
+
+    @staticmethod
+    def _prompt_json(value: Any) -> str:
         return (
-            json.dumps(catalogue, ensure_ascii=False, indent=2)
+            json.dumps(value, ensure_ascii=False, indent=2)
             .replace("<", "\\u003c")
             .replace(">", "\\u003e")
         )
