@@ -21,7 +21,7 @@ name = "gpt-user"
 policy = "never"
 
 [sandbox]
-network_access = false
+network_access = true
 """,
         encoding="utf-8",
     )
@@ -38,9 +38,6 @@ name = "qwen-fast"
 provider = "qwen"
 context_window_tokens = 65536
 max_output_tokens = 4096
-
-[sandbox]
-network_access = true
 
 [instructions]
 user = "Always answer in Chinese."

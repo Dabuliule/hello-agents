@@ -3,11 +3,44 @@ from __future__ import annotations
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from codecraft.approval.policy import ApprovalPolicy
 from codecraft.config.settings import RuntimeSettings
 from codecraft.sandbox.policy import SandboxMode
+
+
+_ConfigSource = Literal["user", "profile", "project", "explicit"]
+_PROJECT_ALLOWED_FIELDS = {
+    "model": frozenset(
+        {
+            "provider",
+            "name",
+            "context_window_tokens",
+            "max_output_tokens",
+        }
+    ),
+    "instructions": frozenset({"user"}),
+    "turn": frozenset(
+        {
+            "max_tool_calls",
+            "max_tool_output_chars",
+            "max_tool_output_tokens",
+            "turn_timeout_seconds",
+            "tool_timeout_seconds",
+            "approval_timeout_seconds",
+            "context_safety_margin_tokens",
+            "context_keep_recent_items",
+            "max_parallel_read_tools",
+        }
+    ),
+}
+
+
+@dataclass(frozen=True)
+class _ConfigLayer:
+    path: Path
+    source: _ConfigSource
 
 
 @dataclass(frozen=True)
@@ -59,8 +92,12 @@ class ConfigLoader:
         """合并所有配置层，并校验成 RuntimeSettings。"""
         merged = RuntimeSettings().model_dump(mode="python")
         for layer in self._config_layers(profile=profile, config_path=config_path):
-            if layer.exists():
-                merged = _deep_merge(merged, _read_toml(layer))
+            if not layer.path.exists():
+                continue
+            values = _read_toml(layer.path)
+            if layer.source == "project":
+                _validate_project_config(layer.path, values)
+            merged = _deep_merge(merged, values)
 
         if overrides is not None:
             merged = _deep_merge(merged, overrides.values)
@@ -72,18 +109,26 @@ class ConfigLoader:
         *,
         profile: str | None,
         config_path: Path | None,
-    ) -> list[Path]:
-        """返回配置文件加载顺序，后面的层覆盖前面的层。"""
+    ) -> list[_ConfigLayer]:
+        """返回带来源的配置层；后面的层覆盖前面的层。"""
+        project_path = self.cwd / ".codecraft" / "config.toml"
+        explicit_path = config_path.expanduser() if config_path else None
         layers = [
-            self.codecraft_home / "config.toml",
+            _ConfigLayer(self.codecraft_home / "config.toml", "user"),
         ]
         if profile:
-            layers.append(self.codecraft_home / "profiles" / f"{profile}.toml")
+            layers.append(
+                _ConfigLayer(
+                    self.codecraft_home / "profiles" / f"{profile}.toml",
+                    "profile",
+                )
+            )
 
-        layers.append(self.cwd / ".codecraft" / "config.toml")
+        if explicit_path is None or explicit_path.resolve() != project_path.resolve():
+            layers.append(_ConfigLayer(project_path, "project"))
 
-        if config_path:
-            layers.append(config_path.expanduser())
+        if explicit_path is not None:
+            layers.append(_ConfigLayer(explicit_path, "explicit"))
 
         return layers
 
@@ -94,6 +139,31 @@ def _read_toml(path: Path) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise ValueError(f"config file must contain a TOML table: {path}")
     return data
+
+
+def _validate_project_config(path: Path, values: dict[str, Any]) -> None:
+    restricted: list[str] = []
+    for section, section_value in values.items():
+        allowed_fields = _PROJECT_ALLOWED_FIELDS.get(section)
+        if allowed_fields is None:
+            restricted.append(section)
+            continue
+        if not isinstance(section_value, dict):
+            continue
+        restricted.extend(
+            f"{section}.{field}"
+            for field in section_value
+            if field not in allowed_fields
+        )
+    if not restricted:
+        return
+
+    fields = ", ".join(sorted(restricted))
+    raise ValueError(
+        f"untrusted project config {path} may not set security-sensitive "
+        f"field(s): {fields}. Move these settings to a user, profile, or "
+        "explicit config file."
+    )
 
 
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:

@@ -187,6 +187,8 @@ CLI explicit options / --config
 
 `SessionConfig` stores the resolved runtime values, including provider connection fields such as `model_api_key_env` and `model_base_url`. This makes resume use the same session configuration rather than re-reading a potentially changed project config.
 
+Precedence does not imply equal trust. The repository-owned project layer may change only model selection and token budgets, instructions, and turn limits. Process-launching and security-sensitive values such as MCP servers, provider endpoints, approval, sandbox policy, environment forwarding, and runtime paths must originate in a user/profile layer or an explicitly selected config file. Config layers therefore retain their source until trust validation has completed.
+
 API keys should be provided through environment variables named by `api_key_env`; plaintext keys in TOML are intentionally not recommended.
 
 ## Application Boundaries, Not An SDK Surface

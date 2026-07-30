@@ -220,6 +220,13 @@ CLI explicit options / --config
 > built-in defaults
 ```
 
+The project file is an untrusted repository input, so it may override only model
+selection and token budgets, instructions, and turn limits. Approval, sandbox,
+runtime paths, provider connection fields, environment forwarding, and MCP server
+commands must come from the user config, a profile, or an explicitly selected
+`--config` file. Passing the project file itself through `--config` is therefore an
+explicit trust decision.
+
 Recommended user-level config:
 
 ```toml
