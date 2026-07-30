@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import difflib
 from collections.abc import Generator
 from itertools import islice
@@ -34,6 +35,10 @@ class ReadFileTool(BaseTool):
 
     async def arun(self, args: BaseModel, context: ToolContext) -> ToolResult:
         read_args = ReadFileArgs.model_validate(args)
+        return await asyncio.to_thread(self._read_sync, read_args, context)
+
+    @staticmethod
+    def _read_sync(read_args: ReadFileArgs, context: ToolContext) -> ToolResult:
         guard = WorkspaceGuard(context.context.cwd)
         path = guard.resolve_read_path(read_args.path)
 
@@ -251,6 +256,14 @@ class ListFilesTool(BaseTool):
 
     async def arun(self, args: BaseModel, context: ToolContext) -> ToolResult:
         list_args = ListFilesArgs.model_validate(args)
+        return await asyncio.to_thread(self._list_sync, list_args, context)
+
+    @classmethod
+    def _list_sync(
+        cls,
+        list_args: ListFilesArgs,
+        context: ToolContext,
+    ) -> ToolResult:
         guard = WorkspaceGuard(context.context.cwd)
         path = guard.resolve_read_path(list_args.path)
 
@@ -266,7 +279,7 @@ class ListFilesTool(BaseTool):
             visible_entries = [path]
             truncated = False
         else:
-            entries = self._iter_entries(path, recursive=list_args.recursive)
+            entries = cls._iter_entries(path, recursive=list_args.recursive)
             try:
                 visible_entries = list(islice(entries, list_args.max_entries + 1))
             except OSError as exc:
@@ -283,7 +296,7 @@ class ListFilesTool(BaseTool):
                 visible_entries.pop()
             visible_entries.sort()
 
-        lines = [self._format_entry(entry, path) for entry in visible_entries]
+        lines = [cls._format_entry(entry, path) for entry in visible_entries]
         return ToolResult(
             success=True,
             content="\n".join(lines),

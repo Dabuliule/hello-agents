@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime
 from pathlib import Path
+import threading
 
 import codecraft.tool.builtin.filesystem as filesystem_module
 import codecraft.tool.builtin.patch as patch_module
@@ -11,7 +12,12 @@ from codecraft.core.turn_context import TurnContext
 from codecraft.sandbox.policy import SandboxMode
 from codecraft.schema.tool import ToolCall
 from codecraft.tool.base import ToolContext
-from codecraft.tool.builtin.filesystem import ListFilesTool, WriteFileTool
+from codecraft.tool.builtin.filesystem import (
+    ListFilesTool,
+    ReadFileArgs,
+    ReadFileTool,
+    WriteFileTool,
+)
 from codecraft.tool.builtin.patch import ApplyPatchTool
 
 
@@ -192,3 +198,30 @@ def test_list_files_orders_each_directory_before_bounded_traversal(
     entries = list(ListFilesTool._iter_entries(tmp_path, recursive=False))
 
     assert [entry.name for entry in entries] == ["a-first.txt", "z-last.txt"]
+
+
+def test_read_file_runs_blocking_io_in_worker_thread(tmp_path: Path) -> None:
+    (tmp_path / "target.txt").write_text("content", encoding="utf-8")
+    worker_threads: list[int] = []
+
+    class ThreadRecordingReadFileTool(ReadFileTool):
+        @staticmethod
+        def _read_sync(read_args: ReadFileArgs, context: ToolContext):
+            worker_threads.append(threading.get_ident())
+            return ReadFileTool._read_sync(read_args, context)
+
+    tool = ThreadRecordingReadFileTool()
+    turn_context = _tool_context(tmp_path, "").context
+    call = ToolCall(
+        call_id="call_threaded_read",
+        name="read_file",
+        arguments={"path": "target.txt"},
+    )
+    context = ToolContext(context=turn_context, call=call)
+    arguments = tool.args_schema.model_validate(call.arguments)
+    main_thread = threading.get_ident()
+
+    result = asyncio.run(tool.arun(arguments, context))
+
+    assert result.success is True
+    assert worker_threads and worker_threads[0] != main_thread
