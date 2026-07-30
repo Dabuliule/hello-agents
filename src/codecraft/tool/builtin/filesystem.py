@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import difflib
+from collections.abc import Generator
+from itertools import islice
+import os
 from pathlib import Path
 from typing import Literal
 
@@ -10,14 +13,17 @@ from codecraft.core.errors import WorkspaceAccessError
 from codecraft.retrieval.engine import ContextEngine
 from codecraft.retrieval.models import RetrievalRequest
 from codecraft.schema.tool import ToolEffect, ToolResult
+from codecraft.tool.atomic import atomic_write_text
 from codecraft.tool.base import BaseTool, ToolArguments, ToolContext
 from codecraft.tool.workspace import WorkspaceGuard
+
+_SKIPPED_ENTRY_NAMES = frozenset({".git", "__pycache__", ".venv", "node_modules"})
 
 
 class ReadFileArgs(ToolArguments):
     path: str
     encoding: str = "utf-8"
-    max_chars: int = Field(default=80_000, ge=1)
+    max_chars: int = Field(default=80_000, ge=1, le=1_000_000)
 
 
 class ReadFileTool(BaseTool):
@@ -40,7 +46,9 @@ class ReadFileTool(BaseTool):
             )
 
         try:
-            content = path.read_text(encoding=read_args.encoding)
+            with path.open("r", encoding=read_args.encoding) as stream:
+                file_bytes = os.fstat(stream.fileno()).st_size
+                buffered = stream.read(read_args.max_chars + 1)
         except FileNotFoundError:
             return ToolResult(
                 success=False,
@@ -60,23 +68,34 @@ class ReadFileTool(BaseTool):
                     "reason": str(exc),
                 },
             )
+        except OSError as exc:
+            return ToolResult(
+                success=False,
+                content="File could not be read.",
+                error="file_read_error",
+                metadata={"path": str(path), "reason": str(exc)},
+            )
 
-        truncated = len(content) > read_args.max_chars
-        visible = content[: read_args.max_chars]
+        truncated = len(buffered) > read_args.max_chars
+        visible = buffered[: read_args.max_chars]
+        metadata: dict[str, object] = {
+            "path": str(path),
+            "bytes": file_bytes,
+            "returned_chars": len(visible),
+            "truncated": truncated,
+        }
+        if not truncated:
+            metadata["chars"] = len(visible)
         return ToolResult(
             success=True,
             content=visible,
             data={
                 "path": str(path),
-                "line_count": len(content.splitlines()),
+                "line_count": len(visible.splitlines()),
+                "line_count_complete": not truncated,
                 "truncated": truncated,
             },
-            metadata={
-                "path": str(path),
-                "chars": len(content),
-                "returned_chars": len(visible),
-                "truncated": truncated,
-            },
+            metadata=metadata,
         )
 
 
@@ -107,24 +126,56 @@ class WriteFileTool(BaseTool):
                 metadata={"path": str(path)},
             )
 
-        if not path.parent.exists():
-            if not write_args.create_parent_dirs:
+        try:
+            encoded_size = len(write_args.content.encode(write_args.encoding))
+        except (LookupError, UnicodeEncodeError) as exc:
+            return ToolResult(
+                success=False,
+                content="File content could not be encoded.",
+                error="file_encode_error",
+                suggestion="Try a different encoding.",
+                metadata={
+                    "path": str(path),
+                    "encoding": write_args.encoding,
+                    "reason": str(exc),
+                },
+            )
+
+        parent_error = self._ensure_parent(path, create=write_args.create_parent_dirs)
+        if parent_error is not None:
+            return parent_error
+
+        try:
+            previous = (
+                path.read_text(encoding=write_args.encoding) if path.exists() else None
+            )
+        except (OSError, UnicodeError, LookupError) as exc:
+            return ToolResult(
+                success=False,
+                content="Existing file could not be read before writing.",
+                error="file_read_error",
+                metadata={"path": str(path), "reason": str(exc)},
+            )
+
+        changed = previous != write_args.content
+        status = "created" if previous is None else "modified"
+        if not changed:
+            status = "unchanged"
+        else:
+            try:
+                atomic_write_text(
+                    path,
+                    write_args.content,
+                    encoding=write_args.encoding,
+                )
+            except (OSError, UnicodeError, LookupError) as exc:
                 return ToolResult(
                     success=False,
-                    content="Parent directory does not exist.",
-                    error="parent_directory_missing",
-                    suggestion="Set create_parent_dirs=true or create the parent directory first.",
-                    metadata={"path": str(path), "parent": str(path.parent)},
+                    content="File could not be written.",
+                    error="file_write_error",
+                    metadata={"path": str(path), "reason": str(exc)},
                 )
-            path.parent.mkdir(parents=True, exist_ok=True)
 
-        previous = (
-            path.read_text(encoding=write_args.encoding) if path.exists() else None
-        )
-        path.write_text(write_args.content, encoding=write_args.encoding)
-
-        status = "created" if previous is None else "modified"
-        changed = previous != write_args.content
         diff = self._diff(
             before=previous or "",
             after=write_args.content,
@@ -143,9 +194,36 @@ class WriteFileTool(BaseTool):
                 "path": str(path),
                 "status": status,
                 "changed": changed,
-                "bytes": len(write_args.content.encode(write_args.encoding)),
+                "bytes": encoded_size,
             },
         )
+
+    @staticmethod
+    def _ensure_parent(path: Path, *, create: bool) -> ToolResult | None:
+        if path.parent.exists():
+            return None
+        if not create:
+            return ToolResult(
+                success=False,
+                content="Parent directory does not exist.",
+                error="parent_directory_missing",
+                suggestion="Set create_parent_dirs=true or create the parent directory first.",
+                metadata={"path": str(path), "parent": str(path.parent)},
+            )
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            return ToolResult(
+                success=False,
+                content="Parent directory could not be created.",
+                error="parent_directory_create_failed",
+                metadata={
+                    "path": str(path),
+                    "parent": str(path.parent),
+                    "reason": str(exc),
+                },
+            )
+        return None
 
     @staticmethod
     def _diff(*, before: str, after: str, path: Path) -> str:
@@ -162,7 +240,7 @@ class WriteFileTool(BaseTool):
 class ListFilesArgs(ToolArguments):
     path: str = "."
     recursive: bool = False
-    max_entries: int = Field(default=500, ge=1)
+    max_entries: int = Field(default=500, ge=1, le=10_000)
 
 
 class ListFilesTool(BaseTool):
@@ -185,18 +263,25 @@ class ListFilesTool(BaseTool):
             )
 
         if path.is_file():
-            entries = [path]
+            visible_entries = [path]
+            truncated = False
         else:
             entries = self._iter_entries(path, recursive=list_args.recursive)
-
-        visible_entries = []
-        skipped_names = {".git", "__pycache__", ".venv", "node_modules"}
-        for entry in entries:
-            if any(part in skipped_names for part in entry.relative_to(path).parts):
-                continue
-            visible_entries.append(entry)
-            if len(visible_entries) >= list_args.max_entries:
-                break
+            try:
+                visible_entries = list(islice(entries, list_args.max_entries + 1))
+            except OSError as exc:
+                return ToolResult(
+                    success=False,
+                    content="Directory could not be listed.",
+                    error="directory_read_error",
+                    metadata={"path": str(path), "reason": str(exc)},
+                )
+            finally:
+                entries.close()
+            truncated = len(visible_entries) > list_args.max_entries
+            if truncated:
+                visible_entries.pop()
+            visible_entries.sort()
 
         lines = [self._format_entry(entry, path) for entry in visible_entries]
         return ToolResult(
@@ -205,7 +290,7 @@ class ListFilesTool(BaseTool):
             data={
                 "path": str(path),
                 "entries": lines,
-                "truncated": len(visible_entries) >= list_args.max_entries,
+                "truncated": truncated,
             },
             metadata={
                 "path": str(path),
@@ -215,10 +300,22 @@ class ListFilesTool(BaseTool):
         )
 
     @staticmethod
-    def _iter_entries(path: Path, *, recursive: bool) -> list[Path]:
-        if recursive:
-            return sorted(path.rglob("*"))
-        return sorted(path.iterdir())
+    def _iter_entries(path: Path, *, recursive: bool) -> Generator[Path, None, None]:
+        with os.scandir(path) as directory:
+            entries = sorted(directory, key=lambda item: item.name)
+        for item in entries:
+            if item.name in _SKIPPED_ENTRY_NAMES:
+                continue
+            entry = Path(item.path)
+            yield entry
+            if not recursive:
+                continue
+            try:
+                is_directory = item.is_dir(follow_symlinks=False)
+            except OSError:
+                continue
+            if is_directory:
+                yield from ListFilesTool._iter_entries(entry, recursive=True)
 
     @staticmethod
     def _format_entry(entry: Path, root: Path) -> str:
@@ -246,7 +343,7 @@ class WorkspaceSearchArgs(ToolArguments):
         ),
     )
     max_results: int = Field(default=100, ge=1, le=1000)
-    max_file_bytes: int = Field(default=1_000_000, ge=1)
+    max_file_bytes: int = Field(default=1_000_000, ge=1, le=10_000_000)
 
 
 class WorkspaceSearchTool(BaseTool):

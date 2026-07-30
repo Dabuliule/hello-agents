@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
+import threading
 
 import pytest
 
+import codecraft.retrieval.retrievers.scan as scan_module
 from codecraft.retrieval import (
     ContextEngine,
     QueryRouter,
@@ -93,6 +96,163 @@ def test_scan_retriever_rejects_scope_outside_workspace(tmp_path):
 
     with pytest.raises(RetrievalUnavailableError, match="outside workspace"):
         asyncio.run(ScanRetriever().retrieve(request))
+
+
+def test_scan_retriever_runs_blocking_walk_in_worker_thread(tmp_path):
+    worker_threads: list[int] = []
+
+    class ThreadRecordingRetriever(ScanRetriever):
+        def _retrieve_sync(self, request):
+            worker_threads.append(threading.get_ident())
+            return super()._retrieve_sync(request)
+
+    request = RetrievalRequest(
+        query="missing",
+        root=tmp_path,
+        workspace_root=tmp_path,
+    )
+    main_thread = threading.get_ident()
+
+    asyncio.run(ThreadRecordingRetriever().retrieve(request))
+
+    assert worker_threads
+    assert worker_threads[0] != main_thread
+
+
+def test_scan_retriever_sorts_files_before_bounded_traversal(
+    tmp_path,
+    monkeypatch,
+):
+    (tmp_path / "z-last.txt").write_text("needle\n", encoding="utf-8")
+    (tmp_path / "a-first.txt").write_text("needle\n", encoding="utf-8")
+    real_scandir = scan_module.os.scandir
+    with real_scandir(tmp_path) as scanner:
+        reversed_entries = sorted(scanner, key=lambda item: item.name, reverse=True)
+
+    class ReversedScandir:
+        def __enter__(self):
+            return iter(reversed_entries)
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            return False
+
+    monkeypatch.setattr(scan_module.os, "scandir", lambda path: ReversedScandir())
+    request = RetrievalRequest(
+        query="needle",
+        root=tmp_path,
+        workspace_root=tmp_path,
+        mode="content",
+    )
+
+    response = asyncio.run(ScanRetriever().retrieve(request))
+
+    assert [match.path for match in response.matches] == [
+        "a-first.txt",
+        "z-last.txt",
+    ]
+
+
+def test_scan_retriever_reports_only_actual_result_truncation(tmp_path):
+    source = tmp_path / "source.txt"
+    source.write_text("needle\n", encoding="utf-8")
+    request = RetrievalRequest(
+        query="needle",
+        root=tmp_path,
+        workspace_root=tmp_path,
+        mode="content",
+        max_results=1,
+    )
+
+    exact = asyncio.run(ScanRetriever().retrieve(request))
+    source.write_text("needle\nneedle again\n", encoding="utf-8")
+    overflowing = asyncio.run(
+        ScanRetriever(max_results=1).retrieve(
+            RetrievalRequest(
+                query="needle",
+                root=tmp_path,
+                workspace_root=tmp_path,
+                mode="content",
+                max_results=2,
+            )
+        )
+    )
+
+    assert len(exact.matches) == 1
+    assert exact.truncated is False
+    assert len(overflowing.matches) == 1
+    assert overflowing.truncated is True
+    assert overflowing.stats.skipped["result_limit"] == 1
+
+
+def test_scan_retriever_enforces_file_and_total_byte_limits(tmp_path):
+    for index in range(3):
+        (tmp_path / f"source-{index}.txt").write_text("abcdef", encoding="utf-8")
+    request = RetrievalRequest(
+        query="missing",
+        root=tmp_path,
+        workspace_root=tmp_path,
+        mode="content",
+    )
+
+    file_limited = asyncio.run(ScanRetriever(max_files=2).retrieve(request))
+    byte_limited = asyncio.run(ScanRetriever(max_scanned_bytes=6).retrieve(request))
+
+    assert file_limited.stats.candidate_file_count == 2
+    assert file_limited.stats.skipped["file_limit"] == 1
+    assert file_limited.truncated is True
+    assert byte_limited.stats.candidate_file_count == 2
+    assert byte_limited.stats.read_file_count == 1
+    assert byte_limited.stats.scanned_bytes == 6
+    assert byte_limited.stats.skipped["byte_limit"] == 1
+    assert byte_limited.truncated is True
+
+
+def test_scan_retriever_skips_file_removed_before_stat(tmp_path, monkeypatch):
+    source = tmp_path / "source.txt"
+    source.write_text("needle\n", encoding="utf-8")
+    original_stat = Path.stat
+
+    def missing_stat(path, *args, **kwargs):
+        if path == source:
+            raise FileNotFoundError(source)
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", missing_stat)
+    request = RetrievalRequest(
+        query="needle",
+        root=tmp_path,
+        workspace_root=tmp_path,
+        mode="content",
+    )
+
+    response = asyncio.run(ScanRetriever().retrieve(request))
+
+    assert response.matches == ()
+    assert response.stats.skipped["unreadable"] == 1
+
+
+def test_scan_retriever_skips_file_removed_before_read(tmp_path, monkeypatch):
+    source = tmp_path / "source.txt"
+    source.write_text("needle\n", encoding="utf-8")
+    original_open = Path.open
+
+    def missing_open(path, *args, **kwargs):
+        if path == source and args and args[0] == "rb":
+            raise FileNotFoundError(source)
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", missing_open)
+    request = RetrievalRequest(
+        query="needle",
+        root=tmp_path,
+        workspace_root=tmp_path,
+        mode="content",
+    )
+
+    response = asyncio.run(ScanRetriever().retrieve(request))
+
+    assert response.matches == ()
+    assert response.stats.skipped["unreadable"] == 1
 
 
 def test_context_engine_selects_configured_retrievers(tmp_path):

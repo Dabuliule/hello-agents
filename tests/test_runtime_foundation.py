@@ -541,6 +541,144 @@ def test_read_file_and_list_files_tools(tmp_path):
     asyncio.run(run_test())
 
 
+def test_read_file_reads_only_the_bounded_prefix(tmp_path, monkeypatch):
+    async def run_test() -> None:
+        target = tmp_path / "large.txt"
+        target.write_text("0123456789", encoding="utf-8")
+        config = make_config(tmp_path)
+        context = TurnContext(
+            session_id=config.session_id,
+            turn_id="turn_bounded_read",
+            cwd=config.cwd,
+            model=config.model,
+            model_provider=config.model_provider,
+            approval_policy=config.approval_policy,
+            sandbox_mode=config.sandbox_mode,
+            network_access=config.network_access,
+            available_tools=[],
+            max_tool_calls=config.max_tool_calls,
+            max_tool_output_chars=config.max_tool_output_chars,
+            created_at=config.created_at,
+        )
+        read_sizes: list[int] = []
+        original_open = Path.open
+
+        class TrackingStream:
+            def __init__(self, stream):
+                self.stream = stream
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc_value, traceback):
+                self.stream.close()
+
+            def fileno(self):
+                return self.stream.fileno()
+
+            def read(self, size=-1):
+                read_sizes.append(size)
+                return self.stream.read(size)
+
+        def tracking_open(path, *args, **kwargs):
+            stream = original_open(path, *args, **kwargs)
+            if path == target and args and args[0] == "r":
+                return TrackingStream(stream)
+            return stream
+
+        monkeypatch.setattr(Path, "open", tracking_open)
+        tool = ReadFileTool()
+        call = ToolCall(
+            call_id="call_bounded_read",
+            name=tool.name,
+            arguments={"path": "large.txt", "max_chars": 5},
+        )
+
+        result = await tool.arun(
+            tool.args_schema.model_validate(call.arguments),
+            ToolContext(context=context, call=call),
+        )
+
+        assert result.success is True
+        assert result.content == "01234"
+        assert result.data["line_count"] == 1
+        assert result.data["line_count_complete"] is False
+        assert result.data["truncated"] is True
+        assert result.metadata["bytes"] == 10
+        assert result.metadata["returned_chars"] == 5
+        assert "chars" not in result.metadata
+        assert read_sizes == [6]
+
+    asyncio.run(run_test())
+
+
+def test_list_files_uses_lookahead_for_accurate_bounded_results(
+    tmp_path,
+    monkeypatch,
+):
+    async def run_test() -> None:
+        (tmp_path / "a.txt").write_text("a", encoding="utf-8")
+        (tmp_path / "b.txt").write_text("b", encoding="utf-8")
+        config = make_config(tmp_path)
+        context = TurnContext(
+            session_id=config.session_id,
+            turn_id="turn_bounded_list",
+            cwd=config.cwd,
+            model=config.model,
+            model_provider=config.model_provider,
+            approval_policy=config.approval_policy,
+            sandbox_mode=config.sandbox_mode,
+            network_access=config.network_access,
+            available_tools=[],
+            max_tool_calls=config.max_tool_calls,
+            max_tool_output_chars=config.max_tool_output_chars,
+            created_at=config.created_at,
+        )
+        tool = ListFilesTool()
+
+        exact_call = ToolCall(
+            call_id="call_exact_list",
+            name=tool.name,
+            arguments={"path": ".", "max_entries": 2},
+        )
+        exact = await tool.arun(
+            tool.args_schema.model_validate(exact_call.arguments),
+            ToolContext(context=context, call=exact_call),
+        )
+
+        assert exact.data["entries"] == ["a.txt", "b.txt"]
+        assert exact.data["truncated"] is False
+
+        consumed: list[int] = []
+
+        def fake_entries(path, *, recursive):
+            del recursive
+            for index in range(100):
+                consumed.append(index)
+                yield path / f"entry-{index:03}.txt"
+
+        monkeypatch.setattr(
+            ListFilesTool,
+            "_iter_entries",
+            staticmethod(fake_entries),
+        )
+        limited_call = ToolCall(
+            call_id="call_limited_list",
+            name=tool.name,
+            arguments={"path": ".", "max_entries": 2},
+        )
+        limited = await tool.arun(
+            tool.args_schema.model_validate(limited_call.arguments),
+            ToolContext(context=context, call=limited_call),
+        )
+
+        assert limited.data["entries"] == ["entry-000.txt", "entry-001.txt"]
+        assert limited.data["truncated"] is True
+        assert consumed == [0, 1, 2]
+
+    asyncio.run(run_test())
+
+
 def test_tool_runner_rejects_unknown_arguments_with_stable_error(tmp_path):
     async def run_test() -> None:
         config = make_config(tmp_path)
