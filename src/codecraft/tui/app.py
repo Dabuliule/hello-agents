@@ -19,7 +19,7 @@ from codecraft.core.thread import AgentThread
 from codecraft.core.trace_report import build_trace_report
 from codecraft.schema.event import EventPayload, RuntimeEvent, RuntimeEventType
 from codecraft.schema.input import SessionInput
-from codecraft.schema.session import SessionConfig
+from codecraft.schema.session import SessionConfig, SessionSnapshot
 from codecraft.tui.commands import (
     ComposerChoiceKind,
     ComposerMenuMode,
@@ -156,11 +156,11 @@ class CodeCraftTUI(App[None]):
 
     async def _start_runtime(self) -> None:
         try:
-            session_id = await self._select_session()
-            if session_id is None:
+            snapshot = await self._select_session()
+            if snapshot is None:
                 self.thread = await self.runtime.create_thread(self.config)
             else:
-                await self._resume_session(session_id)
+                await self._resume_snapshot(snapshot)
         except CodecraftError as exc:
             await self._show_startup_error(exc.message, exc.suggestion)
             return
@@ -182,23 +182,23 @@ class CodeCraftTUI(App[None]):
             name="runtime-events",
         )
 
-    async def _select_session(self) -> str | None:
+    async def _select_session(self) -> SessionSnapshot | None:
         if self.resume_session_id is not None:
-            return self.resume_session_id
+            return await self.runtime.session_store.resume(self.resume_session_id)
 
-        summaries = await self.runtime.list_sessions(cwd=self.config.cwd)
         if self.resume_last:
-            if not summaries:
-                raise RuntimeError(
-                    "No session found for the current working directory."
-                )
-            return summaries[0].session_id
-        if not self.browse_sessions or not summaries:
+            return await self.runtime.session_store.resume_last(cwd=self.config.cwd)
+        if not self.browse_sessions:
             return None
-        return await self.push_screen_wait(SessionBrowserScreen(summaries))
+        summaries = await self.runtime.list_sessions(cwd=self.config.cwd)
+        if not summaries:
+            return None
+        session_id = await self.push_screen_wait(SessionBrowserScreen(summaries))
+        if session_id is None:
+            return None
+        return await self.runtime.session_store.resume(session_id)
 
-    async def _resume_session(self, session_id: str) -> None:
-        snapshot = await self.runtime.session_store.resume(session_id)
+    async def _resume_snapshot(self, snapshot: SessionSnapshot) -> None:
         if self.runtime_factory is not None:
             previous_runtime = self.runtime
             self.runtime = self.runtime_factory(snapshot.config)
@@ -211,7 +211,7 @@ class CodeCraftTUI(App[None]):
         self.config = snapshot.config
         self.sub_title = f"{self.config.model_provider}/{self.config.model}"
         await self._restore_history(snapshot.events)
-        self.thread = await self.runtime.resume_thread(session_id)
+        self.thread = await self.runtime.resume_snapshot(snapshot)
 
     async def _restore_history(self, events: list[RuntimeEvent]) -> None:
         message_events = [

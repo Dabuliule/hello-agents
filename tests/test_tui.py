@@ -756,6 +756,15 @@ def test_tui_trace_screen_inspects_persisted_events(tmp_path):
 
 
 def test_tui_browses_resumes_and_continues_session(tmp_path):
+    class CountingSessionStore(SessionStore):
+        def __init__(self, codecraft_home) -> None:
+            super().__init__(codecraft_home)
+            self.resume_calls = 0
+
+        async def resume(self, session_id: str):
+            self.resume_calls += 1
+            return await super().resume(session_id)
+
     async def run_test():
         startup_config = _config(tmp_path).model_copy(update={"session_id": "ses_new"})
         stored_config = _config(tmp_path).model_copy(
@@ -772,10 +781,13 @@ def test_tui_browses_resumes_and_continues_session(tmp_path):
                 ModelEvent(type=ModelEventType.COMPLETED),
             ]
         )
+        stores: list[CountingSessionStore] = []
 
         def build_runtime(config: SessionConfig) -> AgentRuntime:
+            store = CountingSessionStore(config.codecraft_home)
+            stores.append(store)
             return AgentRuntime(
-                session_store=SessionStore(config.codecraft_home),
+                session_store=store,
                 llm_providers=LLMProviderRegistry([provider]),
                 tool_registry=ToolRegistry(),
             )
@@ -819,6 +831,53 @@ def test_tui_browses_resumes_and_continues_session(tmp_path):
                 ),
             )
             assert list(tui.query(MessageBlock))[-1].text == "continued answer"
+            assert len(stores) == 2
+            assert [store.resume_calls for store in stores] == [1, 0]
+
+    asyncio.run(run_test())
+
+
+def test_tui_resume_last_uses_store_fallback_without_listing_first(tmp_path):
+    class CountingSessionStore(SessionStore):
+        def __init__(self, codecraft_home) -> None:
+            super().__init__(codecraft_home)
+            self.resume_last_calls = 0
+
+        async def resume_last(self, cwd=None):
+            self.resume_last_calls += 1
+            return await super().resume_last(cwd=cwd)
+
+    class CountingRuntime(AgentRuntime):
+        def __init__(self, **kwargs) -> None:
+            super().__init__(**kwargs)
+            self.list_calls = 0
+
+        async def list_sessions(self, cwd=None):
+            self.list_calls += 1
+            return await super().list_sessions(cwd=cwd)
+
+    async def run_test() -> None:
+        config = _config(tmp_path)
+        await _seed_session(config)
+        store = CountingSessionStore(config.codecraft_home)
+        runtime = CountingRuntime(
+            session_store=store,
+            llm_providers=LLMProviderRegistry([MockProvider()]),
+            tool_registry=ToolRegistry(),
+        )
+        tui = CodeCraftTUI(config, runtime, resume_last=True)
+
+        async with tui.run_test(size=(100, 32)) as pilot:
+            await _wait_until(pilot, lambda: tui.turn_status == "idle")
+
+            assert store.resume_last_calls == 1
+            assert runtime.list_calls == 0
+            assert [
+                (message.role, message.text) for message in tui.query(MessageBlock)
+            ] == [
+                ("User", "first question"),
+                ("Assistant", "first answer"),
+            ]
 
     asyncio.run(run_test())
 

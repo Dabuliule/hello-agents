@@ -73,9 +73,9 @@ class AgentRuntime:
     async def resume_thread(self, session_id: str) -> AgentThread:
         """根据 session 日志恢复 thread，并重建模型 conversation。"""
         snapshot = await self.session_store.resume(session_id)
-        return await self._resume_snapshot(snapshot)
+        return await self.resume_snapshot(snapshot)
 
-    async def _resume_snapshot(self, snapshot: SessionSnapshot) -> AgentThread:
+    async def resume_snapshot(self, snapshot: SessionSnapshot) -> AgentThread:
         """从已加载的快照恢复 thread，避免重复读取同一份 session 日志。"""
         snapshot.config.ensure_runtime_ready()
         llm_provider = self.llm_providers.get(snapshot.config.model_provider)
@@ -104,7 +104,7 @@ class AgentRuntime:
 
     async def resume_last(self, cwd: Path | None = None) -> AgentThread:
         snapshot = await self.session_store.resume_last(cwd=cwd)
-        return await self._resume_snapshot(snapshot)
+        return await self.resume_snapshot(snapshot)
 
     async def list_sessions(self, cwd: Path | None = None) -> list[SessionSummary]:
         return await self.session_store.list_sessions(cwd=cwd)
