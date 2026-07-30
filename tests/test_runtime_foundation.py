@@ -41,7 +41,7 @@ from codecraft.llm import (
 )
 from codecraft.schema.event import RuntimeEvent, RuntimeEventType
 from codecraft.schema.input import SessionInput
-from codecraft.schema.session import SessionConfig, SessionSource
+from codecraft.schema.session import SessionConfig, SessionSnapshot, SessionSource
 from codecraft.schema.tool import ToolCall, ToolEffect, ToolResult, ToolSpec
 from codecraft.tool import (
     ApplyPatchTool,
@@ -2297,6 +2297,47 @@ def test_runtime_resume_reconstructs_conversation_without_replaying_turn(tmp_pat
             "first answer",
             "second",
         ]
+
+    asyncio.run(run_test())
+
+
+def test_runtime_resume_last_reuses_selected_snapshot(tmp_path):
+    class CountingSessionStore(SessionStore):
+        def __init__(self, codecraft_home: Path) -> None:
+            super().__init__(codecraft_home)
+            self.resume_calls = 0
+
+        async def resume(self, session_id: str) -> SessionSnapshot:
+            self.resume_calls += 1
+            return await super().resume(session_id)
+
+    async def run_test() -> None:
+        config = make_config(tmp_path)
+        store = CountingSessionStore(config.codecraft_home)
+        await store.create_session(config)
+        await store.append_event(
+            RuntimeEvent(
+                event_id="evt_started",
+                session_id=config.session_id,
+                seq=1,
+                type=RuntimeEventType.SESSION_STARTED,
+                payload={"config": config.model_dump(mode="json")},
+            )
+        )
+        runtime = AgentRuntime(
+            session_store=store,
+            llm_providers=LLMProviderRegistry([MockProvider()]),
+            tool_registry=ToolRegistry(),
+        )
+
+        thread = await runtime.resume_last(cwd=tmp_path)
+        restored = await thread.next_event()
+
+        assert restored.type == RuntimeEventType.SESSION_RESTORED
+        assert store.resume_calls == 1
+        assert thread.session.conversation.items == []
+
+        await runtime.close()
 
     asyncio.run(run_test())
 
