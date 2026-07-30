@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -2436,6 +2437,172 @@ def test_session_store_rejects_missing_schema_versions(tmp_path):
 
         assert raised.value.code == "session_config_schema_unsupported"
         assert raised.value.metadata["version"] is None
+
+    asyncio.run(run_test())
+
+
+def test_session_list_and_resume_share_restorability_validation(tmp_path):
+    async def run_test() -> None:
+        store = SessionStore(tmp_path / ".codecraft")
+        expected_codes = {
+            "ses_empty": "session_empty",
+            "ses_wrong_start": "session_start_event_missing",
+            "ses_missing_config": "session_config_missing",
+            "ses_invalid_config": "session_config_validation_failed",
+            "ses_config_id_mismatch": "session_config_id_mismatch",
+        }
+
+        for session_id in expected_codes:
+            config = make_config(tmp_path).model_copy(update={"session_id": session_id})
+            path = await store.create_session(config)
+            if session_id == "ses_empty":
+                continue
+            if session_id == "ses_wrong_start":
+                event_data = RuntimeEvent(
+                    event_id=f"evt_{session_id}",
+                    session_id=session_id,
+                    seq=1,
+                    type=RuntimeEventType.SESSION_CLOSED,
+                ).model_dump(mode="json")
+            else:
+                event_data = RuntimeEvent(
+                    event_id=f"evt_{session_id}",
+                    session_id=session_id,
+                    seq=1,
+                    type=RuntimeEventType.SESSION_STARTED,
+                    payload={"config": config.model_dump(mode="json")},
+                ).model_dump(mode="json")
+                if session_id == "ses_missing_config":
+                    event_data["payload"] = {}
+                elif session_id == "ses_invalid_config":
+                    event_data["payload"]["config"].pop("model")
+                else:
+                    event_data["payload"]["config"]["session_id"] = "ses_other"
+            path.write_text(json.dumps(event_data) + "\n", encoding="utf-8")
+
+        assert await store.load_events("ses_empty") == []
+        wrong_start = await store.load_events("ses_wrong_start")
+        assert wrong_start[0].type == RuntimeEventType.SESSION_CLOSED
+
+        resume_codes = {}
+        for session_id in expected_codes:
+            with pytest.raises(SessionRestoreError) as raised:
+                await store.resume(session_id)
+            resume_codes[session_id] = raised.value.code
+
+        assert resume_codes == expected_codes
+        assert await store.list_sessions() == []
+        all_summaries = await store.list_sessions(include_invalid=True)
+        assert {
+            summary.session_id: summary.error_code for summary in all_summaries
+        } == expected_codes
+
+    asyncio.run(run_test())
+
+
+def test_session_list_streams_summaries_without_loading_event_lists(tmp_path):
+    class SummaryOnlyStore(SessionStore):
+        async def load_events(self, session_id: str) -> list[RuntimeEvent]:
+            raise AssertionError(f"unexpected full event load for {session_id}")
+
+    async def run_test() -> None:
+        config = make_config(tmp_path)
+        store = SummaryOnlyStore(config.codecraft_home)
+        await store.create_session(config)
+        await store.append_event(
+            RuntimeEvent(
+                event_id="evt_started",
+                session_id=config.session_id,
+                seq=1,
+                type=RuntimeEventType.SESSION_STARTED,
+                payload={"config": config.model_dump(mode="json")},
+            )
+        )
+
+        summaries = await store.list_sessions(cwd=tmp_path)
+
+        assert len(summaries) == 1
+        assert summaries[0].event_count == 1
+
+    asyncio.run(run_test())
+
+
+def test_session_list_isolates_invalid_utf8_logs(tmp_path):
+    async def run_test() -> None:
+        config = make_config(tmp_path)
+        store = SessionStore(config.codecraft_home)
+        path = await store.create_session(config)
+        path.write_bytes(b"\xff\xfe\n")
+
+        with pytest.raises(SessionRestoreError) as raised:
+            await store.resume(config.session_id)
+
+        assert raised.value.code == "session_events_load_failed"
+        assert await store.list_sessions() == []
+        summaries = await store.list_sessions(include_invalid=True)
+        assert len(summaries) == 1
+        assert summaries[0].error_code == "session_events_load_failed"
+        assert summaries[0].event_count == 0
+
+    asyncio.run(run_test())
+
+
+def test_resume_last_falls_back_when_a_scanned_session_becomes_invalid(tmp_path):
+    class RacingSessionStore(SessionStore):
+        def __init__(self, codecraft_home: Path) -> None:
+            super().__init__(codecraft_home)
+            self.fail_ids: set[str] = set()
+            self.resume_calls: list[str] = []
+
+        async def resume(self, session_id: str) -> SessionSnapshot:
+            self.resume_calls.append(session_id)
+            if session_id in self.fail_ids:
+                raise SessionRestoreError(
+                    "session changed after scan",
+                    code="session_changed_after_scan",
+                )
+            return await super().resume(session_id)
+
+    async def seed(
+        store: SessionStore,
+        session_id: str,
+        timestamp: datetime,
+    ) -> None:
+        config = make_config(tmp_path).model_copy(update={"session_id": session_id})
+        await store.create_session(config)
+        await store.append_event(
+            RuntimeEvent(
+                event_id=f"evt_{session_id}",
+                session_id=session_id,
+                seq=1,
+                timestamp=timestamp,
+                type=RuntimeEventType.SESSION_STARTED,
+                payload={"config": config.model_dump(mode="json")},
+            )
+        )
+
+    async def run_test() -> None:
+        store = RacingSessionStore(tmp_path / ".codecraft")
+        now = datetime.now(UTC)
+        await seed(store, "ses_older", now)
+        await seed(store, "ses_newer", now + timedelta(seconds=1))
+        store.fail_ids = {"ses_newer"}
+
+        snapshot = await store.resume_last(cwd=tmp_path)
+
+        assert snapshot.config.session_id == "ses_older"
+        assert store.resume_calls == ["ses_newer", "ses_older"]
+
+        store.resume_calls.clear()
+        store.fail_ids = {"ses_newer", "ses_older"}
+        with pytest.raises(SessionRestoreError) as raised:
+            await store.resume_last(cwd=tmp_path)
+
+        assert raised.value.code == "session_not_found"
+        assert raised.value.metadata["attempts"] == [
+            {"session_id": "ses_newer", "code": "session_changed_after_scan"},
+            {"session_id": "ses_older", "code": "session_changed_after_scan"},
+        ]
 
     asyncio.run(run_test())
 

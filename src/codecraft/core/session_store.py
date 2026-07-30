@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -17,15 +18,24 @@ from codecraft.schema.session import (
     SESSION_CONFIG_SCHEMA_VERSION,
     SessionConfig,
     SessionSnapshot,
+    SessionSource,
     SessionSummary,
 )
 
 
-_SessionCandidate = tuple[
-    Path,
-    list[RuntimeEvent] | None,
-    SessionRestoreError | None,
-]
+@dataclass(frozen=True, slots=True)
+class _SessionReadResult:
+    config: SessionConfig | None
+    cwd: Path | None
+    source: SessionSource | None
+    session_id: str | None
+    created_at: datetime | None
+    last_event_at: datetime | None
+    event_count: int
+    events: list[RuntimeEvent] | None
+
+
+_SessionCandidate = tuple[Path, _SessionReadResult | None, SessionRestoreError | None]
 
 
 class SessionStore:
@@ -94,72 +104,151 @@ class SessionStore:
     def _load_events(self, session_id: str) -> list[RuntimeEvent]:
         """同步读取实现；只在线程池或同步诊断路径中调用。"""
         path = self._path_for_session(session_id)
-        events: list[RuntimeEvent] = []
+        result = self._read_session_file(
+            path,
+            session_id=session_id,
+            collect_events=True,
+            require_restorable=False,
+        )
+        assert result.events is not None
+        return result.events
 
+    def _read_session_file(
+        self,
+        path: Path,
+        *,
+        session_id: str,
+        collect_events: bool,
+        require_restorable: bool,
+    ) -> _SessionReadResult:
+        events: list[RuntimeEvent] | None = [] if collect_events else None
+        config: SessionConfig | None = None
+        session_cwd: Path | None = None
+        session_source: SessionSource | None = None
+        started_session_id: str | None = None
+        created_at: datetime | None = None
+        last_event_at: datetime | None = None
+        event_count = 0
         try:
             with path.open("r", encoding="utf-8") as handle:
                 for line_number, line in enumerate(handle, start=1):
                     stripped = line.strip()
                     if not stripped:
                         continue
-                    try:
-                        data = json.loads(stripped)
-                    except Exception as exc:
-                        raise SessionRestoreError(
-                            "failed to parse session event",
-                            code="session_event_parse_failed",
-                            metadata={
-                                "session_id": session_id,
-                                "path": str(path),
-                                "line": line_number,
-                            },
-                        ) from exc
-                    if not isinstance(data, dict):
-                        raise SessionRestoreError(
-                            "session event must be a JSON object",
-                            code="session_event_shape_invalid",
-                            metadata={
-                                "session_id": session_id,
-                                "path": str(path),
-                                "line": line_number,
-                            },
-                        )
-                    version = data.get("schema_version")
-                    if version != RUNTIME_EVENT_SCHEMA_VERSION:
-                        raise SessionRestoreError(
-                            "session event schema version is not supported",
-                            code="session_event_schema_unsupported",
-                            metadata={
-                                "session_id": session_id,
-                                "path": str(path),
-                                "line": line_number,
-                                "version": version,
-                            },
-                        )
+                    data = self._decode_event_data(
+                        stripped,
+                        session_id=session_id,
+                        path=path,
+                        line_number=line_number,
+                    )
                     self._validate_started_config_version(data, session_id)
-                    try:
-                        events.append(RuntimeEvent.model_validate(data))
-                    except Exception as exc:
-                        raise SessionRestoreError(
-                            "failed to validate session event",
-                            code="session_event_validation_failed",
-                            metadata={
-                                "session_id": session_id,
-                                "path": str(path),
-                                "line": line_number,
-                            },
-                        ) from exc
-        except CodecraftFileNotFoundError as exc:
-            raise exc
-        except OSError as exc:
+                    if event_count == 0 and require_restorable:
+                        validated_config = self._session_config_from_start(
+                            data, session_id
+                        )
+                        session_cwd = validated_config.cwd
+                        session_source = validated_config.source
+                        if collect_events:
+                            config = validated_config
+                    event = self._event_from_data(
+                        data,
+                        session_id=session_id,
+                        path=path,
+                        line_number=line_number,
+                    )
+                    self._validate_event_position(
+                        event,
+                        session_id=session_id,
+                        expected_seq=event_count + 1,
+                    )
+                    if started_session_id is None:
+                        started_session_id = event.session_id
+                        created_at = event.timestamp
+                    last_event_at = event.timestamp
+                    event_count += 1
+                    if events is not None:
+                        events.append(event)
+        except (OSError, UnicodeError) as exc:
             raise SessionRestoreError(
                 "failed to load session events",
                 code="session_events_load_failed",
                 metadata={"session_id": session_id, "path": str(path)},
             ) from exc
 
-        self._validate_seq(session_id, events)
-        return events
+        if require_restorable and started_session_id is None:
+            raise SessionRestoreError(
+                "session contains no events",
+                code="session_empty",
+                metadata={"session_id": session_id},
+            )
+
+        return _SessionReadResult(
+            config=config,
+            cwd=session_cwd,
+            source=session_source,
+            session_id=started_session_id,
+            created_at=created_at,
+            last_event_at=last_event_at,
+            event_count=event_count,
+            events=events,
+        )
+
+    @staticmethod
+    def _decode_event_data(
+        line: str,
+        *,
+        session_id: str,
+        path: Path,
+        line_number: int,
+    ) -> dict[str, Any]:
+        metadata = {
+            "session_id": session_id,
+            "path": str(path),
+            "line": line_number,
+        }
+        try:
+            data = json.loads(line)
+        except Exception as exc:
+            raise SessionRestoreError(
+                "failed to parse session event",
+                code="session_event_parse_failed",
+                metadata=metadata,
+            ) from exc
+        if not isinstance(data, dict):
+            raise SessionRestoreError(
+                "session event must be a JSON object",
+                code="session_event_shape_invalid",
+                metadata=metadata,
+            )
+        version = data.get("schema_version")
+        if version != RUNTIME_EVENT_SCHEMA_VERSION:
+            raise SessionRestoreError(
+                "session event schema version is not supported",
+                code="session_event_schema_unsupported",
+                metadata={**metadata, "version": version},
+            )
+        return data
+
+    @staticmethod
+    def _event_from_data(
+        data: dict[str, Any],
+        *,
+        session_id: str,
+        path: Path,
+        line_number: int,
+    ) -> RuntimeEvent:
+        try:
+            return RuntimeEvent.model_validate(data)
+        except Exception as exc:
+            raise SessionRestoreError(
+                "failed to validate session event",
+                code="session_event_validation_failed",
+                metadata={
+                    "session_id": session_id,
+                    "path": str(path),
+                    "line": line_number,
+                },
+            ) from exc
 
     async def load_raw_lines(self, session_id: str) -> list[str]:
         return await asyncio.to_thread(self._load_raw_lines, session_id)
@@ -168,7 +257,7 @@ class SessionStore:
         path = self._path_for_session(session_id)
         try:
             return path.read_text(encoding="utf-8").splitlines()
-        except OSError as exc:
+        except (OSError, UnicodeError) as exc:
             raise SessionRestoreError(
                 "failed to load raw session lines",
                 code="session_raw_load_failed",
@@ -186,8 +275,8 @@ class SessionStore:
         cwd_resolved = cwd.expanduser().resolve() if cwd else None
 
         paths = await asyncio.to_thread(self._iter_session_files)
-        candidates = await self._load_session_candidates(paths)
-        for path, events, error in candidates:
+        candidates = await self._scan_session_candidates(paths)
+        for path, result, error in candidates:
             if error is not None:
                 if include_invalid and cwd_resolved is None:
                     event_count, last_event_at = await asyncio.to_thread(
@@ -206,52 +295,26 @@ class SessionStore:
                         )
                     )
                 continue
-            assert events is not None
-            if not events:
-                summaries.append(
-                    SessionSummary(
-                        session_id=path.stem,
-                        path=path,
-                    )
-                )
-                continue
-
-            first = events[0]
-            last = events[-1]
-            config = first.payload.get("config")
-            if isinstance(config, dict):
-                try:
-                    self._validate_config_version(config, first.session_id)
-                except SessionRestoreError as exc:
-                    if include_invalid and cwd_resolved is None:
-                        summaries.append(
-                            SessionSummary(
-                                session_id=path.stem,
-                                path=path,
-                                valid=False,
-                                error_code=exc.code,
-                                error_message=exc.message,
-                                event_count=len(events),
-                                last_event_at=last.timestamp,
-                            )
-                        )
-                    continue
-            else:
-                config = {}
-            session_cwd = self._optional_path(config.get("cwd"))
+            assert result is not None
+            assert result.cwd is not None
+            assert result.source is not None
+            assert result.session_id is not None
+            assert result.created_at is not None
+            assert result.last_event_at is not None
+            session_cwd = result.cwd
 
             if cwd_resolved and session_cwd != cwd_resolved:
                 continue
 
             summaries.append(
                 SessionSummary(
-                    session_id=first.session_id,
+                    session_id=result.session_id,
                     path=path,
                     cwd=session_cwd,
-                    source=config.get("source"),
-                    created_at=first.timestamp,
-                    last_event_at=last.timestamp,
-                    event_count=len(events),
+                    source=result.source,
+                    created_at=result.created_at,
+                    last_event_at=result.last_event_at,
+                    event_count=result.event_count,
                 )
             )
 
@@ -265,7 +328,7 @@ class SessionStore:
             reverse=True,
         )
 
-    async def _load_session_candidates(
+    async def _scan_session_candidates(
         self,
         paths: list[Path],
     ) -> list[_SessionCandidate]:
@@ -277,7 +340,14 @@ class SessionStore:
         async def load() -> None:
             for index, path in pending:
                 try:
-                    candidates[index] = path, await self.load_events(path.stem), None
+                    result = await asyncio.to_thread(
+                        self._read_session_file,
+                        path,
+                        session_id=path.stem,
+                        collect_events=False,
+                        require_restorable=True,
+                    )
+                    candidates[index] = path, result, None
                 except SessionRestoreError as exc:
                     candidates[index] = path, None, exc
 
@@ -291,45 +361,31 @@ class SessionStore:
 
     async def resume_last(self, cwd: Path | None = None) -> SessionSnapshot:
         summaries = await self.list_sessions(cwd=cwd)
-        if not summaries:
-            raise SessionRestoreError(
-                "no session found to resume",
-                code="session_not_found",
-            )
-
-        return await self.resume(summaries[0].session_id)
+        attempts: list[dict[str, str]] = []
+        for summary in summaries:
+            try:
+                return await self.resume(summary.session_id)
+            except SessionRestoreError as exc:
+                attempts.append({"session_id": summary.session_id, "code": exc.code})
+        raise SessionRestoreError(
+            "no session found to resume",
+            code="session_not_found",
+            metadata={"attempts": attempts},
+        )
 
     async def resume(self, session_id: str) -> SessionSnapshot:
         """从事件日志恢复 session 配置和历史事件。"""
-        events = await self.load_events(session_id)
-        if not events:
-            raise SessionRestoreError(
-                "session contains no events",
-                code="session_empty",
-                metadata={"session_id": session_id},
-            )
-
-        started = events[0]
-        if started.type != RuntimeEventType.SESSION_STARTED:
-            raise SessionRestoreError(
-                "session log must start with session_started",
-                code="session_start_event_missing",
-                metadata={"session_id": session_id},
-            )
-
-        config_data = started.payload.get("config")
-        if not isinstance(config_data, dict):
-            raise SessionRestoreError(
-                "session_started event is missing config payload",
-                code="session_config_missing",
-                metadata={"session_id": session_id},
-            )
-        self._validate_config_version(config_data, session_id)
-
-        return SessionSnapshot(
-            config=SessionConfig.model_validate(config_data),
-            events=events,
+        path = self._path_for_session(session_id)
+        result = await asyncio.to_thread(
+            self._read_session_file,
+            path,
+            session_id=session_id,
+            collect_events=True,
+            require_restorable=True,
         )
+        assert result.config is not None
+        assert result.events is not None
+        return SessionSnapshot(config=result.config, events=result.events)
 
     @staticmethod
     def _validate_config_version(config_data: dict[str, Any], session_id: str) -> None:
@@ -352,6 +408,45 @@ class SessionStore:
         config_data = payload.get("config") if isinstance(payload, dict) else None
         if isinstance(config_data, dict):
             self._validate_config_version(config_data, session_id)
+
+    def _session_config_from_start(
+        self,
+        event_data: dict[str, Any],
+        session_id: str,
+    ) -> SessionConfig:
+        if event_data.get("type") != RuntimeEventType.SESSION_STARTED.value:
+            raise SessionRestoreError(
+                "session log must start with session_started",
+                code="session_start_event_missing",
+                metadata={"session_id": session_id},
+            )
+        payload = event_data.get("payload")
+        config_data = payload.get("config") if isinstance(payload, dict) else None
+        if not isinstance(config_data, dict):
+            raise SessionRestoreError(
+                "session_started event is missing config payload",
+                code="session_config_missing",
+                metadata={"session_id": session_id},
+            )
+        self._validate_config_version(config_data, session_id)
+        try:
+            config = SessionConfig.model_validate(config_data)
+        except (TypeError, ValueError) as exc:
+            raise SessionRestoreError(
+                "session config is invalid",
+                code="session_config_validation_failed",
+                metadata={"session_id": session_id},
+            ) from exc
+        if config.session_id != session_id:
+            raise SessionRestoreError(
+                "session config has mismatched session_id",
+                code="session_config_id_mismatch",
+                metadata={
+                    "expected": session_id,
+                    "actual": config.session_id,
+                },
+            )
+        return config
 
     def _path_for_session(self, session_id: str) -> Path:
         """定位 session 日志路径，并缓存 glob 的结果。"""
@@ -404,7 +499,7 @@ class SessionStore:
         try:
             with path.open("r", encoding="utf-8") as handle:
                 return sum(1 for line in handle if line.strip())
-        except OSError:
+        except (OSError, UnicodeError):
             return 0
 
     @staticmethod
@@ -415,36 +510,32 @@ class SessionStore:
             return None
 
     @staticmethod
-    def _validate_seq(session_id: str, events: list[RuntimeEvent]) -> None:
-        """确保事件属于同一个 session，且 seq 从 1 开始连续递增。"""
-        for expected, event in enumerate(events, start=1):
-            if event.session_id != session_id:
-                raise SessionRestoreError(
-                    "session event has mismatched session_id",
-                    code="session_id_mismatch",
-                    metadata={
-                        "expected": session_id,
-                        "actual": event.session_id,
-                        "seq": event.seq,
-                    },
-                )
-
-            if event.seq != expected:
-                raise SessionRestoreError(
-                    "session event sequence is not continuous",
-                    code="session_seq_not_continuous",
-                    metadata={
-                        "session_id": session_id,
-                        "expected": expected,
-                        "actual": event.seq,
-                    },
-                )
-
-    @staticmethod
-    def _optional_path(value: object) -> Path | None:
-        if not isinstance(value, str) or not value:
-            return None
-        return Path(value).expanduser().resolve()
+    def _validate_event_position(
+        event: RuntimeEvent,
+        *,
+        session_id: str,
+        expected_seq: int,
+    ) -> None:
+        if event.session_id != session_id:
+            raise SessionRestoreError(
+                "session event has mismatched session_id",
+                code="session_id_mismatch",
+                metadata={
+                    "expected": session_id,
+                    "actual": event.session_id,
+                    "seq": event.seq,
+                },
+            )
+        if event.seq != expected_seq:
+            raise SessionRestoreError(
+                "session event sequence is not continuous",
+                code="session_seq_not_continuous",
+                metadata={
+                    "session_id": session_id,
+                    "expected": expected_seq,
+                    "actual": event.seq,
+                },
+            )
 
 
 class CodecraftFileNotFoundError(SessionRestoreError):
