@@ -19,7 +19,19 @@ class DeepSeekProvider(ChatCompletionsProvider):
         api_key_env: str | None = "DEEPSEEK_API_KEY",
         base_url: str | None = None,
     ) -> None:
-        """配置 DeepSeek Chat Completions 兼容端点。"""
+        """配置 DeepSeek Chat Completions Provider。
+
+        Args:
+            client: 可选的外部异步客户端，常用于测试或共享连接池。
+            api_key: 显式 API Key。
+            api_key_env: API Key 环境变量名，默认 ``DEEPSEEK_API_KEY``。
+            base_url: 可选的自定义兼容地址；未传时使用 DeepSeek 默认地址。
+
+        Example:
+            >>> provider = DeepSeekProvider(api_key_env="MY_DEEPSEEK_KEY")
+            >>> provider.api_key_env
+            'MY_DEEPSEEK_KEY'
+        """
         super().__init__(
             client=client,
             api_key=api_key,

@@ -18,7 +18,19 @@ class OpenAIProvider(ResponsesProvider):
         api_key_env: str | None = "OPENAI_API_KEY",
         base_url: str | None = None,
     ) -> None:
-        """配置 OpenAI Responses API 客户端或接收外部注入的兼容客户端。"""
+        """配置 OpenAI Responses API Provider。
+
+        Args:
+            client: 可选的外部异步客户端，常用于测试或共享连接池。
+            api_key: 显式 API Key。
+            api_key_env: API Key 环境变量名，默认 ``OPENAI_API_KEY``。
+            base_url: 可选的自定义 OpenAI 兼容地址。
+
+        Example:
+            >>> provider = OpenAIProvider(api_key_env="MY_OPENAI_KEY")
+            >>> provider.api_key_env
+            'MY_OPENAI_KEY'
+        """
         super().__init__(
             client=client,
             api_key=api_key,
