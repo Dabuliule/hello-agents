@@ -14,7 +14,15 @@ from codecraft.cli.options import CodecraftHomeOption
 from codecraft.cli.runtime_runner import submit_user_message
 from codecraft.core.errors import CodecraftError
 from codecraft.core.ids import new_id
-from codecraft.llm import LLMProviderRegistry, MockProvider, ModelEvent, ModelEventType
+from codecraft.llm import (
+    LLMProviderRegistry,
+    MockProvider,
+    ModelCompletedEvent,
+    ModelEvent,
+    ModelMessageCompletedEvent,
+    ModelMessageDeltaEvent,
+    ModelToolCallEvent,
+)
 from codecraft.prompt import BASE_INSTRUCTIONS
 from codecraft.sandbox import SandboxBackendType, SandboxMode
 from codecraft.schema.event import RuntimeEvent, RuntimeEventType
@@ -135,34 +143,29 @@ def _demo_config(
 
 def _demo_script() -> list[ModelEvent]:
     return [
-        ModelEvent(
-            type=ModelEventType.MESSAGE_DELTA,
+        ModelMessageDeltaEvent(
             payload={"text": "I will inspect the target before editing it."},
         ),
-        ModelEvent(
-            type=ModelEventType.TOOL_CALL,
+        ModelToolCallEvent(
             payload={
                 "call_id": "call_demo_read",
                 "name": "read_file",
                 "arguments": {"path": _DEMO_FILE},
             },
         ),
-        ModelEvent(type=ModelEventType.COMPLETED),
-        ModelEvent(
-            type=ModelEventType.MESSAGE_DELTA,
+        ModelCompletedEvent(),
+        ModelMessageDeltaEvent(
             payload={"text": "The change is small and can be applied as one patch."},
         ),
-        ModelEvent(
-            type=ModelEventType.TOOL_CALL,
+        ModelToolCallEvent(
             payload={
                 "call_id": "call_demo_patch",
                 "name": "apply_patch",
                 "arguments": {"patch": _DEMO_PATCH},
             },
         ),
-        ModelEvent(type=ModelEventType.COMPLETED),
-        ModelEvent(
-            type=ModelEventType.MESSAGE_COMPLETED,
+        ModelCompletedEvent(),
+        ModelMessageCompletedEvent(
             payload={
                 "text": (
                     "The governed workflow has finished. The tool result, approval "
@@ -170,7 +173,7 @@ def _demo_script() -> list[ModelEvent]:
                 )
             },
         ),
-        ModelEvent(type=ModelEventType.COMPLETED),
+        ModelCompletedEvent(),
     ]
 
 

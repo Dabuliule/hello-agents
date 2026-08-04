@@ -8,7 +8,14 @@ from codecraft.cli import app as cli_app
 from codecraft.cli.app import app
 from codecraft.eval.metrics import classify_failure, percentile, summarize_events
 from codecraft.eval.suite import evaluate_task, get_eval_tasks, seed_workspace
-from codecraft.llm import LLMProviderRegistry, MockProvider, ModelEvent, ModelEventType
+from codecraft.llm import (
+    LLMProviderRegistry,
+    MockProvider,
+    ModelCompletedEvent,
+    ModelMessageCompletedEvent,
+    ModelTokenCountEvent,
+    ModelToolCallEvent,
+)
 from codecraft.schema.event import RuntimeEvent, RuntimeEventType
 
 
@@ -122,8 +129,7 @@ def test_eval_list_prints_tasks_without_loading_provider():
 def test_eval_command_runs_task_and_writes_reports(tmp_path, monkeypatch):
     provider = MockProvider(
         [
-            ModelEvent(
-                type=ModelEventType.TOKEN_COUNT,
+            ModelTokenCountEvent(
                 payload={
                     "input_tokens": 10,
                     "output_tokens": 2,
@@ -132,8 +138,7 @@ def test_eval_command_runs_task_and_writes_reports(tmp_path, monkeypatch):
                     "total_tokens": 12,
                 },
             ),
-            ModelEvent(
-                type=ModelEventType.TOOL_CALL,
+            ModelToolCallEvent(
                 payload={
                     "call_id": "call_eval_write",
                     "name": "write_file",
@@ -143,9 +148,8 @@ def test_eval_command_runs_task_and_writes_reports(tmp_path, monkeypatch):
                     },
                 },
             ),
-            ModelEvent(type=ModelEventType.COMPLETED),
-            ModelEvent(
-                type=ModelEventType.TOKEN_COUNT,
+            ModelCompletedEvent(),
+            ModelTokenCountEvent(
                 payload={
                     "input_tokens": 20,
                     "output_tokens": 3,
@@ -154,13 +158,11 @@ def test_eval_command_runs_task_and_writes_reports(tmp_path, monkeypatch):
                     "total_tokens": 23,
                 },
             ),
-            ModelEvent(
-                type=ModelEventType.MESSAGE_COMPLETED,
+            ModelMessageCompletedEvent(
                 payload={"text": "Created welcome.txt."},
             ),
-            ModelEvent(type=ModelEventType.COMPLETED),
-            ModelEvent(
-                type=ModelEventType.TOKEN_COUNT,
+            ModelCompletedEvent(),
+            ModelTokenCountEvent(
                 payload={
                     "input_tokens": 10,
                     "output_tokens": 2,
@@ -169,8 +171,7 @@ def test_eval_command_runs_task_and_writes_reports(tmp_path, monkeypatch):
                     "total_tokens": 12,
                 },
             ),
-            ModelEvent(
-                type=ModelEventType.TOOL_CALL,
+            ModelToolCallEvent(
                 payload={
                     "call_id": "call_eval_write_2",
                     "name": "write_file",
@@ -180,9 +181,8 @@ def test_eval_command_runs_task_and_writes_reports(tmp_path, monkeypatch):
                     },
                 },
             ),
-            ModelEvent(type=ModelEventType.COMPLETED),
-            ModelEvent(
-                type=ModelEventType.TOKEN_COUNT,
+            ModelCompletedEvent(),
+            ModelTokenCountEvent(
                 payload={
                     "input_tokens": 20,
                     "output_tokens": 3,
@@ -191,11 +191,10 @@ def test_eval_command_runs_task_and_writes_reports(tmp_path, monkeypatch):
                     "total_tokens": 23,
                 },
             ),
-            ModelEvent(
-                type=ModelEventType.MESSAGE_COMPLETED,
+            ModelMessageCompletedEvent(
                 payload={"text": "Created welcome.txt."},
             ),
-            ModelEvent(type=ModelEventType.COMPLETED),
+            ModelCompletedEvent(),
         ]
     )
     monkeypatch.setattr(
@@ -340,11 +339,10 @@ def test_eval_duplicate_task_prints_friendly_error(tmp_path):
 def test_eval_command_reports_failed_deterministic_checks(tmp_path, monkeypatch):
     provider = MockProvider(
         [
-            ModelEvent(
-                type=ModelEventType.MESSAGE_COMPLETED,
+            ModelMessageCompletedEvent(
                 payload={"text": "Done without editing files."},
             ),
-            ModelEvent(type=ModelEventType.COMPLETED),
+            ModelCompletedEvent(),
         ]
     )
     monkeypatch.setattr(

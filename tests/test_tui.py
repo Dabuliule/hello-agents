@@ -16,9 +16,12 @@ from codecraft.llm import (
     LLMProviderError,
     LLMProviderRegistry,
     MockProvider,
-    ModelEvent,
-    ModelEventType,
+    ModelCompletedEvent,
+    ModelMessageCompletedEvent,
+    ModelMessageDeltaEvent,
     ModelRequest,
+    ModelTokenCountEvent,
+    ModelToolCallEvent,
 )
 from codecraft.schema.event import RuntimeEvent, RuntimeEventType
 from codecraft.schema.session import SessionConfig, SessionSource
@@ -49,16 +52,14 @@ class RecoveringProvider(LLMProvider):
     async def stream(self, request: ModelRequest):
         self.calls += 1
         if self.calls == 1:
-            yield ModelEvent(
-                type=ModelEventType.MESSAGE_DELTA,
+            yield ModelMessageDeltaEvent(
                 payload={"text": "partial answer"},
             )
             raise LLMProviderError("transient provider failure")
-        yield ModelEvent(
-            type=ModelEventType.MESSAGE_COMPLETED,
+        yield ModelMessageCompletedEvent(
             payload={"text": "recovered answer"},
         )
-        yield ModelEvent(type=ModelEventType.COMPLETED)
+        yield ModelCompletedEvent()
 
 
 def _config(tmp_path, *, approval_policy=ApprovalPolicy.NEVER) -> SessionConfig:
@@ -176,11 +177,10 @@ def test_tui_slash_menu_filters_commands_and_activates_selected_skill(tmp_path):
         )
         provider = MockProvider(
             [
-                ModelEvent(
-                    type=ModelEventType.MESSAGE_COMPLETED,
+                ModelMessageCompletedEvent(
                     payload={"text": "skill applied"},
                 ),
-                ModelEvent(type=ModelEventType.COMPLETED),
+                ModelCompletedEvent(),
             ]
         )
         config = _config(tmp_path)
@@ -357,23 +357,20 @@ def test_tui_streams_messages_and_updates_runtime_status(tmp_path):
         config = _config(tmp_path)
         provider = MockProvider(
             [
-                ModelEvent(
-                    type=ModelEventType.MESSAGE_DELTA,
+                ModelMessageDeltaEvent(
                     payload={"text": "Hello "},
                 ),
-                ModelEvent(
-                    type=ModelEventType.TOKEN_COUNT,
+                ModelTokenCountEvent(
                     payload={
                         "input_tokens": 3,
                         "output_tokens": 2,
                         "total_tokens": 5,
                     },
                 ),
-                ModelEvent(
-                    type=ModelEventType.MESSAGE_DELTA,
+                ModelMessageDeltaEvent(
                     payload={"text": "world"},
                 ),
-                ModelEvent(type=ModelEventType.COMPLETED),
+                ModelCompletedEvent(),
             ]
         )
         runtime = AgentRuntime(
@@ -594,8 +591,7 @@ def test_tui_inline_approval_controls_side_effect(tmp_path):
         config = _config(tmp_path, approval_policy=ApprovalPolicy.ON_REQUEST)
         provider = MockProvider(
             [
-                ModelEvent(
-                    type=ModelEventType.TOOL_CALL,
+                ModelToolCallEvent(
                     payload={
                         "call_id": "call_write",
                         "name": "write_file",
@@ -605,12 +601,11 @@ def test_tui_inline_approval_controls_side_effect(tmp_path):
                         },
                     },
                 ),
-                ModelEvent(type=ModelEventType.COMPLETED),
-                ModelEvent(
-                    type=ModelEventType.MESSAGE_COMPLETED,
+                ModelCompletedEvent(),
+                ModelMessageCompletedEvent(
                     payload={"text": "File created."},
                 ),
-                ModelEvent(type=ModelEventType.COMPLETED),
+                ModelCompletedEvent(),
             ]
         )
         runtime = AgentRuntime(
@@ -701,11 +696,10 @@ def test_tui_trace_screen_inspects_persisted_events(tmp_path):
         config = _config(tmp_path)
         provider = MockProvider(
             [
-                ModelEvent(
-                    type=ModelEventType.MESSAGE_COMPLETED,
+                ModelMessageCompletedEvent(
                     payload={"text": "trace answer"},
                 ),
-                ModelEvent(type=ModelEventType.COMPLETED),
+                ModelCompletedEvent(),
             ]
         )
         runtime = AgentRuntime(
@@ -774,11 +768,10 @@ def test_tui_browses_resumes_and_continues_session(tmp_path):
 
         provider = MockProvider(
             [
-                ModelEvent(
-                    type=ModelEventType.MESSAGE_COMPLETED,
+                ModelMessageCompletedEvent(
                     payload={"text": "continued answer"},
                 ),
-                ModelEvent(type=ModelEventType.COMPLETED),
+                ModelCompletedEvent(),
             ]
         )
         stores: list[CountingSessionStore] = []

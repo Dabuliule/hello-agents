@@ -1,19 +1,10 @@
 from __future__ import annotations
 
-from enum import StrEnum
-from typing import Any, cast
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from codecraft.schema.tool import ToolCall
-
-
-class ModelEventType(StrEnum):
-    MESSAGE_DELTA = "message_delta"
-    MESSAGE_COMPLETED = "message_completed"
-    TOOL_CALL = "tool_call"
-    TOKEN_COUNT = "token_count"
-    COMPLETED = "completed"
 
 
 class ModelTextPayload(BaseModel):
@@ -57,47 +48,43 @@ class ModelTokenCountPayload(BaseModel):
         return self
 
 
-class ModelCompletedPayload(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-
-ModelEventPayload = (
-    ModelTextPayload | ModelTokenCountPayload | ModelCompletedPayload | ToolCall
-)
-
-
-class ModelEvent(BaseModel):
-    """Provider 向运行时暴露的统一成功事件。
-
-    事件只表达模型输出数据和成功终止；调用失败通过 ``LLMProviderError``
-    或 ``LLMProtocolError`` 表达。一次成功响应必须以 ``COMPLETED`` 结束。
-    """
+class _ModelEventBase(BaseModel):
+    """Provider-to-runtime success event; failures are raised as exceptions."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    type: ModelEventType
-    payload: ModelEventPayload = Field(default_factory=ModelCompletedPayload)
 
-    @model_validator(mode="before")
-    @classmethod
-    def validate_payload_for_type(cls, value: Any) -> Any:
-        if not isinstance(value, dict):
-            return value
+class ModelMessageDeltaEvent(_ModelEventBase):
+    type: Literal["message_delta"] = "message_delta"
+    payload: ModelTextPayload
 
-        event_type = ModelEventType(cast(str, value.get("type")))
-        payload_type: type[BaseModel]
-        if event_type in {
-            ModelEventType.MESSAGE_DELTA,
-            ModelEventType.MESSAGE_COMPLETED,
-        }:
-            payload_type = ModelTextPayload
-        elif event_type == ModelEventType.TOOL_CALL:
-            payload_type = ToolCall
-        elif event_type == ModelEventType.TOKEN_COUNT:
-            payload_type = ModelTokenCountPayload
-        else:
-            payload_type = ModelCompletedPayload
 
-        normalized = dict(value)
-        normalized["payload"] = payload_type.model_validate(value.get("payload", {}))
-        return normalized
+class ModelMessageCompletedEvent(_ModelEventBase):
+    type: Literal["message_completed"] = "message_completed"
+    payload: ModelTextPayload
+
+
+class ModelToolCallEvent(_ModelEventBase):
+    type: Literal["tool_call"] = "tool_call"
+    payload: ToolCall
+
+
+class ModelTokenCountEvent(_ModelEventBase):
+    type: Literal["token_count"] = "token_count"
+    payload: ModelTokenCountPayload
+
+
+class ModelCompletedEvent(_ModelEventBase):
+    """Successful terminal marker for one provider response stream."""
+
+    type: Literal["completed"] = "completed"
+
+
+ModelEvent = Annotated[
+    ModelMessageDeltaEvent
+    | ModelMessageCompletedEvent
+    | ModelToolCallEvent
+    | ModelTokenCountEvent
+    | ModelCompletedEvent,
+    Field(discriminator="type"),
+]

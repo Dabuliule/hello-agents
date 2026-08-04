@@ -5,7 +5,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 import pytest
-from pydantic import ValidationError
+from pydantic import TypeAdapter, ValidationError
 
 from codecraft.core.runtime import AgentRuntime
 from codecraft.core.session_store import SessionStore
@@ -16,11 +16,15 @@ from codecraft.llm import (
     LLMProviderError,
     LLMProviderRegistry,
     MockProvider,
+    ModelCompletedEvent,
     ModelEvent,
-    ModelEventType,
+    ModelMessageCompletedEvent,
+    ModelMessageDeltaEvent,
     ModelRequest,
     ModelRole,
     ModelTextMessage,
+    ModelTokenCountEvent,
+    ModelToolCallEvent,
     ModelToolCallMessage,
     ModelToolResultMessage,
     OpenAIProvider,
@@ -165,8 +169,7 @@ def test_model_message_discriminator_selects_concrete_variant():
 
 
 def test_model_event_is_immutable():
-    event = ModelEvent(
-        type=ModelEventType.MESSAGE_COMPLETED,
+    event = ModelMessageCompletedEvent(
         payload={"text": "done"},
     )
 
@@ -174,9 +177,48 @@ def test_model_event_is_immutable():
         event.payload.text = "changed"
 
 
+def test_model_event_discriminator_selects_concrete_variant():
+    adapter = TypeAdapter(ModelEvent)
+    events = [
+        adapter.validate_python(
+            {"type": "message_delta", "payload": {"text": "hello"}}
+        ),
+        adapter.validate_python(
+            {"type": "message_completed", "payload": {"text": "done"}}
+        ),
+        adapter.validate_python(
+            {
+                "type": "tool_call",
+                "payload": {
+                    "call_id": "call_read",
+                    "name": "read_file",
+                    "arguments": {"path": "README.md"},
+                },
+            }
+        ),
+        adapter.validate_python(
+            {
+                "type": "token_count",
+                "payload": {"input_tokens": 7, "output_tokens": 3},
+            }
+        ),
+        adapter.validate_python({"type": "completed"}),
+    ]
+
+    assert [type(event) for event in events] == [
+        ModelMessageDeltaEvent,
+        ModelMessageCompletedEvent,
+        ModelToolCallEvent,
+        ModelTokenCountEvent,
+        ModelCompletedEvent,
+    ]
+
+    with pytest.raises(ValidationError):
+        adapter.validate_python({"type": "completed", "payload": {}})
+
+
 def test_token_count_does_not_add_reasoning_twice():
-    event = ModelEvent(
-        type=ModelEventType.TOKEN_COUNT,
+    event = ModelTokenCountEvent(
         payload={
             "input_tokens": 7,
             "output_tokens": 3,
@@ -186,8 +228,7 @@ def test_token_count_does_not_add_reasoning_twice():
     assert event.payload.total_tokens == 10
 
     with pytest.raises(ValidationError, match=r"input_tokens \+ output_tokens"):
-        ModelEvent(
-            type=ModelEventType.TOKEN_COUNT,
+        ModelTokenCountEvent(
             payload={
                 "input_tokens": 7,
                 "output_tokens": 3,
@@ -303,8 +344,8 @@ def test_chat_stream_ignores_empty_role_chunk():
 
     events = asyncio.run(collect(provider))
     assert [event.type for event in events] == [
-        ModelEventType.MESSAGE_DELTA,
-        ModelEventType.COMPLETED,
+        "message_delta",
+        "completed",
     ]
 
 
@@ -360,8 +401,8 @@ def test_chat_stream_ignores_empty_tool_identity_placeholders():
     events = asyncio.run(collect(provider))
 
     assert [event.type for event in events] == [
-        ModelEventType.TOOL_CALL,
-        ModelEventType.COMPLETED,
+        "tool_call",
+        "completed",
     ]
     assert events[0].payload.model_dump(mode="json") == {
         "call_id": "call_list",
@@ -482,7 +523,7 @@ def test_registry_normalizes_names_and_closes_every_provider():
             request: ModelRequest,
         ) -> AsyncIterator[ModelEvent]:
             if False:
-                yield ModelEvent(type=ModelEventType.COMPLETED)
+                yield ModelCompletedEvent()
 
         async def close(self) -> None:
             closed.append(self.name)
@@ -527,8 +568,7 @@ def test_mock_provider_requires_explicit_boundaries_and_snapshots_calls():
     with pytest.raises(ValueError, match="without completed"):
         MockProvider(
             [
-                ModelEvent(
-                    type=ModelEventType.MESSAGE_COMPLETED,
+                ModelMessageCompletedEvent(
                     payload={"text": "unfinished"},
                 )
             ]
@@ -536,11 +576,10 @@ def test_mock_provider_requires_explicit_boundaries_and_snapshots_calls():
 
     provider = MockProvider(
         [
-            ModelEvent(
-                type=ModelEventType.MESSAGE_COMPLETED,
+            ModelMessageCompletedEvent(
                 payload={"text": "done"},
             ),
-            ModelEvent(type=ModelEventType.COMPLETED),
+            ModelCompletedEvent(),
         ]
     )
     model_request = request()

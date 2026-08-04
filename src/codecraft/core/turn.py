@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 from time import monotonic
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, assert_never
 
 from codecraft.core.conversation import Conversation, ConversationToolCallItem
 from codecraft.core.errors import CodecraftError
@@ -15,10 +15,11 @@ from codecraft.core.turn_context import TurnContext
 from codecraft.llm.base import LLMProtocolError
 from codecraft.llm.base import ModelRequest
 from codecraft.llm.events import (
-    ModelEvent,
-    ModelEventType,
-    ModelTextPayload,
-    ModelTokenCountPayload,
+    ModelCompletedEvent,
+    ModelMessageCompletedEvent,
+    ModelMessageDeltaEvent,
+    ModelTokenCountEvent,
+    ModelToolCallEvent,
 )
 from codecraft.llm.messages import ModelMessage
 from codecraft.prompt import InstructionLoader, PromptBuilder
@@ -129,7 +130,7 @@ class Turn:
     async def _consume_model_response(self, request: ModelRequest) -> _ModelResponse:
         response = _ModelResponse()
         async for model_event in self.session.llm_provider.stream(request):
-            if model_event.type == ModelEventType.COMPLETED:
+            if isinstance(model_event, ModelCompletedEvent):
                 return response
             await self._handle_model_event(response, model_event)
         raise LLMProtocolError("model event stream ended without a completed event")
@@ -137,26 +138,27 @@ class Turn:
     async def _handle_model_event(
         self,
         response: _ModelResponse,
-        model_event: ModelEvent,
+        model_event: ModelMessageDeltaEvent
+        | ModelMessageCompletedEvent
+        | ModelTokenCountEvent
+        | ModelToolCallEvent,
     ) -> None:
-        if model_event.type == ModelEventType.MESSAGE_DELTA:
+        if isinstance(model_event, ModelMessageDeltaEvent):
             await self._handle_message_delta(response, model_event)
-        elif model_event.type == ModelEventType.MESSAGE_COMPLETED:
+        elif isinstance(model_event, ModelMessageCompletedEvent):
             await self._handle_completed_message(response, model_event)
-        elif model_event.type == ModelEventType.TOKEN_COUNT:
+        elif isinstance(model_event, ModelTokenCountEvent):
             await self._handle_token_count(model_event)
-        elif model_event.type == ModelEventType.TOOL_CALL:
-            if not isinstance(model_event.payload, ToolCall):
-                raise LLMProtocolError("tool call has an invalid payload")
+        elif isinstance(model_event, ModelToolCallEvent):
             response.tool_calls.append(model_event.payload)
+        else:
+            assert_never(model_event)
 
     async def _handle_message_delta(
         self,
         response: _ModelResponse,
-        model_event: ModelEvent,
+        model_event: ModelMessageDeltaEvent,
     ) -> None:
-        if not isinstance(model_event.payload, ModelTextPayload):
-            raise LLMProtocolError("message delta has an invalid payload")
         if response.completed_message is not None:
             raise LLMProtocolError("message delta arrived after a completed message")
 
@@ -171,10 +173,8 @@ class Turn:
     async def _handle_completed_message(
         self,
         response: _ModelResponse,
-        model_event: ModelEvent,
+        model_event: ModelMessageCompletedEvent,
     ) -> None:
-        if not isinstance(model_event.payload, ModelTextPayload):
-            raise LLMProtocolError("completed message has an invalid payload")
         if response.assistant_parts or response.completed_message is not None:
             raise LLMProtocolError(
                 "provider mixed streamed and completed message events"
@@ -188,9 +188,7 @@ class Turn:
         )
         self.session.conversation.append_assistant_message(response.completed_message)
 
-    async def _handle_token_count(self, model_event: ModelEvent) -> None:
-        if not isinstance(model_event.payload, ModelTokenCountPayload):
-            raise LLMProtocolError("token count has an invalid payload")
+    async def _handle_token_count(self, model_event: ModelTokenCountEvent) -> None:
         await self.session.emit(
             RuntimeEventType.TOKEN_COUNT,
             model_event.payload.model_dump(mode="json"),

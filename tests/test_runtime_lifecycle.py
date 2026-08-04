@@ -14,9 +14,11 @@ from codecraft.llm import (
     LLMProviderError,
     LLMProviderRegistry,
     MockProvider,
+    ModelCompletedEvent,
     ModelEvent,
-    ModelEventType,
+    ModelMessageCompletedEvent,
     ModelRequest,
+    ModelToolCallEvent,
     QwenProvider,
 )
 from codecraft.schema.event import RuntimeEventType
@@ -59,11 +61,10 @@ class BlockingThenCompleteProvider(LLMProvider):
                 self.cancelled.set()
                 raise
         else:
-            yield ModelEvent(
-                type=ModelEventType.MESSAGE_COMPLETED,
+            yield ModelMessageCompletedEvent(
                 payload={"text": "continued after interrupt"},
             )
-            yield ModelEvent(type=ModelEventType.COMPLETED)
+            yield ModelCompletedEvent()
 
 
 def test_interrupt_cancels_active_provider_before_starting_next_turn(tmp_path):
@@ -186,28 +187,25 @@ def test_runtime_executes_all_tool_calls_from_one_model_response(tmp_path):
         (tmp_path / "two.txt").write_text("two", encoding="utf-8")
         provider = MockProvider(
             [
-                ModelEvent(
-                    type=ModelEventType.TOOL_CALL,
+                ModelToolCallEvent(
                     payload={
                         "call_id": "call_one",
                         "name": "read_file",
                         "arguments": {"path": "one.txt"},
                     },
                 ),
-                ModelEvent(
-                    type=ModelEventType.TOOL_CALL,
+                ModelToolCallEvent(
                     payload={
                         "call_id": "call_two",
                         "name": "read_file",
                         "arguments": {"path": "two.txt"},
                     },
                 ),
-                ModelEvent(type=ModelEventType.COMPLETED),
-                ModelEvent(
-                    type=ModelEventType.MESSAGE_COMPLETED,
+                ModelCompletedEvent(),
+                ModelMessageCompletedEvent(
                     payload={"text": "read both files"},
                 ),
-                ModelEvent(type=ModelEventType.COMPLETED),
+                ModelCompletedEvent(),
             ]
         )
         config = make_config(tmp_path)
@@ -272,23 +270,21 @@ def test_runtime_rejects_over_budget_tool_batch_without_partial_execution(tmp_pa
         (tmp_path / "one.txt").write_text("one", encoding="utf-8")
         provider = MockProvider(
             [
-                ModelEvent(
-                    type=ModelEventType.TOOL_CALL,
+                ModelToolCallEvent(
                     payload={
                         "call_id": "call_one",
                         "name": "read_file",
                         "arguments": {"path": "one.txt"},
                     },
                 ),
-                ModelEvent(
-                    type=ModelEventType.TOOL_CALL,
+                ModelToolCallEvent(
                     payload={
                         "call_id": "call_two",
                         "name": "read_file",
                         "arguments": {"path": "one.txt"},
                     },
                 ),
-                ModelEvent(type=ModelEventType.COMPLETED),
+                ModelCompletedEvent(),
             ]
         )
         config = make_config(tmp_path).model_copy(update={"max_tool_calls": 1})
@@ -320,12 +316,11 @@ def test_runtime_rejects_over_budget_tool_batch_without_partial_execution(tmp_pa
     "script",
     [
         [
-            ModelEvent(
-                type=ModelEventType.MESSAGE_COMPLETED,
+            ModelMessageCompletedEvent(
                 payload={"text": "unterminated"},
             )
         ],
-        [ModelEvent(type=ModelEventType.COMPLETED)],
+        [ModelCompletedEvent()],
     ],
 )
 def test_runtime_rejects_incomplete_or_empty_model_responses(tmp_path, script):

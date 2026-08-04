@@ -12,7 +12,14 @@ from codecraft.cli.app import app
 from codecraft.core.runtime import AgentRuntime
 from codecraft.core.ids import new_id
 from codecraft.core.session_store import SessionStore
-from codecraft.llm import LLMProviderRegistry, MockProvider, ModelEvent, ModelEventType
+from codecraft.llm import (
+    LLMProviderRegistry,
+    MockProvider,
+    ModelCompletedEvent,
+    ModelMessageCompletedEvent,
+    ModelMessageDeltaEvent,
+    ModelToolCallEvent,
+)
 from codecraft.schema.event import RuntimeEvent, RuntimeEventType
 from codecraft.schema.session import SessionConfig, SessionSource
 from codecraft.tool import BashTool, ToolRegistry
@@ -475,11 +482,10 @@ def test_exec_command_runs_runtime_and_prints_answer(tmp_path, monkeypatch):
                 [
                     MockProvider(
                         [
-                            ModelEvent(
-                                type=ModelEventType.MESSAGE_COMPLETED,
+                            ModelMessageCompletedEvent(
                                 payload={"text": "exec answer"},
                             ),
-                            ModelEvent(type=ModelEventType.COMPLETED),
+                            ModelCompletedEvent(),
                         ]
                     )
                 ]
@@ -525,8 +531,7 @@ def test_exec_command_renders_markdown_assistant_message(tmp_path, monkeypatch):
                 [
                     MockProvider(
                         [
-                            ModelEvent(
-                                type=ModelEventType.MESSAGE_COMPLETED,
+                            ModelMessageCompletedEvent(
                                 payload={
                                     "text": (
                                         "这是一个为 **AI Agent / Agent Engineer / "
@@ -534,7 +539,7 @@ def test_exec_command_renders_markdown_assistant_message(tmp_path, monkeypatch):
                                     ),
                                 },
                             ),
-                            ModelEvent(type=ModelEventType.COMPLETED),
+                            ModelCompletedEvent(),
                         ]
                     )
                 ]
@@ -574,15 +579,13 @@ def test_exec_command_does_not_duplicate_streamed_assistant_message(
                 [
                     MockProvider(
                         [
-                            ModelEvent(
-                                type=ModelEventType.MESSAGE_DELTA,
+                            ModelMessageDeltaEvent(
                                 payload={"text": "hello "},
                             ),
-                            ModelEvent(
-                                type=ModelEventType.MESSAGE_DELTA,
+                            ModelMessageDeltaEvent(
                                 payload={"text": "stream"},
                             ),
-                            ModelEvent(type=ModelEventType.COMPLETED),
+                            ModelCompletedEvent(),
                         ]
                     )
                 ]
@@ -620,12 +623,10 @@ def test_exec_command_renders_streamed_markdown_assistant_message(
                 [
                     MockProvider(
                         [
-                            ModelEvent(
-                                type=ModelEventType.MESSAGE_DELTA,
+                            ModelMessageDeltaEvent(
                                 payload={"text": "### 5. 当前限制 (v1.0 阶段)\n"},
                             ),
-                            ModelEvent(
-                                type=ModelEventType.MESSAGE_DELTA,
+                            ModelMessageDeltaEvent(
                                 payload={
                                     "text": (
                                         "*   没有操作系统级别的沙箱隔离。\n\n"
@@ -634,7 +635,7 @@ def test_exec_command_renders_streamed_markdown_assistant_message(
                                     ),
                                 },
                             ),
-                            ModelEvent(type=ModelEventType.COMPLETED),
+                            ModelCompletedEvent(),
                         ]
                     )
                 ]
@@ -704,11 +705,10 @@ max_parallel_read_tools = 2
                 [
                     MockProvider(
                         [
-                            ModelEvent(
-                                type=ModelEventType.MESSAGE_COMPLETED,
+                            ModelMessageCompletedEvent(
                                 payload={"text": "configured answer"},
                             ),
-                            ModelEvent(type=ModelEventType.COMPLETED),
+                            ModelCompletedEvent(),
                         ]
                     )
                 ]
@@ -788,20 +788,18 @@ def test_exec_command_prints_bash_approval_details(tmp_path, monkeypatch):
                 [
                     MockProvider(
                         [
-                            ModelEvent(
-                                type=ModelEventType.TOOL_CALL,
+                            ModelToolCallEvent(
                                 payload={
                                     "call_id": "call_bash",
                                     "name": "bash",
                                     "arguments": {"command": "python -c 'print(1)'"},
                                 },
                             ),
-                            ModelEvent(type=ModelEventType.COMPLETED),
-                            ModelEvent(
-                                type=ModelEventType.MESSAGE_COMPLETED,
+                            ModelCompletedEvent(),
+                            ModelMessageCompletedEvent(
                                 payload={"text": "Command was not run."},
                             ),
-                            ModelEvent(type=ModelEventType.COMPLETED),
+                            ModelCompletedEvent(),
                         ]
                     )
                 ]

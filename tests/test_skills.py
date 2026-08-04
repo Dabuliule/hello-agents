@@ -9,8 +9,9 @@ from codecraft.core.token_budget import estimate_text_tokens
 from codecraft.llm import (
     LLMProviderRegistry,
     MockProvider,
-    ModelEvent,
-    ModelEventType,
+    ModelCompletedEvent,
+    ModelMessageCompletedEvent,
+    ModelToolCallEvent,
 )
 from codecraft.schema.event import RuntimeEventType
 from codecraft.schema.input import SessionInput
@@ -267,25 +268,22 @@ def test_runtime_progressively_loads_skill_for_current_turn_only(tmp_path):
         )
         provider = MockProvider(
             script=[
-                ModelEvent(
-                    type=ModelEventType.TOOL_CALL,
+                ModelToolCallEvent(
                     payload={
                         "call_id": "call_skill",
                         "name": "load_skill",
                         "arguments": {"name": "frontend-review"},
                     },
                 ),
-                ModelEvent(type=ModelEventType.COMPLETED),
-                ModelEvent(
-                    type=ModelEventType.MESSAGE_COMPLETED,
+                ModelCompletedEvent(),
+                ModelMessageCompletedEvent(
                     payload={"text": "review completed"},
                 ),
-                ModelEvent(type=ModelEventType.COMPLETED),
-                ModelEvent(
-                    type=ModelEventType.MESSAGE_COMPLETED,
+                ModelCompletedEvent(),
+                ModelMessageCompletedEvent(
                     payload={"text": "new turn completed"},
                 ),
-                ModelEvent(type=ModelEventType.COMPLETED),
+                ModelCompletedEvent(),
             ]
         )
         config = make_config(tmp_path)
@@ -372,20 +370,18 @@ def test_skill_activation_survives_tool_result_truncation(tmp_path):
         )
         provider = MockProvider(
             script=[
-                ModelEvent(
-                    type=ModelEventType.TOOL_CALL,
+                ModelToolCallEvent(
                     payload={
                         "call_id": "call_compact",
                         "name": "load_skill",
                         "arguments": {"name": "compact"},
                     },
                 ),
-                ModelEvent(type=ModelEventType.COMPLETED),
-                ModelEvent(
-                    type=ModelEventType.MESSAGE_COMPLETED,
+                ModelCompletedEvent(),
+                ModelMessageCompletedEvent(
                     payload={"text": "loaded after truncation"},
                 ),
-                ModelEvent(type=ModelEventType.COMPLETED),
+                ModelCompletedEvent(),
             ]
         )
         config = make_config(tmp_path).model_copy(
@@ -427,20 +423,18 @@ def test_runtime_returns_stable_error_for_unknown_skill(tmp_path):
         )
         provider = MockProvider(
             script=[
-                ModelEvent(
-                    type=ModelEventType.TOOL_CALL,
+                ModelToolCallEvent(
                     payload={
                         "call_id": "call_missing",
                         "name": "load_skill",
                         "arguments": {"name": "missing"},
                     },
                 ),
-                ModelEvent(type=ModelEventType.COMPLETED),
-                ModelEvent(
-                    type=ModelEventType.MESSAGE_COMPLETED,
+                ModelCompletedEvent(),
+                ModelMessageCompletedEvent(
                     payload={"text": "continued after the failed load"},
                 ),
-                ModelEvent(type=ModelEventType.COMPLETED),
+                ModelCompletedEvent(),
             ]
         )
         config = make_config(tmp_path)
@@ -482,11 +476,10 @@ def test_explicit_skill_mentions_activate_before_the_first_model_request(tmp_pat
         )
         provider = MockProvider(
             script=[
-                ModelEvent(
-                    type=ModelEventType.MESSAGE_COMPLETED,
+                ModelMessageCompletedEvent(
                     payload={"text": "explicit skill applied"},
                 ),
-                ModelEvent(type=ModelEventType.COMPLETED),
+                ModelCompletedEvent(),
             ]
         )
         config = make_config(tmp_path)

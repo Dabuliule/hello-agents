@@ -9,7 +9,14 @@ from codecraft.llm.base import (
     LLMProviderError,
     ModelRequest,
 )
-from codecraft.llm.events import ModelEvent, ModelEventType
+from codecraft.llm.events import (
+    ModelCompletedEvent,
+    ModelEvent,
+    ModelMessageCompletedEvent,
+    ModelMessageDeltaEvent,
+    ModelTokenCountEvent,
+    ModelToolCallEvent,
+)
 from codecraft.llm.messages import (
     ModelMessage,
     ModelTextMessage,
@@ -134,8 +141,7 @@ class ChatCompletionsProvider(OpenAIClientProvider):
             finish_reason = self._stream_finish_reason(finish_reason, choice)
             content = self._stream_content(choice)
             if content:
-                yield ModelEvent(
-                    type=ModelEventType.MESSAGE_DELTA,
+                yield ModelMessageDeltaEvent(
                     payload={"text": content},
                 )
             self._merge_stream_tool_calls(tool_parts, choice)
@@ -151,10 +157,10 @@ class ChatCompletionsProvider(OpenAIClientProvider):
         self._validate_finish_reason(finish_reason, bool(calls))
 
         if latest_usage:
-            yield ModelEvent(type=ModelEventType.TOKEN_COUNT, payload=latest_usage)
+            yield ModelTokenCountEvent(payload=latest_usage)
         for call in calls:
-            yield ModelEvent(type=ModelEventType.TOOL_CALL, payload=call)
-        yield ModelEvent(type=ModelEventType.COMPLETED)
+            yield ModelToolCallEvent(payload=call)
+        yield ModelCompletedEvent()
 
     @staticmethod
     def _stream_choice(chunk: Any) -> Any | None:
@@ -234,18 +240,15 @@ class ChatCompletionsProvider(OpenAIClientProvider):
                 raise LLMProtocolError("chat message content must be text")
             if content:
                 events.append(
-                    ModelEvent(
-                        type=ModelEventType.MESSAGE_COMPLETED,
+                    ModelMessageCompletedEvent(
                         payload={"text": content},
                     )
                 )
         usage = self._chat_usage(response)
         if usage:
-            events.append(ModelEvent(type=ModelEventType.TOKEN_COUNT, payload=usage))
-        events.extend(
-            ModelEvent(type=ModelEventType.TOOL_CALL, payload=call) for call in calls
-        )
-        events.append(ModelEvent(type=ModelEventType.COMPLETED))
+            events.append(ModelTokenCountEvent(payload=usage))
+        events.extend(ModelToolCallEvent(payload=call) for call in calls)
+        events.append(ModelCompletedEvent())
         return events
 
     @staticmethod

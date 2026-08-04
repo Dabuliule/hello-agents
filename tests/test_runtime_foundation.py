@@ -32,12 +32,15 @@ from codecraft.llm import (
     LLMConfigError,
     LLMProvider,
     LLMProviderRegistry,
+    ModelCompletedEvent,
     ModelEvent,
-    ModelEventType,
+    ModelMessageCompletedEvent,
+    ModelMessageDeltaEvent,
     ModelMessage,
     ModelRequest,
     ModelRole,
     ModelTextMessage,
+    ModelToolCallEvent,
     ModelToolCallMessage,
     ModelToolResultMessage,
     MockProvider,
@@ -302,8 +305,7 @@ def test_session_input_rejects_blank_messages_and_unknown_payload_fields():
 
 def test_model_tool_call_event_requires_normalized_identity():
     with pytest.raises(ValueError, match="call_id"):
-        ModelEvent(
-            type=ModelEventType.TOOL_CALL,
+        ModelToolCallEvent(
             payload={"name": "read_file", "arguments": {"path": "README.md"}},
         )
 
@@ -1754,11 +1756,10 @@ def test_llm_provider_stream_contract(tmp_path):
             self,
             request: ModelRequest,
         ) -> AsyncIterator[ModelEvent]:
-            yield ModelEvent(
-                type=ModelEventType.MESSAGE_COMPLETED,
+            yield ModelMessageCompletedEvent(
                 payload={"text": request.messages[0].content},
             )
-            yield ModelEvent(type=ModelEventType.COMPLETED)
+            yield ModelCompletedEvent()
 
     config = make_config(tmp_path)
     context = TurnContext(
@@ -1791,8 +1792,8 @@ def test_llm_provider_stream_contract(tmp_path):
     events = asyncio.run(collect())
 
     assert [event.type for event in events] == [
-        ModelEventType.MESSAGE_COMPLETED,
-        ModelEventType.COMPLETED,
+        "message_completed",
+        "completed",
     ]
     assert events[0].payload.text == "hello"
 
@@ -1873,10 +1874,10 @@ def test_openai_provider_converts_response_to_model_events(tmp_path):
         assert client.responses.kwargs["max_output_tokens"] == 8192
         assert client.responses.kwargs["tools"][0]["name"] == "read_file"
         assert [event.type for event in events] == [
-            ModelEventType.MESSAGE_COMPLETED,
-            ModelEventType.TOKEN_COUNT,
-            ModelEventType.TOOL_CALL,
-            ModelEventType.COMPLETED,
+            "message_completed",
+            "token_count",
+            "tool_call",
+            "completed",
         ]
         assert events[0].payload.text == "done"
         assert events[1].payload.total_tokens == 15
@@ -1957,11 +1958,11 @@ def test_openai_provider_streams_response_deltas_and_tool_calls(tmp_path):
 
         assert client.responses.kwargs["stream"] is True
         assert [event.type for event in events] == [
-            ModelEventType.MESSAGE_DELTA,
-            ModelEventType.MESSAGE_DELTA,
-            ModelEventType.TOKEN_COUNT,
-            ModelEventType.TOOL_CALL,
-            ModelEventType.COMPLETED,
+            "message_delta",
+            "message_delta",
+            "token_count",
+            "tool_call",
+            "completed",
         ]
         assert [event.payload.text for event in events[:2]] == [
             "hello ",
@@ -2110,10 +2111,10 @@ def test_qwen_provider_streams_chat_completion_deltas(tmp_path):
         assert client.chat.completions.kwargs["max_tokens"] == 8192
         assert "tools" not in client.chat.completions.kwargs
         assert [event.type for event in events] == [
-            ModelEventType.MESSAGE_DELTA,
-            ModelEventType.MESSAGE_DELTA,
-            ModelEventType.TOKEN_COUNT,
-            ModelEventType.COMPLETED,
+            "message_delta",
+            "message_delta",
+            "token_count",
+            "completed",
         ]
         assert [event.payload.text for event in events[:2]] == [
             "qwen ",
@@ -2273,8 +2274,8 @@ def test_qwen_provider_streams_chat_completion_tool_calls(tmp_path):
             },
         ]
         assert [event.type for event in events] == [
-            ModelEventType.TOOL_CALL,
-            ModelEventType.COMPLETED,
+            "tool_call",
+            "completed",
         ]
         assert events[0].payload.model_dump(mode="json") == {
             "call_id": "call_read",
@@ -2355,10 +2356,10 @@ def test_deepseek_provider_streams_chat_completion_deltas(tmp_path):
         ]
         assert client.chat.completions.kwargs["stream"] is True
         assert [event.type for event in events] == [
-            ModelEventType.MESSAGE_DELTA,
-            ModelEventType.MESSAGE_DELTA,
-            ModelEventType.TOKEN_COUNT,
-            ModelEventType.COMPLETED,
+            "message_delta",
+            "message_delta",
+            "token_count",
+            "completed",
         ]
         assert [event.payload.text for event in events[:2]] == [
             "deepseek ",
@@ -2752,15 +2753,13 @@ def test_agent_runtime_creates_thread_and_runs_basic_turn(tmp_path):
     async def run_test() -> None:
         provider = MockProvider(
             script=[
-                ModelEvent(
-                    type=ModelEventType.MESSAGE_DELTA,
+                ModelMessageDeltaEvent(
                     payload={"text": "hello "},
                 ),
-                ModelEvent(
-                    type=ModelEventType.MESSAGE_DELTA,
+                ModelMessageDeltaEvent(
                     payload={"text": "runtime"},
                 ),
-                ModelEvent(type=ModelEventType.COMPLETED),
+                ModelCompletedEvent(),
             ]
         )
         config = make_config(tmp_path)
@@ -2801,11 +2800,10 @@ def test_agent_thread_next_event_sees_session_started_and_turn_events(tmp_path):
                 [
                     MockProvider(
                         script=[
-                            ModelEvent(
-                                type=ModelEventType.MESSAGE_COMPLETED,
+                            ModelMessageCompletedEvent(
                                 payload={"text": "done"},
                             ),
-                            ModelEvent(type=ModelEventType.COMPLETED),
+                            ModelCompletedEvent(),
                         ]
                     )
                 ]
@@ -2833,11 +2831,10 @@ def test_runtime_resume_reconstructs_conversation_without_replaying_turn(tmp_pat
         store = SessionStore(config.codecraft_home)
         first_provider = MockProvider(
             script=[
-                ModelEvent(
-                    type=ModelEventType.MESSAGE_COMPLETED,
+                ModelMessageCompletedEvent(
                     payload={"text": "first answer"},
                 ),
-                ModelEvent(type=ModelEventType.COMPLETED),
+                ModelCompletedEvent(),
             ]
         )
         first_runtime = AgentRuntime(
@@ -2851,11 +2848,10 @@ def test_runtime_resume_reconstructs_conversation_without_replaying_turn(tmp_pat
 
         second_provider = MockProvider(
             script=[
-                ModelEvent(
-                    type=ModelEventType.MESSAGE_COMPLETED,
+                ModelMessageCompletedEvent(
                     payload={"text": "second answer"},
                 ),
-                ModelEvent(type=ModelEventType.COMPLETED),
+                ModelCompletedEvent(),
             ]
         )
         second_runtime = AgentRuntime(
@@ -2931,20 +2927,18 @@ def test_runtime_resume_reconstructs_tool_call_and_result_history(tmp_path):
         store = SessionStore(config.codecraft_home)
         first_provider = MockProvider(
             script=[
-                ModelEvent(
-                    type=ModelEventType.TOOL_CALL,
+                ModelToolCallEvent(
                     payload={
                         "call_id": "call_read",
                         "name": "read_file",
                         "arguments": {"path": "note.txt"},
                     },
                 ),
-                ModelEvent(type=ModelEventType.COMPLETED),
-                ModelEvent(
-                    type=ModelEventType.MESSAGE_COMPLETED,
+                ModelCompletedEvent(),
+                ModelMessageCompletedEvent(
                     payload={"text": "first answer"},
                 ),
-                ModelEvent(type=ModelEventType.COMPLETED),
+                ModelCompletedEvent(),
             ]
         )
         first_runtime = AgentRuntime(
@@ -2958,11 +2952,10 @@ def test_runtime_resume_reconstructs_tool_call_and_result_history(tmp_path):
 
         second_provider = MockProvider(
             script=[
-                ModelEvent(
-                    type=ModelEventType.MESSAGE_COMPLETED,
+                ModelMessageCompletedEvent(
                     payload={"text": "second answer"},
                 ),
-                ModelEvent(type=ModelEventType.COMPLETED),
+                ModelCompletedEvent(),
             ]
         )
         second_runtime = AgentRuntime(
@@ -3006,11 +2999,10 @@ def test_runtime_injects_system_instructions_before_conversation(tmp_path):
         )
         provider = MockProvider(
             script=[
-                ModelEvent(
-                    type=ModelEventType.MESSAGE_COMPLETED,
+                ModelMessageCompletedEvent(
                     payload={"text": "answer"},
                 ),
-                ModelEvent(type=ModelEventType.COMPLETED),
+                ModelCompletedEvent(),
             ]
         )
         config = make_config(tmp_path).model_copy(
@@ -3051,20 +3043,18 @@ def test_runtime_loads_scoped_instructions_after_accessing_nested_path(tmp_path)
         (package / "note.txt").write_text("hello", encoding="utf-8")
         provider = MockProvider(
             script=[
-                ModelEvent(
-                    type=ModelEventType.TOOL_CALL,
+                ModelToolCallEvent(
                     payload={
                         "call_id": "call_read",
                         "name": "read_file",
                         "arguments": {"path": "pkg/note.txt"},
                     },
                 ),
-                ModelEvent(type=ModelEventType.COMPLETED),
-                ModelEvent(
-                    type=ModelEventType.MESSAGE_COMPLETED,
+                ModelCompletedEvent(),
+                ModelMessageCompletedEvent(
                     payload={"text": "done"},
                 ),
-                ModelEvent(type=ModelEventType.COMPLETED),
+                ModelCompletedEvent(),
             ]
         )
         config = make_config(tmp_path)
@@ -3138,11 +3128,10 @@ def test_runtime_resume_uses_context_compaction_summary(tmp_path):
         )
         provider = MockProvider(
             script=[
-                ModelEvent(
-                    type=ModelEventType.MESSAGE_COMPLETED,
+                ModelMessageCompletedEvent(
                     payload={"text": "after compact"},
                 ),
-                ModelEvent(type=ModelEventType.COMPLETED),
+                ModelCompletedEvent(),
             ]
         )
         runtime = AgentRuntime(
@@ -3174,20 +3163,18 @@ def test_runtime_allows_final_answer_after_reaching_tool_call_limit(tmp_path):
         (tmp_path / "note.txt").write_text("tool loop works", encoding="utf-8")
         provider = MockProvider(
             script=[
-                ModelEvent(
-                    type=ModelEventType.TOOL_CALL,
+                ModelToolCallEvent(
                     payload={
                         "call_id": "call_read",
                         "name": "read_file",
                         "arguments": {"path": "note.txt"},
                     },
                 ),
-                ModelEvent(type=ModelEventType.COMPLETED),
-                ModelEvent(
-                    type=ModelEventType.MESSAGE_COMPLETED,
+                ModelCompletedEvent(),
+                ModelMessageCompletedEvent(
                     payload={"text": "The file says: tool loop works"},
                 ),
-                ModelEvent(type=ModelEventType.COMPLETED),
+                ModelCompletedEvent(),
             ]
         )
         config = make_config(tmp_path).model_copy(update={"max_tool_calls": 1})
@@ -3233,28 +3220,24 @@ def test_runtime_preserves_streamed_assistant_text_before_tool_call(tmp_path):
         (tmp_path / "note.txt").write_text("tool loop works", encoding="utf-8")
         provider = MockProvider(
             script=[
-                ModelEvent(
-                    type=ModelEventType.MESSAGE_DELTA,
+                ModelMessageDeltaEvent(
                     payload={"text": "I will "},
                 ),
-                ModelEvent(
-                    type=ModelEventType.MESSAGE_DELTA,
+                ModelMessageDeltaEvent(
                     payload={"text": "read that."},
                 ),
-                ModelEvent(
-                    type=ModelEventType.TOOL_CALL,
+                ModelToolCallEvent(
                     payload={
                         "call_id": "call_read",
                         "name": "read_file",
                         "arguments": {"path": "note.txt"},
                     },
                 ),
-                ModelEvent(type=ModelEventType.COMPLETED),
-                ModelEvent(
-                    type=ModelEventType.MESSAGE_COMPLETED,
+                ModelCompletedEvent(),
+                ModelMessageCompletedEvent(
                     payload={"text": "The file says: tool loop works"},
                 ),
-                ModelEvent(type=ModelEventType.COMPLETED),
+                ModelCompletedEvent(),
             ]
         )
         config = make_config(tmp_path)
@@ -3305,20 +3288,18 @@ def test_runtime_records_failed_unknown_tool(tmp_path):
     async def run_test() -> None:
         provider = MockProvider(
             script=[
-                ModelEvent(
-                    type=ModelEventType.TOOL_CALL,
+                ModelToolCallEvent(
                     payload={
                         "call_id": "call_missing",
                         "name": "missing_tool",
                         "arguments": {},
                     },
                 ),
-                ModelEvent(type=ModelEventType.COMPLETED),
-                ModelEvent(
-                    type=ModelEventType.MESSAGE_COMPLETED,
+                ModelCompletedEvent(),
+                ModelMessageCompletedEvent(
                     payload={"text": "Missing tool was reported."},
                 ),
-                ModelEvent(type=ModelEventType.COMPLETED),
+                ModelCompletedEvent(),
             ]
         )
         config = make_config(tmp_path)
@@ -3350,8 +3331,7 @@ def test_runtime_executes_write_file_tool_call(tmp_path):
     async def run_test() -> None:
         provider = MockProvider(
             script=[
-                ModelEvent(
-                    type=ModelEventType.TOOL_CALL,
+                ModelToolCallEvent(
                     payload={
                         "call_id": "call_write",
                         "name": "write_file",
@@ -3361,12 +3341,11 @@ def test_runtime_executes_write_file_tool_call(tmp_path):
                         },
                     },
                 ),
-                ModelEvent(type=ModelEventType.COMPLETED),
-                ModelEvent(
-                    type=ModelEventType.MESSAGE_COMPLETED,
+                ModelCompletedEvent(),
+                ModelMessageCompletedEvent(
                     payload={"text": "Wrote generated.txt"},
                 ),
-                ModelEvent(type=ModelEventType.COMPLETED),
+                ModelCompletedEvent(),
             ]
         )
         config = make_config(tmp_path)
@@ -3416,20 +3395,18 @@ def test_runtime_emits_patch_applied_event(tmp_path):
 """
         provider = MockProvider(
             script=[
-                ModelEvent(
-                    type=ModelEventType.TOOL_CALL,
+                ModelToolCallEvent(
                     payload={
                         "call_id": "call_patch",
                         "name": "apply_patch",
                         "arguments": {"patch": patch},
                     },
                 ),
-                ModelEvent(type=ModelEventType.COMPLETED),
-                ModelEvent(
-                    type=ModelEventType.MESSAGE_COMPLETED,
+                ModelCompletedEvent(),
+                ModelMessageCompletedEvent(
                     payload={"text": "Patched note.txt"},
                 ),
-                ModelEvent(type=ModelEventType.COMPLETED),
+                ModelCompletedEvent(),
             ]
         )
         config = make_config(tmp_path)
@@ -3467,20 +3444,18 @@ def test_runtime_executes_bash_tool_call(tmp_path):
     async def run_test() -> None:
         provider = MockProvider(
             script=[
-                ModelEvent(
-                    type=ModelEventType.TOOL_CALL,
+                ModelToolCallEvent(
                     payload={
                         "call_id": "call_bash",
                         "name": "bash",
                         "arguments": {"command": "pwd"},
                     },
                 ),
-                ModelEvent(type=ModelEventType.COMPLETED),
-                ModelEvent(
-                    type=ModelEventType.MESSAGE_COMPLETED,
+                ModelCompletedEvent(),
+                ModelMessageCompletedEvent(
                     payload={"text": "Ran pwd"},
                 ),
-                ModelEvent(type=ModelEventType.COMPLETED),
+                ModelCompletedEvent(),
             ]
         )
         config = make_config(tmp_path)
@@ -3511,20 +3486,18 @@ def test_tool_runner_emits_approval_events_and_runs_approved_prompt_command(tmp_
     async def run_test() -> None:
         provider = MockProvider(
             script=[
-                ModelEvent(
-                    type=ModelEventType.TOOL_CALL,
+                ModelToolCallEvent(
                     payload={
                         "call_id": "call_bash",
                         "name": "bash",
                         "arguments": {"command": "rm missing.txt"},
                     },
                 ),
-                ModelEvent(type=ModelEventType.COMPLETED),
-                ModelEvent(
-                    type=ModelEventType.MESSAGE_COMPLETED,
+                ModelCompletedEvent(),
+                ModelMessageCompletedEvent(
                     payload={"text": "Approval path exercised"},
                 ),
-                ModelEvent(type=ModelEventType.COMPLETED),
+                ModelCompletedEvent(),
             ]
         )
         reviewer = AutoApprovalReviewer(approved=True, reason="test approved")
@@ -3568,20 +3541,18 @@ def test_tool_runner_denies_rejected_workspace_write(tmp_path):
     async def run_test() -> None:
         provider = MockProvider(
             script=[
-                ModelEvent(
-                    type=ModelEventType.TOOL_CALL,
+                ModelToolCallEvent(
                     payload={
                         "call_id": "call_write",
                         "name": "write_file",
                         "arguments": {"path": "blocked.txt", "content": "nope"},
                     },
                 ),
-                ModelEvent(type=ModelEventType.COMPLETED),
-                ModelEvent(
-                    type=ModelEventType.MESSAGE_COMPLETED,
+                ModelCompletedEvent(),
+                ModelMessageCompletedEvent(
                     payload={"text": "Write was denied"},
                 ),
-                ModelEvent(type=ModelEventType.COMPLETED),
+                ModelCompletedEvent(),
             ]
         )
         reviewer = AutoApprovalReviewer(approved=False, reason="test denied")
@@ -3616,20 +3587,18 @@ def test_thread_approval_decision_allows_pending_tool_call(tmp_path):
         reviewer = ThreadApprovalReviewer()
         provider = MockProvider(
             script=[
-                ModelEvent(
-                    type=ModelEventType.TOOL_CALL,
+                ModelToolCallEvent(
                     payload={
                         "call_id": "call_write",
                         "name": "write_file",
                         "arguments": {"path": "approved.txt", "content": "yes"},
                     },
                 ),
-                ModelEvent(type=ModelEventType.COMPLETED),
-                ModelEvent(
-                    type=ModelEventType.MESSAGE_COMPLETED,
+                ModelCompletedEvent(),
+                ModelMessageCompletedEvent(
                     payload={"text": "Write approved"},
                 ),
-                ModelEvent(type=ModelEventType.COMPLETED),
+                ModelCompletedEvent(),
             ]
         )
         config = make_config(tmp_path).model_copy(
@@ -3682,20 +3651,18 @@ def test_thread_approval_decision_denies_pending_tool_call(tmp_path):
         reviewer = ThreadApprovalReviewer()
         provider = MockProvider(
             script=[
-                ModelEvent(
-                    type=ModelEventType.TOOL_CALL,
+                ModelToolCallEvent(
                     payload={
                         "call_id": "call_write",
                         "name": "write_file",
                         "arguments": {"path": "denied.txt", "content": "no"},
                     },
                 ),
-                ModelEvent(type=ModelEventType.COMPLETED),
-                ModelEvent(
-                    type=ModelEventType.MESSAGE_COMPLETED,
+                ModelCompletedEvent(),
+                ModelMessageCompletedEvent(
                     payload={"text": "Write denied"},
                 ),
-                ModelEvent(type=ModelEventType.COMPLETED),
+                ModelCompletedEvent(),
             ]
         )
         config = make_config(tmp_path).model_copy(

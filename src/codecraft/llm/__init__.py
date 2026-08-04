@@ -5,7 +5,14 @@ from codecraft.llm.base import (
     LLMProviderError,
     ModelRequest,
 )
-from codecraft.llm.events import ModelEvent, ModelEventType
+from codecraft.llm.events import (
+    ModelCompletedEvent,
+    ModelEvent,
+    ModelMessageCompletedEvent,
+    ModelMessageDeltaEvent,
+    ModelTokenCountEvent,
+    ModelToolCallEvent,
+)
 from codecraft.llm.messages import (
     ModelMessage,
     ModelRole,
@@ -28,13 +35,17 @@ __all__ = [
     "LLMProviderError",
     "LLMProtocolError",
     "DeepSeekProvider",
+    "ModelCompletedEvent",
     "ModelEvent",
-    "ModelEventType",
+    "ModelMessageCompletedEvent",
+    "ModelMessageDeltaEvent",
     "ModelMessage",
     "ModelRole",
     "ModelRequest",
     "ModelTextMessage",
+    "ModelTokenCountEvent",
     "ModelToolCallMessage",
+    "ModelToolCallEvent",
     "ModelToolResultMessage",
     "MockProvider",
     "OpenAIProvider",

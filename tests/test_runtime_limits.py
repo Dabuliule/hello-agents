@@ -25,9 +25,11 @@ from codecraft.llm import (
     LLMProvider,
     LLMProviderRegistry,
     MockProvider,
+    ModelCompletedEvent,
     ModelEvent,
-    ModelEventType,
+    ModelMessageCompletedEvent,
     ModelRequest,
+    ModelToolCallEvent,
     ModelToolResultMessage,
 )
 from codecraft.schema.event import RuntimeEventType
@@ -211,16 +213,14 @@ def test_runtime_compacts_context_and_reconstructs_exact_snapshot(tmp_path):
     async def run_test() -> None:
         provider = MockProvider(
             [
-                ModelEvent(
-                    type=ModelEventType.MESSAGE_COMPLETED,
+                ModelMessageCompletedEvent(
                     payload={"text": "detail " * 3000},
                 ),
-                ModelEvent(type=ModelEventType.COMPLETED),
-                ModelEvent(
-                    type=ModelEventType.MESSAGE_COMPLETED,
+                ModelCompletedEvent(),
+                ModelMessageCompletedEvent(
                     payload={"text": "second answer"},
                 ),
-                ModelEvent(type=ModelEventType.COMPLETED),
+                ModelCompletedEvent(),
             ]
         )
         config = make_config(
@@ -292,28 +292,25 @@ def test_read_only_tool_batch_runs_concurrently_and_preserves_result_order(tmp_p
         tool = ConcurrentReadTool()
         provider = MockProvider(
             [
-                ModelEvent(
-                    type=ModelEventType.TOOL_CALL,
+                ModelToolCallEvent(
                     payload={
                         "call_id": "call_first",
                         "name": tool.name,
                         "arguments": {"value": "first"},
                     },
                 ),
-                ModelEvent(
-                    type=ModelEventType.TOOL_CALL,
+                ModelToolCallEvent(
                     payload={
                         "call_id": "call_second",
                         "name": tool.name,
                         "arguments": {"value": "second"},
                     },
                 ),
-                ModelEvent(type=ModelEventType.COMPLETED),
-                ModelEvent(
-                    type=ModelEventType.MESSAGE_COMPLETED,
+                ModelCompletedEvent(),
+                ModelMessageCompletedEvent(
                     payload={"text": "done"},
                 ),
-                ModelEvent(type=ModelEventType.COMPLETED),
+                ModelCompletedEvent(),
             ]
         )
         config = make_config(tmp_path, max_parallel_read_tools=2)
@@ -438,7 +435,7 @@ class HangingProvider(LLMProvider):
     ) -> AsyncIterator[ModelEvent]:
         await asyncio.sleep(2)
         if False:
-            yield ModelEvent(type=ModelEventType.COMPLETED)
+            yield ModelCompletedEvent()
 
 
 class RaisesTimeoutProvider(HangingProvider):
@@ -450,7 +447,7 @@ class RaisesTimeoutProvider(HangingProvider):
     ) -> AsyncIterator[ModelEvent]:
         raise TimeoutError("provider-owned timeout")
         if False:
-            yield ModelEvent(type=ModelEventType.COMPLETED)
+            yield ModelCompletedEvent()
 
 
 def test_session_enforces_turn_timeout_without_runtime_error(tmp_path):
@@ -593,20 +590,18 @@ def test_runtime_caps_tool_results_to_remaining_model_context(tmp_path):
     async def run_test() -> None:
         provider = MockProvider(
             [
-                ModelEvent(
-                    type=ModelEventType.TOOL_CALL,
+                ModelToolCallEvent(
                     payload={
                         "call_id": "call_large",
                         "name": "large_content",
                         "arguments": {"value": "unused"},
                     },
                 ),
-                ModelEvent(type=ModelEventType.COMPLETED),
-                ModelEvent(
-                    type=ModelEventType.MESSAGE_COMPLETED,
+                ModelCompletedEvent(),
+                ModelMessageCompletedEvent(
                     payload={"text": "done"},
                 ),
-                ModelEvent(type=ModelEventType.COMPLETED),
+                ModelCompletedEvent(),
             ]
         )
         config = make_config(

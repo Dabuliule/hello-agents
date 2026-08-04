@@ -4,7 +4,12 @@ import asyncio
 from collections.abc import AsyncIterator
 
 from codecraft.llm.base import LLMProtocolError, LLMProvider, ModelRequest
-from codecraft.llm.events import ModelEvent, ModelEventType
+from codecraft.llm.events import (
+    ModelCompletedEvent,
+    ModelEvent,
+    ModelMessageCompletedEvent,
+    ModelMessageDeltaEvent,
+)
 
 
 class MockProvider(LLMProvider):
@@ -43,7 +48,7 @@ class MockProvider(LLMProvider):
         pending: list[ModelEvent] = []
         for event in script:
             pending.append(event)
-            if event.type == ModelEventType.COMPLETED:
+            if isinstance(event, ModelCompletedEvent):
                 response = tuple(pending)
                 MockProvider._validate_response(response)
                 responses.append(response)
@@ -54,16 +59,14 @@ class MockProvider(LLMProvider):
 
     @staticmethod
     def _validate_response(response: tuple[ModelEvent, ...]) -> None:
-        if not response or response[-1].type != ModelEventType.COMPLETED:
+        if not response or not isinstance(response[-1], ModelCompletedEvent):
             raise ValueError("each mock response must end with completed")
-        if sum(event.type == ModelEventType.COMPLETED for event in response) != 1:
+        if sum(isinstance(event, ModelCompletedEvent) for event in response) != 1:
             raise ValueError("each mock response must contain one completed event")
 
-        event_types = {event.type for event in response}
-        if {
-            ModelEventType.MESSAGE_DELTA,
-            ModelEventType.MESSAGE_COMPLETED,
-        } <= event_types:
+        if any(isinstance(event, ModelMessageDeltaEvent) for event in response) and any(
+            isinstance(event, ModelMessageCompletedEvent) for event in response
+        ):
             raise ValueError(
                 "a mock response cannot mix message deltas and a completed message"
             )

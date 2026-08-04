@@ -10,7 +10,14 @@ from codecraft.llm.base import (
     LLMProviderError,
     ModelRequest,
 )
-from codecraft.llm.events import ModelEvent, ModelEventType
+from codecraft.llm.events import (
+    ModelCompletedEvent,
+    ModelEvent,
+    ModelMessageCompletedEvent,
+    ModelMessageDeltaEvent,
+    ModelTokenCountEvent,
+    ModelToolCallEvent,
+)
 from codecraft.llm.messages import (
     ModelMessage,
     ModelTextMessage,
@@ -96,19 +103,17 @@ class ResponsesProvider(OpenAIClientProvider):
         text = self._response_text(response)
         if text:
             events.append(
-                ModelEvent(
-                    type=ModelEventType.MESSAGE_COMPLETED,
+                ModelMessageCompletedEvent(
                     payload={"text": text},
                 )
             )
         usage = self._usage(response)
         if usage:
-            events.append(ModelEvent(type=ModelEventType.TOKEN_COUNT, payload=usage))
+            events.append(ModelTokenCountEvent(payload=usage))
         events.extend(
-            ModelEvent(type=ModelEventType.TOOL_CALL, payload=call)
-            for call in self._tool_calls(response)
+            ModelToolCallEvent(payload=call) for call in self._tool_calls(response)
         )
-        events.append(ModelEvent(type=ModelEventType.COMPLETED))
+        events.append(ModelCompletedEvent())
         return events
 
     async def _events_from_stream(self, stream: Any) -> AsyncIterator[ModelEvent]:
@@ -144,8 +149,7 @@ class ResponsesProvider(OpenAIClientProvider):
         if not isinstance(delta, str) or not delta:
             raise LLMProtocolError("response text delta must be non-empty")
         state.emitted_text += delta
-        return ModelEvent(
-            type=ModelEventType.MESSAGE_DELTA,
+        return ModelMessageDeltaEvent(
             payload={"text": delta},
         )
 
@@ -179,8 +183,7 @@ class ResponsesProvider(OpenAIClientProvider):
             suffix = final_text[len(state.emitted_text) :]
             if suffix:
                 state.emitted_text += suffix
-                yield ModelEvent(
-                    type=ModelEventType.MESSAGE_DELTA,
+                yield ModelMessageDeltaEvent(
                     payload={"text": suffix},
                 )
 
@@ -188,10 +191,10 @@ class ResponsesProvider(OpenAIClientProvider):
             self._merge_tool_call(state.pending_calls, call)
         usage = self._usage(response)
         if usage:
-            yield ModelEvent(type=ModelEventType.TOKEN_COUNT, payload=usage)
+            yield ModelTokenCountEvent(payload=usage)
         for call in state.pending_calls.values():
-            yield ModelEvent(type=ModelEventType.TOOL_CALL, payload=call)
-        yield ModelEvent(type=ModelEventType.COMPLETED)
+            yield ModelToolCallEvent(payload=call)
+        yield ModelCompletedEvent()
 
     @staticmethod
     def _raise_for_stream_failure(raw_event: Any, event_type: Any) -> None:
