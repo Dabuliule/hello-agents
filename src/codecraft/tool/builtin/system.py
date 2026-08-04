@@ -82,6 +82,10 @@ class BashTool(BaseTool):
                     sandbox_mode=context.context.sandbox_mode,
                     network_access=context.context.network_access,
                     timeout_seconds=bash_args.timeout_seconds,
+                    max_output_bytes=min(
+                        context.context.max_tool_output_chars * 4,
+                        40_000_000,
+                    ),
                     env_allowlist=tuple(context.context.sandbox_env_allowlist),
                     allow_workspace_path_entries=context.approved,
                 )
@@ -108,6 +112,8 @@ class BashTool(BaseTool):
         stderr, stderr_truncated = self._truncate(
             stderr, context.context.max_tool_output_chars
         )
+        stdout_truncated = execution.stdout_truncated or stdout_truncated
+        stderr_truncated = execution.stderr_truncated or stderr_truncated
         exit_code = execution.exit_code
         success = (
             exit_code == 0

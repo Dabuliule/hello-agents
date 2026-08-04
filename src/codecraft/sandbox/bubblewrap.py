@@ -48,14 +48,18 @@ class BubblewrapSandboxBackend(SandboxBackend):
                 raise SandboxBackendError(
                     f"could not start bubblewrap sandbox: {exc}"
                 ) from exc
-            stdout, stderr, timed_out = await communicate(
-                process, timeout_seconds=request.timeout_seconds
+            captured = await communicate(
+                process,
+                timeout_seconds=request.timeout_seconds,
+                max_output_bytes=request.max_output_bytes,
             )
         return SandboxExecutionResult(
             exit_code=process.returncode,
-            stdout=stdout,
-            stderr=stderr,
-            timed_out=timed_out,
+            stdout=captured.stdout,
+            stderr=captured.stderr,
+            timed_out=captured.timed_out,
+            stdout_truncated=captured.stdout_truncated,
+            stderr_truncated=captured.stderr_truncated,
             metadata={
                 "backend": self.name,
                 "isolation": self.isolation,

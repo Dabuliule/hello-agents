@@ -128,6 +128,8 @@ nested directory, but cannot use that option to widen the writable boundary.
 
 The default local backend executes approved commands on the host and therefore remains an application-level boundary. The optional Docker backend creates an ephemeral, resource-limited container with a read-only root, bounded tmpfs, dropped capabilities, `no-new-privileges`, explicit environment forwarding, one workspace bind mount, and optional network removal.
 
+Command classification follows known indirection such as environment assignments, `env`, `command`, `exec`, and shell `-c` with bounded recursion; wrappers never inherit the automatic-safe classification of an inner command. Shared process execution drains stdout and stderr concurrently, retains a fixed per-stream byte budget, and performs bounded process-group cleanup on timeout or cancellation. Automatically allowed calls also filter `PATH` by both lexical and resolved workspace containment.
+
 This boundary is intentionally precise: Docker isolates bash processes, while a workspace mounted read-write can still be changed by those processes. Built-in file tools remain host-side behind `WorkspaceGuard`. Approval and command policy are still required because process isolation is not intent validation.
 
 ## MCP Extends The Tool System

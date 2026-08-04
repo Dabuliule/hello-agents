@@ -4,6 +4,8 @@ import asyncio
 from datetime import UTC, datetime
 import os
 from pathlib import Path
+import shlex
+import sys
 
 import pytest
 
@@ -29,10 +31,30 @@ from codecraft.sandbox import (
     UnavailableSandboxBackend,
     build_sandbox_backend,
 )
+from codecraft.sandbox._execution import CapturedProcessOutput
 from codecraft.schema.tool import ToolCall
 from codecraft.schema.session import SessionSource
 from codecraft.tool import ToolContext
 from codecraft.tool.builtin.system import BashTool
+
+
+class _CompletedProcess:
+    pid = None
+
+    def __init__(self, returncode: int, stdout: bytes, stderr: bytes) -> None:
+        self.returncode = returncode
+        self.stdout = asyncio.StreamReader()
+        self.stdout.feed_data(stdout)
+        self.stdout.feed_eof()
+        self.stderr = asyncio.StreamReader()
+        self.stderr.feed_data(stderr)
+        self.stderr.feed_eof()
+
+    async def wait(self) -> int:
+        return self.returncode
+
+    def kill(self) -> None:
+        raise AssertionError("completed process should not be killed")
 
 
 def _request(tmp_path, **updates) -> SandboxExecutionRequest:
@@ -143,6 +165,10 @@ def test_docker_command_uses_read_only_mount_and_rejects_unsafe_inputs(tmp_path)
             _request(tmp_path, cwd=tmp_path.parent),
             container_name="codecraft-escaped",
         )
+    with pytest.raises(ValueError, match="output limit"):
+        _request(tmp_path, max_output_bytes=0)
+    with pytest.raises(ValueError, match="timeout"):
+        _request(tmp_path, timeout_seconds=0)
 
 
 def test_docker_command_mounts_single_workspace(tmp_path):
@@ -159,18 +185,9 @@ def test_docker_command_mounts_single_workspace(tmp_path):
 def test_docker_backend_executes_without_host_shell(tmp_path, monkeypatch):
     captured = []
 
-    class FakeProcess:
-        returncode = 0
-
-        async def communicate(self):
-            return b"Python 3.11\n", b""
-
-        def kill(self):
-            raise AssertionError("successful process should not be killed")
-
     async def fake_create_subprocess_exec(*arguments, **kwargs):
         captured.append((arguments, kwargs))
-        return FakeProcess()
+        return _CompletedProcess(0, b"Python 3.11\n", b"")
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
     backend = DockerSandboxBackend(DockerSandboxConfig(image="sandbox:test"))
@@ -198,17 +215,8 @@ def test_docker_backend_reports_missing_executable(tmp_path, monkeypatch):
 
 
 def test_docker_backend_classifies_engine_failure(tmp_path, monkeypatch):
-    class FakeProcess:
-        returncode = 125
-
-        async def communicate(self):
-            return b"", b"Unable to find image locally\n"
-
-        def kill(self):
-            raise AssertionError("completed process should not be killed")
-
     async def fake_create_subprocess_exec(*arguments, **kwargs):
-        return FakeProcess()
+        return _CompletedProcess(125, b"", b"Unable to find image locally\n")
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
     backend = DockerSandboxBackend()
@@ -221,18 +229,9 @@ def test_docker_backend_classifies_engine_failure(tmp_path, monkeypatch):
 def test_process_backend_is_explicit_and_filters_environment(tmp_path, monkeypatch):
     captured = []
 
-    class FakeProcess:
-        returncode = 125
-
-        async def communicate(self):
-            return b"", b"command returned 125\n"
-
-        def kill(self):
-            raise AssertionError("completed process should not be killed")
-
     async def fake_create_subprocess_shell(*arguments, **kwargs):
         captured.append((arguments, kwargs))
-        return FakeProcess()
+        return _CompletedProcess(125, b"", b"command returned 125\n")
 
     monkeypatch.setattr(
         asyncio, "create_subprocess_shell", fake_create_subprocess_shell
@@ -260,25 +259,29 @@ def test_process_backend_removes_workspace_and_relative_path_entries(
 ):
     captured = []
 
-    class FakeProcess:
-        returncode = 0
-
-        async def communicate(self):
-            return b"", b""
-
-        def kill(self):
-            raise AssertionError("completed process should not be killed")
-
     async def fake_create_subprocess_shell(*arguments, **kwargs):
         captured.append((arguments, kwargs))
-        return FakeProcess()
+        return _CompletedProcess(0, b"", b"")
 
-    workspace_bin = tmp_path / "bin"
-    workspace_bin.mkdir()
+    workspace = tmp_path / "workspace"
+    workspace_bin = workspace / "bin"
+    external_bin = tmp_path / "external-bin"
+    workspace_bin.mkdir(parents=True)
+    external_bin.mkdir()
+    workspace_link = workspace / "external-link"
+    external_link = tmp_path / "workspace-link"
+    try:
+        workspace_link.symlink_to(external_bin, target_is_directory=True)
+        external_link.symlink_to(workspace_bin, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"directory symlinks are unavailable: {exc}")
     monkeypatch.setenv(
         "PATH",
-        f"{tmp_path}{os.pathsep}relative"
+        f"{workspace}{os.pathsep}relative"
         f"{os.pathsep}{workspace_bin}"
+        f"{os.pathsep}{workspace_link}"
+        f"{os.pathsep}{external_link}"
+        f"{os.pathsep}{external_bin}"
         f"{os.pathsep}/usr/bin",
     )
     monkeypatch.setattr(
@@ -287,19 +290,90 @@ def test_process_backend_removes_workspace_and_relative_path_entries(
         fake_create_subprocess_shell,
     )
 
-    asyncio.run(ProcessSandboxBackend().execute(_request(tmp_path)))
+    asyncio.run(ProcessSandboxBackend().execute(_request(workspace)))
 
     _, kwargs = captured[0]
-    assert kwargs["env"]["PATH"] == "/usr/bin"
+    assert kwargs["env"]["PATH"] == f"{external_bin}{os.pathsep}/usr/bin"
 
     asyncio.run(
         ProcessSandboxBackend().execute(
-            _request(tmp_path, allow_workspace_path_entries=True)
+            _request(workspace, allow_workspace_path_entries=True)
         )
     )
 
     _, approved_kwargs = captured[1]
     assert approved_kwargs["env"]["PATH"] == os.environ["PATH"]
+
+
+def test_process_backend_bounds_both_output_streams(tmp_path):
+    script = "import os; os.write(1, b'o' * 200_000); os.write(2, b'e' * 200_000)"
+    command = f"{shlex.quote(sys.executable)} -c {shlex.quote(script)}"
+
+    result = asyncio.run(
+        ProcessSandboxBackend().execute(
+            _request(tmp_path, command=command, max_output_bytes=1024)
+        )
+    )
+
+    assert result.exit_code == 0
+    assert result.stdout == b"o" * 1024
+    assert result.stderr == b"e" * 1024
+    assert result.stdout_truncated is True
+    assert result.stderr_truncated is True
+
+
+def test_process_backend_keeps_timed_out_output_bounded(tmp_path):
+    script = (
+        "import os\nwhile True:\n os.write(1, b'o' * 8192)\n os.write(2, b'e' * 8192)"
+    )
+    command = f"{shlex.quote(sys.executable)} -c {shlex.quote(script)}"
+
+    result = asyncio.run(
+        ProcessSandboxBackend().execute(
+            _request(
+                tmp_path,
+                command=command,
+                timeout_seconds=1,
+                max_output_bytes=1024,
+            )
+        )
+    )
+
+    assert result.timed_out is True
+    assert len(result.stdout) <= 1024
+    assert len(result.stderr) <= 1024
+    assert result.stdout_truncated is True
+    assert result.stderr_truncated is True
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process-group assertion")
+def test_process_backend_reaps_command_when_caller_is_cancelled(tmp_path):
+    async def run_test() -> None:
+        pid_path = tmp_path / "command.pid"
+        script = (
+            "import os, pathlib, time; "
+            f"pathlib.Path({str(pid_path)!r}).write_text(str(os.getpid())); "
+            "time.sleep(60)"
+        )
+        command = f"exec {shlex.quote(sys.executable)} -c {shlex.quote(script)}"
+        execution = asyncio.create_task(
+            ProcessSandboxBackend().execute(_request(tmp_path, command=command))
+        )
+        for _ in range(100):
+            if pid_path.exists():
+                break
+            await asyncio.sleep(0.01)
+        assert pid_path.exists()
+        pid = int(pid_path.read_text(encoding="utf-8"))
+
+        execution.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await execution
+
+        with pytest.raises(ProcessLookupError):
+            os.kill(pid, 0)
+
+    asyncio.run(run_test())
 
 
 def test_seatbelt_command_enforces_workspace_write_and_network_policy(tmp_path):
@@ -391,8 +465,14 @@ def test_docker_backend_force_removes_timed_out_container(tmp_path, monkeypatch)
     async def fake_create_subprocess_exec(*arguments, **kwargs):
         return FakeProcess()
 
-    async def fake_communicate(process, *, timeout_seconds):
-        return b"partial", b"", True
+    async def fake_communicate(process, *, timeout_seconds, max_output_bytes):
+        return CapturedProcessOutput(
+            stdout=b"partial",
+            stderr=b"",
+            stdout_truncated=False,
+            stderr_truncated=False,
+            timed_out=True,
+        )
 
     removed = []
 
@@ -412,6 +492,125 @@ def test_docker_backend_force_removes_timed_out_container(tmp_path, monkeypatch)
     assert removed[0].startswith("codecraft-")
 
 
+def test_docker_backend_force_removes_container_when_cancelled(tmp_path, monkeypatch):
+    class FakeProcess:
+        returncode = None
+
+    async def fake_create_subprocess_exec(*arguments, **kwargs):
+        return FakeProcess()
+
+    async def cancelled_communicate(process, **kwargs):
+        raise asyncio.CancelledError
+
+    removed = []
+
+    async def fake_remove(container_name):
+        removed.append(container_name)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+    monkeypatch.setattr(docker_module, "communicate", cancelled_communicate)
+    backend = DockerSandboxBackend()
+    monkeypatch.setattr(backend, "_force_remove", fake_remove)
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(backend.execute(_request(tmp_path)))
+
+    assert len(removed) == 1
+    assert removed[0].startswith("codecraft-")
+
+
+def test_docker_backend_cleans_up_when_process_start_is_cancelled(
+    tmp_path, monkeypatch
+):
+    async def cancelled_create_subprocess_exec(*arguments, **kwargs):
+        raise asyncio.CancelledError
+
+    removed = []
+
+    async def fake_remove(container_name):
+        removed.append(container_name)
+
+    monkeypatch.setattr(
+        asyncio, "create_subprocess_exec", cancelled_create_subprocess_exec
+    )
+    backend = DockerSandboxBackend()
+    monkeypatch.setattr(backend, "_force_remove", fake_remove)
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(backend.execute(_request(tmp_path)))
+
+    assert len(removed) == 1
+    assert removed[0].startswith("codecraft-")
+
+
+def test_docker_force_remove_kills_and_reaps_stuck_cleanup(monkeypatch):
+    processes = []
+
+    class BlockingCleanupProcess:
+        pid = None
+        returncode = None
+
+        def __init__(self):
+            self.released = asyncio.Event()
+            self.killed = False
+            self.waits = 0
+
+        async def wait(self):
+            self.waits += 1
+            await self.released.wait()
+            return self.returncode
+
+        def kill(self):
+            self.killed = True
+            self.returncode = -9
+            self.released.set()
+
+    async def fake_create_subprocess_exec(*arguments, **kwargs):
+        process = BlockingCleanupProcess()
+        processes.append(process)
+        return process
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+    monkeypatch.setattr(docker_module, "_DOCKER_REMOVE_TIMEOUT_SECONDS", 0.01)
+
+    asyncio.run(DockerSandboxBackend()._force_remove("codecraft-stuck"))
+
+    assert len(processes) == 1
+    assert processes[0].killed is True
+    assert processes[0].waits == 2
+
+
+def test_docker_force_remove_finishes_before_propagating_cancellation(monkeypatch):
+    async def run_test():
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        completed = asyncio.Event()
+        backend = DockerSandboxBackend()
+
+        async def fake_remove(container_name):
+            entered.set()
+            try:
+                await release.wait()
+            finally:
+                completed.set()
+
+        monkeypatch.setattr(backend, "_force_remove", fake_remove)
+        removal = asyncio.create_task(
+            backend._force_remove_resiliently("codecraft-cancelled")
+        )
+        await entered.wait()
+        removal.cancel()
+        await asyncio.sleep(0)
+
+        assert not removal.done()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await removal
+        assert completed.is_set()
+
+    asyncio.run(run_test())
+
+
 def test_bash_tool_delegates_execution_to_backend(tmp_path):
     class RecordingBackend(SandboxBackend):
         name = "recording"
@@ -426,6 +625,7 @@ def test_bash_tool_delegates_execution_to_backend(tmp_path):
                 stdout=b"Python 3.11\n",
                 stderr=b"",
                 timed_out=False,
+                stdout_truncated=True,
                 metadata={"backend": self.name},
             )
 
@@ -441,8 +641,10 @@ def test_bash_tool_delegates_execution_to_backend(tmp_path):
 
     assert result.success is True
     assert result.content == "Python 3.11\n"
+    assert result.data["stdout_truncated"] is True
     assert result.metadata["backend"] == "recording"
     assert backend.requests[0].workspace_root == tmp_path
+    assert backend.requests[0].max_output_bytes == 320_000
     assert backend.requests[0].allow_workspace_path_entries is False
 
     asyncio.run(

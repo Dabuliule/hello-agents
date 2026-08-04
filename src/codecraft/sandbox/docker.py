@@ -6,8 +6,10 @@ from uuid import uuid4
 
 from pydantic import BaseModel, Field, field_validator
 
+from codecraft.core.async_utils import finish_task_before_cancelling
 from codecraft.sandbox._execution import (
     communicate,
+    kill_process_group,
     process_group_options,
     validated_environment_names,
     workspace_path,
@@ -20,6 +22,9 @@ from codecraft.sandbox.backend import (
     SandboxExecutionResult,
 )
 from codecraft.sandbox.policy import SandboxMode
+
+_DOCKER_REMOVE_TIMEOUT_SECONDS = 5.0
+_DOCKER_PROCESS_GRACE_SECONDS = 1.0
 
 
 class DockerSandboxConfig(BaseModel):
@@ -60,6 +65,9 @@ class DockerSandboxBackend(SandboxBackend):
                 stderr=asyncio.subprocess.PIPE,
                 **process_group_options(),
             )
+        except asyncio.CancelledError:
+            await self._force_remove_resiliently(container_name)
+            raise
         except FileNotFoundError as exc:
             raise SandboxBackendError(
                 f"Docker executable not found: {self.executable}"
@@ -67,21 +75,29 @@ class DockerSandboxBackend(SandboxBackend):
         except OSError as exc:
             raise SandboxBackendError(f"could not start Docker sandbox: {exc}") from exc
 
-        stdout, stderr, timed_out = await communicate(
-            process, timeout_seconds=request.timeout_seconds
-        )
-        if timed_out:
-            await self._force_remove(container_name)
+        try:
+            captured = await communicate(
+                process,
+                timeout_seconds=request.timeout_seconds,
+                max_output_bytes=request.max_output_bytes,
+            )
+        except BaseException:
+            await self._force_remove_resiliently(container_name)
+            raise
+        if captured.timed_out:
+            await self._force_remove_resiliently(container_name)
         backend_error = (
-            stderr.decode("utf-8", errors="replace").strip()
-            if process.returncode == 125 and not timed_out
+            captured.stderr.decode("utf-8", errors="replace").strip()
+            if process.returncode == 125 and not captured.timed_out
             else None
         )
         return SandboxExecutionResult(
             exit_code=process.returncode,
-            stdout=stdout,
-            stderr=stderr,
-            timed_out=timed_out,
+            stdout=captured.stdout,
+            stderr=captured.stderr,
+            timed_out=captured.timed_out,
+            stdout_truncated=captured.stdout_truncated,
+            stderr_truncated=captured.stderr_truncated,
             backend_error=backend_error,
             metadata={
                 "backend": self.name,
@@ -156,10 +172,42 @@ class DockerSandboxBackend(SandboxBackend):
                 container_name,
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
+                **process_group_options(),
             )
-            await asyncio.wait_for(cleanup.wait(), timeout=5)
-        except (OSError, asyncio.TimeoutError):
+        except OSError:
             return
+        try:
+            async with asyncio.timeout(_DOCKER_REMOVE_TIMEOUT_SECONDS):
+                await cleanup.wait()
+        except TimeoutError:
+            await _terminate_cleanup_process(cleanup)
+        except asyncio.CancelledError:
+            try:
+                await _terminate_cleanup_process(cleanup)
+            except asyncio.CancelledError:
+                pass
+            raise
+
+    async def _force_remove_resiliently(self, container_name: str) -> None:
+        cleanup = asyncio.create_task(self._force_remove(container_name))
+        try:
+            await finish_task_before_cancelling(cleanup)
+        except Exception:
+            pass
+
+
+async def _terminate_cleanup_process(process: asyncio.subprocess.Process) -> None:
+    kill_process_group(process)
+    waiter = asyncio.create_task(_bounded_process_wait(process))
+    await finish_task_before_cancelling(waiter)
+
+
+async def _bounded_process_wait(process: asyncio.subprocess.Process) -> None:
+    try:
+        async with asyncio.timeout(_DOCKER_PROCESS_GRACE_SECONDS):
+            await process.wait()
+    except TimeoutError:
+        return
 
 
 def _workspace_mount(

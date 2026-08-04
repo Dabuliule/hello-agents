@@ -454,6 +454,8 @@ The default backend requires no Docker daemon:
 
 Native backends allow reads from the host, restrict writes to the workspace in `workspace_write`, provide a private temporary directory, deny network system calls when `network_access=false`, and apply the boundary to the complete process tree. Bash receives a small safe environment plus names explicitly listed in `sandbox.env_allowlist`; model API keys are not inherited by default.
 
+Automatically allowed Bash calls remove relative, lexical workspace, and symlink-resolved workspace entries from `PATH`; explicitly approved calls preserve the configured path. Stdout and stderr are drained concurrently but retained under independent byte limits derived from the turn output budget. Truncation is reported even when the process produced more data than CodeCraft kept in memory.
+
 Set `backend = "process"` only to explicitly run commands as ordinary host processes without OS isolation. `seatbelt` and `bubblewrap` can also be selected explicitly for diagnostics. Docker remains useful for CI, evaluation, untrusted repositories, and reproducible toolchains.
 
 ### Docker Sandbox
@@ -483,7 +485,7 @@ tmpfs_mb = 256
 
 The image must already exist locally because CodeCraft runs Docker with `--pull never`. Use a custom image when a repository needs another language or toolchain.
 
-The Docker backend creates an ephemeral container per bash command. It uses a read-only container root, a bounded `/tmp` tmpfs, the host UID/GID, dropped Linux capabilities, `no-new-privileges`, CPU/memory/PID limits, one workspace bind mount, `sandbox.env_allowlist` for explicit environment forwarding, and `--network none` when network is disabled. Timed-out containers are force removed.
+The Docker backend creates an ephemeral container per bash command. It uses a read-only container root, a bounded `/tmp` tmpfs, the host UID/GID, dropped Linux capabilities, `no-new-privileges`, CPU/memory/PID limits, one workspace bind mount, `sandbox.env_allowlist` for explicit environment forwarding, and `--network none` when network is disabled. Timed-out, cancelled, or otherwise interrupted containers are force removed.
 
 Important boundary: Docker isolates bash processes, not the mounted repository from intentional writes. In `workspace_write` mode the real workspace is mounted read-write, while built-in file tools continue to run on the host behind `WorkspaceGuard`. Approval and command policy remain part of the security model.
 
