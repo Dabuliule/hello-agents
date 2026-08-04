@@ -11,7 +11,12 @@ from codecraft.llm.base import (
     ModelRequest,
 )
 from codecraft.llm.events import ModelEvent, ModelEventType
-from codecraft.llm.messages import ModelMessage, ModelMessageType
+from codecraft.llm.messages import (
+    ModelMessage,
+    ModelTextMessage,
+    ModelToolCallMessage,
+    ModelToolResultMessage,
+)
 from codecraft.llm.providers._client import OpenAIClientProvider
 from codecraft.llm.providers._protocol import (
     error_message,
@@ -283,23 +288,19 @@ class ResponsesProvider(OpenAIClientProvider):
 
 
 def _message_to_response_item(message: ModelMessage) -> dict[str, Any]:
-    if message.type == ModelMessageType.TOOL_CALL:
-        assert message.tool_call_id is not None
-        assert message.name is not None
-        assert message.arguments is not None
+    if isinstance(message, ModelToolCallMessage):
         return {
             "type": "function_call",
             "call_id": message.tool_call_id,
             "name": message.name,
             "arguments": serialize_arguments(message.arguments),
         }
-    if message.type == ModelMessageType.TOOL_RESULT:
-        assert message.tool_call_id is not None
-        assert message.content is not None
+    if isinstance(message, ModelToolResultMessage):
         return {
             "type": "function_call_output",
             "call_id": message.tool_call_id,
             "output": message.content,
         }
-    assert message.content is not None
+    if not isinstance(message, ModelTextMessage):
+        raise TypeError(f"unsupported model message: {type(message).__name__}")
     return {"role": message.role.value, "content": message.content}

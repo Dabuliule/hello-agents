@@ -10,7 +10,12 @@ from codecraft.llm.base import (
     ModelRequest,
 )
 from codecraft.llm.events import ModelEvent, ModelEventType
-from codecraft.llm.messages import ModelMessage, ModelMessageType
+from codecraft.llm.messages import (
+    ModelMessage,
+    ModelTextMessage,
+    ModelToolCallMessage,
+    ModelToolResultMessage,
+)
 from codecraft.llm.providers._client import OpenAIClientProvider
 from codecraft.llm.providers._protocol import (
     get_field,
@@ -59,7 +64,7 @@ class ChatCompletionsProvider(OpenAIClientProvider):
     ) -> list[dict[str, Any]]:
         """转换消息，并把同一回复中的连续工具调用合并为一个 assistant 项。"""
         items: list[dict[str, Any]] = []
-        pending_calls: list[ModelMessage] = []
+        pending_calls: list[ModelToolCallMessage] = []
 
         def flush_calls() -> None:
             if not pending_calls:
@@ -83,7 +88,7 @@ class ChatCompletionsProvider(OpenAIClientProvider):
             pending_calls.clear()
 
         for message in messages:
-            if message.type == ModelMessageType.TOOL_CALL:
+            if isinstance(message, ModelToolCallMessage):
                 pending_calls.append(message)
                 continue
             flush_calls()
@@ -296,28 +301,24 @@ class ChatCompletionsProvider(OpenAIClientProvider):
 
 
 def _message_to_chat_item(message: ModelMessage) -> dict[str, Any]:
-    if message.type == ModelMessageType.TOOL_RESULT:
-        assert message.tool_call_id is not None
-        assert message.content is not None
+    if isinstance(message, ModelToolResultMessage):
         return {
             "role": "tool",
             "tool_call_id": message.tool_call_id,
             "content": message.content,
         }
-    if message.type == ModelMessageType.TOOL_CALL:
+    if isinstance(message, ModelToolCallMessage):
         return {
             "role": "assistant",
             "content": None,
             "tool_calls": [_message_to_chat_tool_call(message)],
         }
-    assert message.content is not None
+    if not isinstance(message, ModelTextMessage):
+        raise TypeError(f"unsupported model message: {type(message).__name__}")
     return {"role": message.role.value, "content": message.content}
 
 
-def _message_to_chat_tool_call(message: ModelMessage) -> dict[str, Any]:
-    assert message.tool_call_id is not None
-    assert message.name is not None
-    assert message.arguments is not None
+def _message_to_chat_tool_call(message: ModelToolCallMessage) -> dict[str, Any]:
     return {
         "id": message.tool_call_id,
         "type": "function",

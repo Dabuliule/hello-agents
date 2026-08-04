@@ -6,7 +6,14 @@ from codecraft.llm.base import (
     ModelRequest,
 )
 from codecraft.llm.events import ModelEvent, ModelEventType
-from codecraft.llm.messages import ModelMessage, ModelMessageType, ModelRole
+from codecraft.llm.messages import (
+    ModelMessage,
+    ModelMessageType,
+    ModelRole,
+    ModelTextMessage,
+    ModelToolCallMessage,
+    ModelToolResultMessage,
+)
 from codecraft.llm.providers import (
     DeepSeekProvider,
     MockProvider,
@@ -28,6 +35,9 @@ __all__ = [
     "ModelMessageType",
     "ModelRole",
     "ModelRequest",
+    "ModelTextMessage",
+    "ModelToolCallMessage",
+    "ModelToolResultMessage",
     "MockProvider",
     "OpenAIProvider",
     "QwenProvider",

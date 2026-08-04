@@ -38,6 +38,9 @@ from codecraft.llm import (
     ModelMessageType,
     ModelRequest,
     ModelRole,
+    ModelTextMessage,
+    ModelToolCallMessage,
+    ModelToolResultMessage,
     MockProvider,
     OpenAIProvider,
     QwenProvider,
@@ -74,6 +77,13 @@ def make_config(tmp_path) -> SessionConfig:
         approval_policy="never",
         sandbox_mode="workspace_write",
     )
+
+
+def model_message_content(message: ModelMessage) -> str | None:
+    """Return text only for variants that define text content."""
+    if isinstance(message, ModelToolCallMessage):
+        return None
+    return message.content
 
 
 def test_base_instructions_are_loaded_from_markdown_resource():
@@ -1774,7 +1784,7 @@ def test_llm_provider_stream_contract(tmp_path):
             async for event in provider.stream(
                 ModelRequest(
                     model=context.model,
-                    messages=(ModelMessage(role=ModelRole.USER, content="hello"),),
+                    messages=(ModelTextMessage(role=ModelRole.USER, content="hello"),),
                 )
             )
         ]
@@ -1851,7 +1861,7 @@ def test_openai_provider_converts_response_to_model_events(tmp_path):
             async for event in provider.stream(
                 ModelRequest(
                     model="gpt-test",
-                    messages=(ModelMessage(role=ModelRole.USER, content="read"),),
+                    messages=(ModelTextMessage(role=ModelRole.USER, content="read"),),
                     tools=tuple(context.available_tools),
                 )
             )
@@ -1941,7 +1951,7 @@ def test_openai_provider_streams_response_deltas_and_tool_calls(tmp_path):
             async for event in provider.stream(
                 ModelRequest(
                     model="gpt-test",
-                    messages=(ModelMessage(role=ModelRole.USER, content="read"),),
+                    messages=(ModelTextMessage(role=ModelRole.USER, content="read"),),
                 )
             )
         ]
@@ -1987,17 +1997,16 @@ def test_openai_provider_serializes_tool_history_as_response_items(tmp_path):
                 ModelRequest(
                     model="gpt-test",
                     messages=(
-                        ModelMessage(role=ModelRole.USER, content="read README"),
-                        ModelMessage(
-                            type=ModelMessageType.TOOL_CALL,
-                            role=ModelRole.ASSISTANT,
+                        ModelTextMessage(
+                            role=ModelRole.USER,
+                            content="read README",
+                        ),
+                        ModelToolCallMessage(
                             name="read_file",
                             tool_call_id="call_read",
                             arguments={"path": "README.md"},
                         ),
-                        ModelMessage(
-                            type=ModelMessageType.TOOL_RESULT,
-                            role=ModelRole.TOOL,
+                        ModelToolResultMessage(
                             content="README contents",
                             tool_call_id="call_read",
                         ),
@@ -2089,7 +2098,7 @@ def test_qwen_provider_streams_chat_completion_deltas(tmp_path):
             async for event in provider.stream(
                 ModelRequest(
                     model="qwen-plus",
-                    messages=(ModelMessage(role=ModelRole.USER, content="hello"),),
+                    messages=(ModelTextMessage(role=ModelRole.USER, content="hello"),),
                 )
             )
         ]
@@ -2214,17 +2223,16 @@ def test_qwen_provider_streams_chat_completion_tool_calls(tmp_path):
                 ModelRequest(
                     model="qwen-plus",
                     messages=(
-                        ModelMessage(role=ModelRole.USER, content="read README"),
-                        ModelMessage(
-                            type=ModelMessageType.TOOL_CALL,
-                            role=ModelRole.ASSISTANT,
+                        ModelTextMessage(
+                            role=ModelRole.USER,
+                            content="read README",
+                        ),
+                        ModelToolCallMessage(
                             name="read_file",
                             tool_call_id="call_previous",
                             arguments={"path": "README.md"},
                         ),
-                        ModelMessage(
-                            type=ModelMessageType.TOOL_RESULT,
-                            role=ModelRole.TOOL,
+                        ModelToolResultMessage(
                             content="README contents",
                             tool_call_id="call_previous",
                         ),
@@ -2337,7 +2345,7 @@ def test_deepseek_provider_streams_chat_completion_deltas(tmp_path):
             async for event in provider.stream(
                 ModelRequest(
                     model="deepseek-v4-flash",
-                    messages=(ModelMessage(role=ModelRole.USER, content="hello"),),
+                    messages=(ModelTextMessage(role=ModelRole.USER, content="hello"),),
                 )
             )
         ]
@@ -2865,7 +2873,8 @@ def test_runtime_resume_reconstructs_conversation_without_replaying_turn(tmp_pat
         assert len(first_provider.calls) == 1
         assert len(second_provider.calls) == 1
         assert [
-            message.content for message in second_provider.calls[0].messages[1:]
+            model_message_content(message)
+            for message in second_provider.calls[0].messages[1:]
         ] == [
             "first",
             "first answer",
@@ -2970,7 +2979,7 @@ def test_runtime_resume_reconstructs_tool_call_and_result_history(tmp_path):
         assert len(first_provider.calls) == 2
         assert len(second_provider.calls) == 1
         messages = second_provider.calls[0].messages
-        assert [message.content for message in messages[1:]] == [
+        assert [model_message_content(message) for message in messages[1:]] == [
             "read note",
             None,
             "resume sees tool result",
@@ -2984,9 +2993,9 @@ def test_runtime_resume_reconstructs_tool_call_and_result_history(tmp_path):
             "assistant",
             "user",
         ]
-        assert messages[2].type == ModelMessageType.TOOL_CALL
+        assert isinstance(messages[2], ModelToolCallMessage)
         assert messages[2].arguments == {"path": "note.txt"}
-        assert messages[3].type == ModelMessageType.TOOL_RESULT
+        assert isinstance(messages[3], ModelToolResultMessage)
 
     asyncio.run(run_test())
 
@@ -3148,7 +3157,7 @@ def test_runtime_resume_uses_context_compaction_summary(tmp_path):
 
         messages = provider.calls[0].messages
         assert "<base_instructions>" in messages[0].content
-        assert [message.content for message in messages[1:]] == [
+        assert [model_message_content(message) for message in messages[1:]] == [
             "old conversation summary",
             "new user",
         ]
@@ -3208,7 +3217,7 @@ def test_runtime_allows_final_answer_after_reaching_tool_call_limit(tmp_path):
         assert finished.payload["result"]["content"] == "tool loop works"
         assert snapshot.events[-1].payload["tool_calls"] == 1
         messages = provider.calls[1].messages
-        assert [message.content for message in messages[1:]] == [
+        assert [model_message_content(message) for message in messages[1:]] == [
             "read note",
             None,
             "tool loop works",
@@ -3276,7 +3285,7 @@ def test_runtime_preserves_streamed_assistant_text_before_tool_call(tmp_path):
         assert snapshot.events[5].payload["text"] == "I will read that."
 
         messages = provider.calls[1].messages
-        assert [message.content for message in messages[1:]] == [
+        assert [model_message_content(message) for message in messages[1:]] == [
             "read note",
             "I will read that.",
             None,

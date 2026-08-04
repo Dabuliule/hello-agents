@@ -18,10 +18,12 @@ from codecraft.llm import (
     MockProvider,
     ModelEvent,
     ModelEventType,
-    ModelMessage,
     ModelMessageType,
     ModelRequest,
     ModelRole,
+    ModelTextMessage,
+    ModelToolCallMessage,
+    ModelToolResultMessage,
     OpenAIProvider,
     QwenProvider,
 )
@@ -85,7 +87,7 @@ class FakeChatClient:
 def request() -> ModelRequest:
     return ModelRequest(
         model="test-model",
-        messages=(ModelMessage(role=ModelRole.USER, content="hello"),),
+        messages=(ModelTextMessage(role=ModelRole.USER, content="hello"),),
     )
 
 
@@ -96,8 +98,13 @@ async def collect(provider: LLMProvider) -> list[ModelEvent]:
 @pytest.mark.parametrize(
     "data",
     [
-        {"role": ModelRole.TOOL, "content": "not a result"},
         {
+            "type": ModelMessageType.MESSAGE,
+            "role": ModelRole.TOOL,
+            "content": "not a result",
+        },
+        {
+            "type": ModelMessageType.MESSAGE,
             "role": ModelRole.USER,
             "content": "hello",
             "tool_call_id": "call_extra",
@@ -126,7 +133,36 @@ async def collect(provider: LLMProvider) -> list[ModelEvent]:
 )
 def test_model_message_rejects_illegal_field_combinations(data):
     with pytest.raises(ValidationError):
-        ModelMessage.model_validate(data)
+        ModelRequest.model_validate({"model": "test-model", "messages": [data]})
+
+
+def test_model_message_discriminator_selects_concrete_variant():
+    parsed = ModelRequest.model_validate(
+        {
+            "model": "test-model",
+            "messages": [
+                {"type": "message", "role": "user", "content": "hello"},
+                {
+                    "type": "tool_call",
+                    "role": "assistant",
+                    "name": "read_file",
+                    "tool_call_id": "call_read",
+                    "arguments": {"path": "README.md"},
+                },
+                {
+                    "type": "tool_result",
+                    "role": "tool",
+                    "content": "done",
+                    "tool_call_id": "call_read",
+                },
+            ],
+        }
+    )
+    text, call, result = parsed.messages
+
+    assert isinstance(text, ModelTextMessage)
+    assert isinstance(call, ModelToolCallMessage)
+    assert isinstance(result, ModelToolResultMessage)
 
 
 def test_model_event_is_immutable():

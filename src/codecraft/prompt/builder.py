@@ -3,7 +3,7 @@ from __future__ import annotations
 from codecraft.core.conversation import Conversation
 from codecraft.core.token_budget import estimate_text_tokens
 from codecraft.core.turn_context import TurnContext
-from codecraft.llm.messages import ModelMessage, ModelRole
+from codecraft.llm.messages import ModelMessage, ModelRole, ModelTextMessage
 from codecraft.prompt.base_instructions import BASE_INSTRUCTIONS
 from codecraft.schema.session import SessionConfig
 
@@ -35,7 +35,7 @@ class PromptBuilder:
             if body and body.strip()
         )
         return [
-            ModelMessage(role=ModelRole.SYSTEM, content=content),
+            ModelTextMessage(role=ModelRole.SYSTEM, content=content),
             *conversation.build_model_messages(),
         ]
 

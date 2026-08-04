@@ -3,11 +3,12 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 
+import pytest
 from pydantic import BaseModel
 
 from codecraft.approval.manager import ApprovalManager
 from codecraft.approval.thread_reviewer import ThreadApprovalReviewer
-from codecraft.core.conversation import Conversation, ConversationRole
+from codecraft.core.conversation import Conversation, ConversationItem, ConversationRole
 from codecraft.core.reconstruction import reconstruct_conversation
 from codecraft.core.runtime import AgentRuntime
 from codecraft.core.session_store import SessionStore
@@ -19,7 +20,9 @@ from codecraft.llm import (
     MockProvider,
     ModelEvent,
     ModelEventType,
+    ModelMessageType,
     ModelRequest,
+    ModelToolResultMessage,
 )
 from codecraft.schema.event import RuntimeEventType
 from codecraft.schema.input import SessionInput
@@ -120,6 +123,25 @@ def test_conversation_compaction_keeps_recent_summary_and_tool_arguments():
     assert "important.py" in summary.content
     assert "recent old result" in summary.content
     assert conversation.build_model_messages()[0].role.value == "user"
+
+
+def test_conversation_rejects_tool_call_with_non_assistant_role():
+    conversation = Conversation(
+        items=[
+            ConversationItem(
+                item_id="item_invalid",
+                role=ConversationRole.USER,
+                content="",
+                tool_call_id="call_invalid",
+                name="read_file",
+                arguments={"path": "README.md"},
+                metadata={"type": ModelMessageType.TOOL_CALL.value},
+            )
+        ]
+    )
+
+    with pytest.raises(ValueError, match="requires the assistant role"):
+        conversation.build_model_messages()
 
 
 def test_summary_shortening_drops_oldest_entries_first():
@@ -262,7 +284,7 @@ def test_read_only_tool_batch_runs_concurrently_and_preserves_result_order(tmp_p
         tool_messages = [
             message.content
             for message in provider.calls[1].messages
-            if message.role.value == "tool"
+            if isinstance(message, ModelToolResultMessage)
         ]
         assert tool_messages == ["first", "second"]
 

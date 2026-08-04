@@ -9,7 +9,14 @@ from pydantic import BaseModel, Field
 
 from codecraft.core.ids import new_id
 from codecraft.core.token_budget import estimate_serialized_tokens
-from codecraft.llm.messages import ModelMessage, ModelMessageType, ModelRole
+from codecraft.llm.messages import (
+    ModelMessage,
+    ModelMessageType,
+    ModelRole,
+    ModelTextMessage,
+    ModelToolCallMessage,
+    ModelToolResultMessage,
+)
 from codecraft.schema.tool import ToolCall
 
 
@@ -125,10 +132,10 @@ class Conversation(BaseModel):
                 continue
 
             if item.role == ConversationRole.TOOL:
+                if not item.tool_call_id:
+                    raise ValueError("tool conversation item requires a call id")
                 messages.append(
-                    ModelMessage(
-                        type=ModelMessageType.TOOL_RESULT,
-                        role=role,
+                    ModelToolResultMessage(
                         content=item.content,
                         tool_call_id=item.tool_call_id,
                     )
@@ -136,10 +143,16 @@ class Conversation(BaseModel):
                 continue
 
             if item.metadata.get("type") == ModelMessageType.TOOL_CALL.value:
+                if role != ModelRole.ASSISTANT:
+                    raise ValueError(
+                        "tool call conversation item requires the assistant role"
+                    )
+                if not item.name or not item.tool_call_id or item.arguments is None:
+                    raise ValueError(
+                        "tool call conversation item requires name, call id, and arguments"
+                    )
                 messages.append(
-                    ModelMessage(
-                        type=ModelMessageType.TOOL_CALL,
-                        role=role,
+                    ModelToolCallMessage(
                         name=item.name,
                         tool_call_id=item.tool_call_id,
                         arguments=item.arguments,
@@ -147,7 +160,9 @@ class Conversation(BaseModel):
                 )
                 continue
 
-            messages.append(ModelMessage(role=role, content=item.content))
+            if role == ModelRole.TOOL:
+                raise ValueError("ordinary conversation item cannot use the tool role")
+            messages.append(ModelTextMessage(role=role, content=item.content))
 
         return messages
 
