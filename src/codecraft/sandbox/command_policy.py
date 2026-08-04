@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import posixpath
-import shlex
 from enum import StrEnum
+import posixpath
+import re
+import shlex
 
 from pydantic import BaseModel
 
@@ -41,6 +42,20 @@ _GIT_GLOBAL_OPTIONS_WITH_VALUE = frozenset(
 _NETWORK_COMMANDS = frozenset({"curl", "wget", "ssh", "scp"})
 
 _DENIED_COMMANDS = frozenset({"sudo", "dd", "mkfs"})
+
+_COMMAND_WRAPPERS = frozenset({"command", "exec", "env"})
+
+_SHELL_WRAPPERS = frozenset({"bash", "dash", "ksh", "sh", "zsh"})
+
+_MAX_WRAPPER_DEPTH = 8
+
+_ENV_OPTIONS_WITH_VALUE = frozenset({"-C", "-u", "-a", "--chdir", "--unset"})
+
+_ENV_OPTIONS_WITHOUT_VALUE = frozenset(
+    {"-", "-0", "-i", "-v", "--debug", "--ignore-environment", "--null"}
+)
+
+_SHELL_ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
 
 _EXACT_READ_ONLY_COMMANDS = frozenset(
     {
@@ -96,6 +111,19 @@ class CommandPolicy:
         self, command: str, *, network_access: bool = False
     ) -> CommandDecision:
         """Return the risk and approval requirement for one shell command."""
+        return self._classify_command(
+            command,
+            network_access=network_access,
+            wrapper_depth=0,
+        )
+
+    def _classify_command(
+        self,
+        command: str,
+        *,
+        network_access: bool,
+        wrapper_depth: int,
+    ) -> CommandDecision:
         scan = _scan_shell(command)
         if scan.has_substitution:
             return CommandDecision(
@@ -116,7 +144,12 @@ class CommandPolicy:
                 )
             parsed_segments.append(parts)
             decisions.append(
-                self._classify_single(parts, network_access=network_access)
+                self._classify_single(
+                    parts,
+                    network_access=network_access,
+                    wrapper_depth=wrapper_depth,
+                    has_expansion=scan.has_expansion,
+                )
             )
 
         if not decisions:
@@ -160,14 +193,35 @@ class CommandPolicy:
         return decisions[0]
 
     def _classify_single(
-        self, parts: list[str], *, network_access: bool
+        self,
+        parts: list[str],
+        *,
+        network_access: bool,
+        wrapper_depth: int,
+        has_expansion: bool,
     ) -> CommandDecision:
+        wrapper_decision = self._classify_indirection(
+            parts,
+            network_access=network_access,
+            wrapper_depth=wrapper_depth,
+            has_expansion=has_expansion,
+        )
+        if wrapper_decision is not None:
+            return wrapper_decision
+
         executable = self._command_name(parts[0])
 
         if self._is_destructive_rm(parts):
             return CommandDecision(
                 risk=CommandRisk.DENY,
                 reason="destructive rm -rf on broad path is denied",
+                requires_approval=False,
+            )
+
+        if has_expansion and self._is_recursive_force_rm(parts):
+            return CommandDecision(
+                risk=CommandRisk.DENY,
+                reason="rm -rf with shell expansion is denied",
                 requires_approval=False,
             )
 
@@ -217,6 +271,223 @@ class CommandPolicy:
             reason="command is not on the exact read-only allowlist",
             requires_approval=True,
         )
+
+    def _classify_indirection(
+        self,
+        parts: list[str],
+        *,
+        network_access: bool,
+        wrapper_depth: int,
+        has_expansion: bool,
+    ) -> CommandDecision | None:
+        assignment_count = self._leading_assignment_count(parts)
+        if assignment_count:
+            inner_parts = parts[assignment_count:]
+            if not inner_parts:
+                return self._opaque_wrapper_decision(
+                    "environment assignment has no command"
+                )
+            return self._classify_wrapped_parts(
+                inner_parts,
+                wrapper="environment assignment",
+                network_access=network_access,
+                wrapper_depth=wrapper_depth,
+                has_expansion=has_expansion,
+            )
+
+        executable = self._command_name(parts[0])
+        if executable in _COMMAND_WRAPPERS:
+            unwrapped_parts = self._unwrap_command(executable, parts)
+            if unwrapped_parts is None:
+                return self._opaque_wrapper_decision(
+                    f"unsupported or incomplete {executable} wrapper"
+                )
+            return self._classify_wrapped_parts(
+                unwrapped_parts,
+                wrapper=executable,
+                network_access=network_access,
+                wrapper_depth=wrapper_depth,
+                has_expansion=has_expansion,
+            )
+
+        if executable in _SHELL_WRAPPERS:
+            script = self._unwrap_shell_script(parts)
+            if script is None:
+                return self._opaque_wrapper_decision(
+                    f"unsupported or incomplete {executable} wrapper"
+                )
+            if has_expansion and self._contains_expansion_marker(script):
+                return self._opaque_wrapper_decision(
+                    f"{executable} script is controlled by shell expansion"
+                )
+            if wrapper_depth >= _MAX_WRAPPER_DEPTH:
+                return self._wrapper_depth_decision()
+            decision = self._classify_command(
+                script,
+                network_access=network_access,
+                wrapper_depth=wrapper_depth + 1,
+            )
+            return self._elevate_wrapper_decision(decision, executable)
+        if has_expansion and self._contains_expansion_marker(parts[0]):
+            return self._opaque_wrapper_decision(
+                "command name is controlled by shell expansion"
+            )
+        return None
+
+    def _classify_wrapped_parts(
+        self,
+        parts: list[str],
+        *,
+        wrapper: str,
+        network_access: bool,
+        wrapper_depth: int,
+        has_expansion: bool,
+    ) -> CommandDecision:
+        if wrapper_depth >= _MAX_WRAPPER_DEPTH:
+            return self._wrapper_depth_decision()
+        if has_expansion and self._contains_expansion_marker(parts[0]):
+            return self._opaque_wrapper_decision(
+                f"{wrapper} command is controlled by shell expansion"
+            )
+        decision = self._classify_single(
+            parts,
+            network_access=network_access,
+            wrapper_depth=wrapper_depth + 1,
+            has_expansion=has_expansion,
+        )
+        return self._elevate_wrapper_decision(decision, wrapper)
+
+    @staticmethod
+    def _elevate_wrapper_decision(
+        decision: CommandDecision, wrapper: str
+    ) -> CommandDecision:
+        if decision.risk == CommandRisk.DENY:
+            return decision
+        return CommandDecision(
+            risk=CommandRisk.PROMPT,
+            reason=f"{wrapper} wrapper requires approval",
+            requires_approval=True,
+        )
+
+    @staticmethod
+    def _opaque_wrapper_decision(reason: str) -> CommandDecision:
+        return CommandDecision(
+            risk=CommandRisk.DENY,
+            reason=reason,
+            requires_approval=False,
+        )
+
+    @staticmethod
+    def _wrapper_depth_decision() -> CommandDecision:
+        return CommandDecision(
+            risk=CommandRisk.DENY,
+            reason=f"command wrapper nesting exceeds {_MAX_WRAPPER_DEPTH} levels",
+            requires_approval=False,
+        )
+
+    @staticmethod
+    def _leading_assignment_count(parts: list[str]) -> int:
+        index = 0
+        while index < len(parts) and _SHELL_ASSIGNMENT.match(parts[index]):
+            index += 1
+        return index
+
+    @classmethod
+    def _unwrap_command(cls, executable: str, parts: list[str]) -> list[str] | None:
+        if executable == "env":
+            return cls._unwrap_env(parts)
+        if executable == "command":
+            return cls._unwrap_command_builtin(parts)
+        return cls._unwrap_exec(parts)
+
+    @classmethod
+    def _unwrap_env(cls, parts: list[str]) -> list[str] | None:
+        index = 1
+        parsing_options = True
+        while index < len(parts):
+            part = parts[index]
+            if cls._is_assignment(part):
+                index += 1
+                continue
+            if parsing_options and part == "--":
+                parsing_options = False
+                index += 1
+                continue
+            if not parsing_options or not part.startswith("-"):
+                break
+            option_end = cls._env_option_end(parts, index)
+            if option_end is None:
+                return None
+            index = option_end
+        return parts[index:] or None
+
+    @staticmethod
+    def _env_option_end(parts: list[str], index: int) -> int | None:
+        part = parts[index]
+        if part in {"-S", "--split-string"} or part.startswith(
+            ("-S", "--split-string=")
+        ):
+            return None
+        if part in _ENV_OPTIONS_WITHOUT_VALUE:
+            return index + 1
+        if part in _ENV_OPTIONS_WITH_VALUE:
+            return index + 2 if index + 1 < len(parts) else None
+        if part.startswith(("--chdir=", "--unset=", "--argv0=")):
+            return index + 1
+        if part.startswith(("-C", "-u")) and len(part) > 2:
+            return index + 1
+        return None
+
+    @staticmethod
+    def _unwrap_command_builtin(parts: list[str]) -> list[str] | None:
+        index = 1
+        while index < len(parts):
+            part = parts[index]
+            if part == "--":
+                index += 1
+                break
+            if part == "-p":
+                index += 1
+                continue
+            if part.startswith("-"):
+                return None
+            break
+        return parts[index:] or None
+
+    @staticmethod
+    def _unwrap_exec(parts: list[str]) -> list[str] | None:
+        index = 1
+        while index < len(parts):
+            part = parts[index]
+            if part == "--":
+                index += 1
+                break
+            if part == "-a":
+                if index + 1 >= len(parts):
+                    return None
+                index += 2
+                continue
+            if part.startswith("-") and len(part) > 1:
+                if set(part[1:]) <= {"c", "l"}:
+                    index += 1
+                    continue
+                return None
+            break
+        return parts[index:] or None
+
+    @staticmethod
+    def _unwrap_shell_script(parts: list[str]) -> str | None:
+        if len(parts) < 3 or parts[1] not in {"-c", "-lc"}:
+            return None
+        return parts[2]
+
+    @staticmethod
+    def _is_assignment(part: str) -> bool:
+        return _SHELL_ASSIGNMENT.match(part) is not None
+
+    @staticmethod
+    def _contains_expansion_marker(part: str) -> bool:
+        return any(marker in part for marker in "$*?[{~")
 
     @staticmethod
     def _split(command: str) -> list[str]:

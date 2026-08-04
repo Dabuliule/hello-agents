@@ -657,6 +657,90 @@ def test_command_policy_classifies_absolute_executable_paths(command):
     assert CommandPolicy().classify(command).risk == CommandRisk.DENY
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        "MODE=test sudo true",
+        "env sudo true",
+        "/usr/bin/env X=1 command -- sudo true",
+        "command -p /usr/bin/dd if=/dev/zero of=image",
+        "exec -- sudo true",
+        "exec -a replacement sudo true",
+        "sh -c 'sudo true'",
+        "bash -lc 'rm -rf /'",
+        "env sh -c 'git fetch'",
+        'env rm -rf "$HOME"',
+    ],
+)
+def test_command_policy_denies_dangerous_commands_hidden_by_wrappers(command):
+    decision = CommandPolicy().classify(command)
+
+    assert decision.risk == CommandRisk.DENY
+    assert decision.requires_approval is False
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "LANG=C pwd",
+        "env LANG=C pwd",
+        "command pwd",
+        "exec pwd",
+        "sh -c 'pwd'",
+    ],
+)
+def test_command_policy_wrappers_never_inherit_safe_classification(command):
+    decision = CommandPolicy().classify(command)
+
+    assert decision.risk == CommandRisk.PROMPT
+    assert decision.requires_approval is True
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "env -S 'pwd'",
+        "env --split-string='pwd'",
+        "command -v sudo",
+        "exec -x pwd",
+        "bash --noprofile -c 'pwd'",
+        "sh -c '$COMMAND'",
+    ],
+)
+def test_command_policy_denies_opaque_or_unsupported_wrappers(command):
+    decision = CommandPolicy().classify(command)
+
+    assert decision.risk == CommandRisk.DENY
+    assert decision.requires_approval is False
+
+
+def test_command_policy_preserves_network_rules_through_wrappers():
+    policy = CommandPolicy()
+
+    assert policy.classify("env curl https://example.com").risk == CommandRisk.DENY
+    assert (
+        policy.classify("env curl https://example.com", network_access=True).risk
+        == CommandRisk.PROMPT
+    )
+    assert policy.classify("sh -c 'git fetch'").risk == CommandRisk.DENY
+    assert (
+        policy.classify("sh -c 'git fetch'", network_access=True).risk
+        == CommandRisk.PROMPT
+    )
+
+
+def test_command_policy_bounds_wrapper_recursion():
+    policy = CommandPolicy()
+
+    allowed_depth = " ".join(["env"] * 8 + ["pwd"])
+    excessive_depth = " ".join(["env"] * 9 + ["pwd"])
+
+    assert policy.classify(allowed_depth).risk == CommandRisk.PROMPT
+    decision = policy.classify(excessive_depth)
+    assert decision.risk == CommandRisk.DENY
+    assert "nesting exceeds 8 levels" in decision.reason
+
+
 def test_approval_manager_defaults_to_deny_reviewer():
     manager = ApprovalManager()
 
