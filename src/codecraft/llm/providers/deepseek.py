@@ -19,6 +19,7 @@ class DeepSeekProvider(ChatCompletionsProvider):
         api_key_env: str | None = "DEEPSEEK_API_KEY",
         base_url: str | None = None,
     ) -> None:
+        """配置 DeepSeek Chat Completions 兼容端点。"""
         super().__init__(
             client=client,
             api_key=api_key,

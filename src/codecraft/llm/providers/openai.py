@@ -18,6 +18,7 @@ class OpenAIProvider(ResponsesProvider):
         api_key_env: str | None = "OPENAI_API_KEY",
         base_url: str | None = None,
     ) -> None:
+        """配置 OpenAI Responses API 客户端或接收外部注入的兼容客户端。"""
         super().__init__(
             client=client,
             api_key=api_key,

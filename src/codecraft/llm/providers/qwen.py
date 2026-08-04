@@ -19,6 +19,7 @@ class QwenProvider(ChatCompletionsProvider):
         api_key_env: str | None = "DASHSCOPE_API_KEY",
         base_url: str | None = None,
     ) -> None:
+        """配置 Qwen 的 DashScope Chat Completions 兼容端点。"""
         super().__init__(
             client=client,
             api_key=api_key,

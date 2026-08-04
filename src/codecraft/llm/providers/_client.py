@@ -24,6 +24,7 @@ class OpenAIClientProvider(LLMProvider):
         base_url_env: str | None = None,
         default_base_url: str | None = None,
     ) -> None:
+        """保存客户端来源和连接配置；真正的 SDK 客户端按需延迟创建。"""
         self._client_instance = client
         self._owns_client = client is None
         self._api_key = api_key
@@ -34,10 +35,12 @@ class OpenAIClientProvider(LLMProvider):
 
     @property
     def api_key_env(self) -> str | None:
+        """返回 Provider 将读取的 API Key 环境变量名称。"""
         return self._api_key_env
 
     @property
     def base_url(self) -> str | None:
+        """返回显式配置的 API 地址；不展开环境变量或默认地址。"""
         return self._base_url
 
     def _client(self) -> Any:
@@ -47,6 +50,7 @@ class OpenAIClientProvider(LLMProvider):
         return self._client_instance
 
     def _create_client(self) -> Any:
+        """解析密钥和地址优先级，并创建一个异步 OpenAI 兼容客户端。"""
         try:
             from openai import AsyncOpenAI
         except ImportError as exc:
@@ -71,6 +75,7 @@ class OpenAIClientProvider(LLMProvider):
         return AsyncOpenAI(**kwargs)
 
     async def close(self) -> None:
+        """关闭 Provider 自己创建的客户端，保留外部注入客户端的所有权。"""
         if not self._owns_client or self._client_instance is None:
             return
 

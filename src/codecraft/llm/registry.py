@@ -7,6 +7,7 @@ class LLMProviderRegistry:
     """按 provider name 管理可用的 LLMProvider。"""
 
     def __init__(self, providers: list[LLMProvider] | None = None) -> None:
+        """创建空注册表，并按输入顺序注册初始 Provider。"""
         self._providers: dict[str, LLMProvider] = {}
         for provider in providers or ():
             self.register(provider)
@@ -43,4 +44,5 @@ class LLMProviderRegistry:
 
     @staticmethod
     def _normalize_name(name: str) -> str:
+        """把 Provider 名称规范为去除首尾空白的小写键。"""
         return name.strip().lower()
