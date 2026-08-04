@@ -262,7 +262,9 @@ Native and Docker backends isolate the bash process but do not make a writable w
 
 ## MCP Client
 
-`MCPStdioProvider` uses the official stable Python SDK to start a configured stdio server, initialize one persistent `ClientSession`, follow paginated tool discovery, and adapt each remote tool into a normal `BaseTool`. `AgentRuntime.create_thread()` and `resume_thread()` start the registry before a session is exposed; CLI and eval paths close the runtime deterministically.
+`MCPStdioProvider` uses the official stable Python SDK to start a configured stdio server, initialize one persistent `ClientSession`, follow paginated tool discovery, and adapt each remote tool into a normal `BaseTool`. One provider-owned lifecycle task enters and exits every SDK async context; callers may start and close the provider from different tasks without violating AnyIO cancel-scope ownership. `AgentRuntime.create_thread()` and `resume_thread()` start the registry before a session is exposed; CLI and eval paths close the runtime deterministically.
+
+Handshake and discovery use one total deadline. Discovery additionally bounds page count, tool count, and cumulative serialized tool-and-cursor bytes, and rejects repeated cursors. The byte limit is applied after the SDK decodes each response, so it bounds the retained catalogue and validation work rather than the transient allocation of one wire response.
 
 MCP tools use a provider-safe `mcp__<server>__<tool>` namespace. Their remote JSON Schema is returned to model providers and independently enforced through a generated Pydantic argument model backed by JSON Schema 2020-12 validation. Calls still execute through `ToolRunner`, so sandbox effects, approval events, duration, result normalization, and trace persistence remain unchanged.
 

@@ -8,6 +8,7 @@ import re
 import sys
 from contextlib import AsyncExitStack
 from copy import deepcopy
+from dataclasses import dataclass
 from datetime import timedelta
 from hashlib import sha256
 from importlib.metadata import version
@@ -20,6 +21,7 @@ from mcp.client.stdio import get_default_environment, stdio_client
 from pydantic import BaseModel, ConfigDict, model_validator
 from pydantic.json_schema import GenerateJsonSchema, JsonSchemaMode
 
+from codecraft.core.async_utils import finish_task_before_cancelling
 from codecraft.core.errors import CodecraftError
 from codecraft.mcp.config import MCPServerSettings
 from codecraft.schema.tool import ToolEffect, ToolResult
@@ -31,6 +33,13 @@ _TOOL_NAME_CHARACTER = re.compile(r"[^A-Za-z0-9_-]")
 
 class MCPConnectionError(CodecraftError):
     pass
+
+
+@dataclass(frozen=True, slots=True)
+class _StartedMCP:
+    session: ClientSession
+    server_info: dict[str, Any]
+    tools: tuple[MCPTool, ...]
 
 
 class MCPStdioProvider(AsyncToolProvider):
@@ -45,91 +54,200 @@ class MCPStdioProvider(AsyncToolProvider):
         self.name = f"mcp:{server_name}"
         self.settings = settings
         self.workspace_cwd = workspace_cwd
-        self._stack: AsyncExitStack | None = None
+        self._owner_task: asyncio.Task[None] | None = None
+        self._stop_event: asyncio.Event | None = None
         self._session: ClientSession | None = None
         self._server_info: dict[str, Any] = {}
 
     async def start(self) -> tuple[BaseTool, ...]:
-        if self._session is not None:
+        if self._owner_task is not None:
             raise RuntimeError(f"MCP server is already started: {self.server_name}")
 
-        stack = AsyncExitStack()
+        ready: asyncio.Future[_StartedMCP] = asyncio.get_running_loop().create_future()
+        stop_event = asyncio.Event()
+        owner = asyncio.create_task(
+            self._run_owner(ready, stop_event),
+            name=f"codecraft-{self.name}",
+        )
+        self._owner_task = owner
+        self._stop_event = stop_event
         try:
-            read, write = await stack.enter_async_context(
-                stdio_client(
-                    StdioServerParameters(
-                        command=self.settings.command,
-                        args=self.settings.args,
-                        env=self._environment(),
-                        cwd=self._cwd(),
-                    ),
-                    errlog=sys.stderr,
-                )
+            started = await asyncio.shield(ready)
+        except BaseException as exc:
+            cleanup_error = await self._cleanup_failed_start(
+                owner,
+                ready,
+                stop_event,
+                exc,
             )
-            session = await stack.enter_async_context(
-                ClientSession(
-                    read,
-                    write,
-                    read_timeout_seconds=timedelta(
-                        seconds=self.settings.timeout_seconds
-                    ),
-                    client_info=types.Implementation(
-                        name="codecraft",
-                        version=version("codecraft"),
-                    ),
-                )
-            )
-            initialized = await asyncio.wait_for(
-                session.initialize(), timeout=self.settings.timeout_seconds
-            )
-            remote_tools = await self._list_tools(session)
-            tools = self._adapt_tools(session, remote_tools)
-        except Exception as exc:
-            await stack.aclose()
+            if not isinstance(exc, Exception):
+                raise
+            detail = f"{type(exc).__name__}: {exc}"
+            if cleanup_error is not None:
+                detail += f"; cleanup {type(cleanup_error).__name__}: {cleanup_error}"
             raise MCPConnectionError(
                 f"Could not start MCP server '{self.server_name}'.",
                 code="mcp_connection_failed",
-                suggestion=f"{type(exc).__name__}: {exc}",
+                suggestion=detail,
                 metadata={"mcp_server": self.server_name},
             ) from exc
 
-        self._stack = stack
-        self._session = session
-        self._server_info = initialized.serverInfo.model_dump(mode="json")
-        for tool in tools:
-            tool.server_info = self._server_info
-        return tools
+        self._session = started.session
+        self._server_info = started.server_info
+        return started.tools
+
+    async def _cleanup_failed_start(
+        self,
+        owner: asyncio.Task[None],
+        ready: asyncio.Future[_StartedMCP],
+        stop_event: asyncio.Event,
+        original: BaseException,
+    ) -> Exception | None:
+        if isinstance(original, asyncio.CancelledError):
+            owner.cancel()
+        else:
+            stop_event.set()
+        cleanup_error: Exception | None = None
+        try:
+            try:
+                await finish_task_before_cancelling(owner)
+            except asyncio.CancelledError:
+                if not isinstance(original, asyncio.CancelledError):
+                    raise
+                if ready.done() and not ready.cancelled():
+                    ready.exception()
+            except Exception as exc:
+                if exc is not original:
+                    cleanup_error = exc
+        finally:
+            self._clear_owner()
+        return cleanup_error
 
     async def close(self) -> None:
-        stack = self._stack
-        self._stack = None
+        owner = self._owner_task
+        stop_event = self._stop_event
+        if owner is None or stop_event is None:
+            return
+        stop_event.set()
+        try:
+            await asyncio.shield(owner)
+        except asyncio.CancelledError:
+            if owner.done():
+                self._clear_owner()
+                raise MCPConnectionError(
+                    f"MCP server '{self.server_name}' stopped unexpectedly.",
+                    code="mcp_close_failed",
+                    metadata={"mcp_server": self.server_name},
+                )
+            raise
+        except Exception as exc:
+            self._clear_owner()
+            raise MCPConnectionError(
+                f"Could not close MCP server '{self.server_name}'.",
+                code="mcp_close_failed",
+                suggestion=f"{type(exc).__name__}: {exc}",
+                metadata={"mcp_server": self.server_name},
+            ) from exc
+        self._clear_owner()
+
+    async def _run_owner(
+        self,
+        ready: asyncio.Future[_StartedMCP],
+        stop_event: asyncio.Event,
+    ) -> None:
+        stack = AsyncExitStack()
+        try:
+            async with asyncio.timeout(self.settings.timeout_seconds):
+                read, write = await stack.enter_async_context(
+                    stdio_client(
+                        StdioServerParameters(
+                            command=self.settings.command,
+                            args=self.settings.args,
+                            env=self._environment(),
+                            cwd=self._cwd(),
+                        ),
+                        errlog=sys.stderr,
+                    )
+                )
+                session = await stack.enter_async_context(
+                    ClientSession(
+                        read,
+                        write,
+                        read_timeout_seconds=timedelta(
+                            seconds=self.settings.timeout_seconds
+                        ),
+                        client_info=types.Implementation(
+                            name="codecraft",
+                            version=version("codecraft"),
+                        ),
+                    )
+                )
+                initialized = await session.initialize()
+                remote_tools = await self._list_tools(session)
+                tools = self._adapt_tools(session, remote_tools)
+                server_info = initialized.serverInfo.model_dump(mode="json")
+                for tool in tools:
+                    tool.server_info = server_info
+            ready.set_result(
+                _StartedMCP(
+                    session=session,
+                    server_info=server_info,
+                    tools=tools,
+                )
+            )
+            await stop_event.wait()
+        except BaseException as exc:
+            if not ready.done():
+                ready.set_exception(exc)
+            raise
+        finally:
+            async with asyncio.timeout(self.settings.timeout_seconds):
+                await stack.aclose()
+
+    def _clear_owner(self) -> None:
+        self._owner_task = None
+        self._stop_event = None
         self._session = None
         self._server_info = {}
-        if stack is not None:
-            await stack.aclose()
 
     async def _list_tools(self, session: ClientSession) -> tuple[types.Tool, ...]:
         tools: list[types.Tool] = []
         cursor: str | None = None
         seen_cursors: set[str] = set()
-        while True:
-            page = await asyncio.wait_for(
-                session.list_tools(cursor), timeout=self.settings.timeout_seconds
+        discovery_bytes = 0
+        async with asyncio.timeout(self.settings.timeout_seconds):
+            for _ in range(self.settings.max_pages):
+                page = await session.list_tools(cursor)
+                if len(page.tools) > self.settings.max_tools - len(tools):
+                    raise RuntimeError(
+                        f"MCP server {self.server_name} exceeds max_tools="
+                        f"{self.settings.max_tools}"
+                    )
+                discovery_bytes += sum(_tool_size(tool) for tool in page.tools)
+                if discovery_bytes > self.settings.max_discovery_bytes:
+                    raise RuntimeError(
+                        f"MCP server {self.server_name} exceeds "
+                        f"max_discovery_bytes={self.settings.max_discovery_bytes}"
+                    )
+                tools.extend(page.tools)
+                cursor = page.nextCursor
+                if cursor is None:
+                    return tuple(tools)
+                discovery_bytes += len(cursor.encode("utf-8"))
+                if discovery_bytes > self.settings.max_discovery_bytes:
+                    raise RuntimeError(
+                        f"MCP server {self.server_name} exceeds "
+                        f"max_discovery_bytes={self.settings.max_discovery_bytes}"
+                    )
+                if cursor in seen_cursors:
+                    raise RuntimeError(
+                        f"MCP server {self.server_name} repeated pagination cursor"
+                    )
+                seen_cursors.add(cursor)
+            raise RuntimeError(
+                f"MCP server {self.server_name} exceeds max_pages="
+                f"{self.settings.max_pages}"
             )
-            tools.extend(page.tools)
-            if len(tools) > self.settings.max_tools:
-                raise RuntimeError(
-                    f"MCP server {self.server_name} exceeds max_tools="
-                    f"{self.settings.max_tools}"
-                )
-            cursor = page.nextCursor
-            if cursor is None:
-                return tuple(tools)
-            if cursor in seen_cursors:
-                raise RuntimeError(
-                    f"MCP server {self.server_name} repeated pagination cursor"
-                )
-            seen_cursors.add(cursor)
 
     def _adapt_tools(
         self,
@@ -223,7 +341,15 @@ class MCPTool(BaseTool):
                 success=False,
                 content="MCP tool call timed out.",
                 error="mcp_tool_timeout",
-                metadata=self._metadata(),
+                suggestion=(
+                    "The remote operation may still have completed; inspect state before "
+                    "retrying."
+                ),
+                metadata={
+                    **self._metadata(),
+                    "outcome_unknown": True,
+                    "retry_safe": False,
+                },
             )
         except Exception as exc:
             return ToolResult(
@@ -267,6 +393,15 @@ def mcp_tool_name(server_name: str, remote_name: str) -> str:
         return candidate
     digest = sha256(remote_name.encode("utf-8")).hexdigest()[:8]
     return f"{candidate[:55]}_{digest}"
+
+
+def _tool_size(tool: types.Tool) -> int:
+    serialized = json.dumps(
+        tool.model_dump(mode="json"),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return len(serialized.encode("utf-8"))
 
 
 def mcp_args_model(name: str, schema: dict[str, Any]) -> type[BaseModel]:

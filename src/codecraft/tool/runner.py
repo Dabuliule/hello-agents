@@ -321,8 +321,15 @@ class ToolRunner:
                 success=False,
                 content="Tool execution timed out.",
                 error="tool_timeout",
-                suggestion="Retry with a narrower operation or increase the tool timeout.",
-                metadata={"timeout_seconds": context.tool_timeout_seconds},
+                suggestion=(
+                    "The operation may still have completed; inspect state before "
+                    "retrying or increasing the timeout."
+                ),
+                metadata={
+                    "timeout_seconds": context.tool_timeout_seconds,
+                    "outcome_unknown": True,
+                    "retry_safe": False,
+                },
             )
         return ToolResult(
             success=False,
@@ -446,7 +453,12 @@ class ToolRunner:
         if metadata_chars > max_chars:
             preserved = {
                 key: metadata[key]
-                for key in ("content_truncated", "original_content_chars")
+                for key in (
+                    "content_truncated",
+                    "original_content_chars",
+                    "outcome_unknown",
+                    "retry_safe",
+                )
                 if key in metadata
             }
             metadata = {

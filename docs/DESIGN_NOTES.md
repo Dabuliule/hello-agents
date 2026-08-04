@@ -134,7 +134,9 @@ This boundary is intentionally precise: Docker isolates bash processes, while a 
 
 MCP tools are adapters, not a second execution path. A discovered remote tool becomes a `BaseTool` and therefore passes through the same `ToolRunner`, sandbox, approval, event, and trace pipeline as a built-in tool.
 
-`ToolRegistry` owns async provider lifecycle because discovery must finish before the first model request. Startup is transactional: a failed provider closes previously started providers and exposes no partial dynamic tool set. Stdio connections persist for the runtime lifetime to avoid per-call process startup.
+`ToolRegistry` owns async provider lifecycle because discovery must finish before the first model request. Startup is transactional: a failed or cancelled provider closes every attempted provider and exposes no partial dynamic tool set. Each close has a deadline, and cleanup continues after one provider fails. Stdio connections persist for the runtime lifetime to avoid per-call process startup.
+
+The MCP SDK's async contexts are task-affine, so each stdio provider delegates connection setup, discovery, steady-state waiting, and teardown to one owner task. Public startup and shutdown only coordinate with that owner. Discovery has a total deadline plus explicit page, tool, and cumulative tool-and-cursor size bounds; this prevents a remote server from keeping startup alive through pagination or retaining an unbounded catalogue.
 
 Remote annotations are intentionally not authorization. The MCP specification defines them as untrusted hints, so local configuration owns effects and approval requirements. Conservative defaults mark tools as networked and external; explicit per-tool configuration is required to treat a tool as read-only.
 

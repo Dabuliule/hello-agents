@@ -304,6 +304,8 @@ def test_tool_runner_enforces_tool_and_approval_timeouts(tmp_path):
         ]
         finished = slow_events[-1].payload
         assert finished["result"]["error"] == "tool_timeout"
+        assert finished["result"]["metadata"]["outcome_unknown"] is True
+        assert finished["result"]["metadata"]["retry_safe"] is False
         assert set(finished["timings_ms"]) == {
             "governance",
             "approval_wait",
@@ -674,3 +676,24 @@ def test_tool_runner_bounds_structured_results_and_runtime_payloads(tmp_path):
         assert events[-1].payload["payload_truncated"] is True
 
     asyncio.run(run_test())
+
+
+def test_tool_output_limit_preserves_unknown_outcome_metadata():
+    result = ToolRunner._limit_output(
+        ToolResult(
+            success=False,
+            content="timed out",
+            error="mcp_tool_timeout",
+            metadata={
+                "outcome_unknown": True,
+                "retry_safe": False,
+                "server_info": "x" * 10_000,
+            },
+        ),
+        max_chars=100,
+        max_tokens=100,
+    )
+
+    assert result.metadata["metadata_truncated"] is True
+    assert result.metadata["outcome_unknown"] is True
+    assert result.metadata["retry_safe"] is False

@@ -35,6 +35,8 @@ class MCPServerSettings(BaseModel):
     env_allowlist: list[str] = Field(default_factory=list)
     timeout_seconds: int = Field(default=30, ge=1, le=300)
     max_tools: int = Field(default=128, ge=1, le=1024)
+    max_pages: int = Field(default=32, ge=1, le=1024)
+    max_discovery_bytes: int = Field(default=1_000_000, ge=1024, le=100_000_000)
     default_effects: set[MCPToolEffect] = Field(default_factory=_default_tool_effects)
     requires_approval: bool = True
     tools: dict[str, MCPToolPolicySettings] = Field(default_factory=dict)

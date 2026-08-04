@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+from mcp import types
 from pydantic import BaseModel, ValidationError
 
 from codecraft.approval.manager import ApprovalManager
@@ -17,6 +18,7 @@ from codecraft.core.turn_context import TurnContext
 from codecraft.mcp.client import (
     MCPConnectionError,
     MCPStdioProvider,
+    MCPTool,
     mcp_args_model,
     mcp_tool_name,
 )
@@ -71,6 +73,8 @@ def test_mcp_settings_parse_conservative_defaults_and_tool_override():
     assert server.default_effects == {"network", "external"}
     assert server.requires_approval is True
     assert server.env_allowlist == ["API_TOKEN"]
+    assert server.max_pages == 32
+    assert server.max_discovery_bytes == 1_000_000
     assert server.policy_for("add").effects == {"read_only"}
     assert server.policy_for("unknown").requires_approval is True
 
@@ -185,6 +189,219 @@ def test_async_tool_registry_starts_once_and_removes_provider_tools():
     asyncio.run(run_test())
 
 
+def test_async_tool_registry_rolls_back_cancelled_provider_start():
+    class RecordingProvider(AsyncToolProvider):
+        def __init__(self, name: str, *, block: bool = False) -> None:
+            self.name = name
+            self.block = block
+            self.entered = asyncio.Event()
+            self.closes = 0
+
+        async def start(self):
+            self.entered.set()
+            if self.block:
+                await asyncio.Event().wait()
+            return []
+
+        async def close(self):
+            self.closes += 1
+
+    async def run_test() -> None:
+        first = RecordingProvider("first")
+        blocked = RecordingProvider("blocked", block=True)
+        registry = ToolRegistry(async_providers=[first, blocked])
+        startup = asyncio.create_task(registry.start())
+        await blocked.entered.wait()
+
+        startup.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await startup
+
+        assert first.closes == 1
+        assert blocked.closes == 1
+
+    asyncio.run(run_test())
+
+
+def test_async_tool_registry_retries_failed_start_rollback():
+    class FailingProvider(AsyncToolProvider):
+        name = "failing"
+
+        def __init__(self) -> None:
+            self.closes = 0
+
+        async def start(self):
+            raise ValueError("startup failed")
+
+        async def close(self):
+            self.closes += 1
+            if self.closes == 1:
+                raise RuntimeError("cleanup failed")
+
+    async def run_test() -> None:
+        provider = FailingProvider()
+        registry = ToolRegistry(async_providers=[provider])
+
+        with pytest.raises(ValueError, match="startup failed") as raised:
+            await registry.start()
+
+        assert provider.closes == 1
+        assert raised.value.__notes__ == [
+            "failed to roll back 1 async tool provider(s)"
+        ]
+        with pytest.raises(RuntimeError, match="still require cleanup"):
+            await registry.start()
+
+        await registry.close()
+        assert provider.closes == 2
+
+    asyncio.run(run_test())
+
+
+def test_async_tool_registry_bounds_each_close_and_continues_cleanup():
+    class RecordingProvider(AsyncToolProvider):
+        def __init__(self, name: str, *, block_close: bool = False) -> None:
+            self.name = name
+            self.block_close = block_close
+            self.closes = 0
+
+        async def start(self):
+            return []
+
+        async def close(self):
+            self.closes += 1
+            if self.block_close and self.closes == 1:
+                await asyncio.Event().wait()
+
+    async def run_test() -> None:
+        quick = RecordingProvider("quick")
+        blocked = RecordingProvider("blocked", block_close=True)
+        registry = ToolRegistry(
+            async_providers=[quick, blocked],
+            provider_close_timeout_seconds=0.01,
+        )
+        await registry.start()
+
+        with pytest.raises(RuntimeError, match="failed to close 1"):
+            await registry.close()
+
+        assert blocked.closes == 1
+        assert quick.closes == 1
+        with pytest.raises(RuntimeError, match="still require cleanup"):
+            await registry.start()
+
+        await registry.close()
+        assert blocked.closes == 2
+        assert quick.closes == 1
+
+    asyncio.run(run_test())
+
+
+def test_mcp_discovery_bounds_pages_bytes_and_total_time(tmp_path):
+    class EndlessSession:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def list_tools(self, cursor):
+            self.calls += 1
+            return types.ListToolsResult(
+                tools=[],
+                nextCursor=f"cursor_{self.calls}",
+            )
+
+    class OversizedSession:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def list_tools(self, cursor):
+            self.calls += 1
+            return types.ListToolsResult(
+                tools=[
+                    types.Tool(
+                        name=f"large_{self.calls}",
+                        description="x" * 600,
+                        inputSchema={"type": "object"},
+                    )
+                ],
+                nextCursor="more" if self.calls == 1 else None,
+            )
+
+    class SlowSession:
+        async def list_tools(self, cursor):
+            await asyncio.sleep(60)
+
+    class LargeCursorSession:
+        async def list_tools(self, cursor):
+            return types.ListToolsResult(tools=[], nextCursor="x" * 2048)
+
+    async def run_test() -> None:
+        paged = MCPStdioProvider(
+            "paged",
+            MCPServerSettings(command="unused", max_pages=2),
+            workspace_cwd=tmp_path,
+        )
+        endless = EndlessSession()
+        with pytest.raises(RuntimeError, match="max_pages=2"):
+            await paged._list_tools(endless)
+        assert endless.calls == 2
+
+        bounded = MCPStdioProvider(
+            "bounded",
+            MCPServerSettings(command="unused", max_discovery_bytes=1024),
+            workspace_cwd=tmp_path,
+        )
+        oversized = OversizedSession()
+        with pytest.raises(RuntimeError, match="max_discovery_bytes=1024"):
+            await bounded._list_tools(oversized)
+        assert oversized.calls == 2
+
+        with pytest.raises(RuntimeError, match="max_discovery_bytes=1024"):
+            await bounded._list_tools(LargeCursorSession())
+
+        timed = MCPStdioProvider(
+            "timed",
+            MCPServerSettings(command="unused").model_copy(
+                update={"timeout_seconds": 0.01}
+            ),
+            workspace_cwd=tmp_path,
+        )
+        with pytest.raises(TimeoutError):
+            await timed._list_tools(SlowSession())
+
+    asyncio.run(run_test())
+
+
+def test_mcp_provider_cancellation_stops_owner_task(tmp_path, monkeypatch):
+    async def run_test() -> None:
+        provider = MCPStdioProvider(
+            "cancelled",
+            MCPServerSettings(command="unused"),
+            workspace_cwd=tmp_path,
+        )
+        entered = asyncio.Event()
+        cleaned = asyncio.Event()
+
+        async def fake_owner(ready, stop_event):
+            entered.set()
+            try:
+                await stop_event.wait()
+            finally:
+                cleaned.set()
+
+        monkeypatch.setattr(provider, "_run_owner", fake_owner)
+        startup = asyncio.create_task(provider.start())
+        await entered.wait()
+        startup.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await startup
+
+        assert cleaned.is_set()
+        assert provider._owner_task is None
+
+    asyncio.run(run_test())
+
+
 def test_mcp_stdio_provider_reports_startup_failure(tmp_path):
     async def run_test():
         provider = MCPStdioProvider(
@@ -198,6 +415,103 @@ def test_mcp_stdio_provider_reports_startup_failure(tmp_path):
 
         assert raised.value.code == "mcp_connection_failed"
         assert raised.value.metadata == {"mcp_server": "missing"}
+        assert provider._owner_task is None
+
+        with pytest.raises(MCPConnectionError):
+            await provider.start()
+        assert provider._owner_task is None
+
+    asyncio.run(run_test())
+
+
+def test_mcp_stdio_provider_can_close_from_a_different_task(tmp_path):
+    async def run_test() -> None:
+        fixture = Path(__file__).parent / "fixtures" / "mcp_test_server.py"
+        provider = MCPStdioProvider(
+            "cross_task",
+            MCPServerSettings(command=sys.executable, args=[str(fixture)]),
+            workspace_cwd=tmp_path,
+        )
+
+        tools = await asyncio.create_task(provider.start())
+        assert {tool.name for tool in tools} == {
+            "mcp__cross_task__add",
+            "mcp__cross_task__echo",
+        }
+        await asyncio.create_task(provider.close())
+        assert provider._owner_task is None
+
+    asyncio.run(run_test())
+
+
+def test_mcp_provider_close_can_be_bounded_and_retried(tmp_path):
+    async def run_test() -> None:
+        provider = MCPStdioProvider(
+            "bounded_close",
+            MCPServerSettings(command="unused"),
+            workspace_cwd=tmp_path,
+        )
+        stop_event = asyncio.Event()
+        release = asyncio.Event()
+
+        async def fake_owner() -> None:
+            await stop_event.wait()
+            await release.wait()
+
+        owner = asyncio.create_task(fake_owner())
+        provider._owner_task = owner
+        provider._stop_event = stop_event
+
+        with pytest.raises(TimeoutError):
+            async with asyncio.timeout(0.01):
+                await provider.close()
+
+        assert stop_event.is_set()
+        assert not owner.done()
+        assert provider._owner_task is owner
+
+        release.set()
+        await provider.close()
+        assert owner.done()
+        assert provider._owner_task is None
+
+    asyncio.run(run_test())
+
+
+def test_mcp_tool_timeout_marks_remote_outcome_unknown(tmp_path):
+    class SlowSession:
+        async def call_tool(self, name, arguments):
+            await asyncio.sleep(60)
+
+    async def run_test() -> None:
+        remote = types.Tool(
+            name="mutate",
+            inputSchema={"type": "object", "additionalProperties": False},
+        )
+        tool = MCPTool(
+            session=SlowSession(),
+            server_name="remote",
+            remote_tool=remote,
+            local_name="mcp__remote__mutate",
+            effects={ToolEffect.EXTERNAL},
+            requires_approval=True,
+            timeout_seconds=0.01,
+        )
+        call = ToolCall(
+            call_id="call_timeout",
+            name=tool.name,
+            arguments={},
+        )
+
+        result = await tool.arun(
+            tool.args_schema.model_validate({}),
+            ToolContext(context=_turn_context(tmp_path), call=call),
+        )
+
+        assert result.error == "mcp_tool_timeout"
+        assert result.metadata["outcome_unknown"] is True
+        assert result.metadata["retry_safe"] is False
+        assert "may still have completed" in (result.suggestion or "")
 
     asyncio.run(run_test())
 

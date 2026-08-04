@@ -497,6 +497,8 @@ command = "python"
 args = ["tools/mcp_server.py"]
 timeout_seconds = 30
 max_tools = 128
+max_pages = 32
+max_discovery_bytes = 1000000
 env_allowlist = ["PROJECT_API_TOKEN"]
 
 [mcp.servers.project_tools.tools.calculate]
@@ -509,6 +511,8 @@ requires_approval = true
 ```
 
 Remote JSON Schema is used both for model-visible tool definitions and local argument validation. Text and structured results are preserved; binary content is summarized instead of writing base64 payloads into session logs. Tool names are namespaced, sanitized, and bounded for model-provider compatibility.
+
+The handshake and complete paginated discovery share one deadline. `max_pages`, `max_tools`, and `max_discovery_bytes` bound the retained catalogue, while one lifecycle task owns the SDK session from context entry through shutdown so cancellation and cross-task runtime cleanup remain safe.
 
 MCP tool annotations are recorded as diagnostic metadata but never trusted for authorization. Unless configuration provides a per-tool override, discovered tools default to `network` plus `external` effects and require approval. With `network_access=false`, those default calls are denied by `SandboxPolicy`.
 
