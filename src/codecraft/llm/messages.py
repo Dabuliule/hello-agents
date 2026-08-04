@@ -13,12 +13,6 @@ class ModelRole(StrEnum):
     TOOL = "tool"
 
 
-class ModelMessageType(StrEnum):
-    MESSAGE = "message"
-    TOOL_CALL = "tool_call"
-    TOOL_RESULT = "tool_result"
-
-
 class _ModelMessageBase(BaseModel):
     """Provider-neutral, immutable model input item."""
 
@@ -28,7 +22,7 @@ class _ModelMessageBase(BaseModel):
 class ModelTextMessage(_ModelMessageBase):
     """A normal system, user, or assistant text message."""
 
-    type: Literal[ModelMessageType.MESSAGE] = ModelMessageType.MESSAGE
+    type: Literal["message"] = "message"
     role: Literal[ModelRole.SYSTEM, ModelRole.USER, ModelRole.ASSISTANT]
     content: str = Field(min_length=1)
 
@@ -36,7 +30,7 @@ class ModelTextMessage(_ModelMessageBase):
 class ModelToolCallMessage(_ModelMessageBase):
     """A structured tool call emitted by the assistant."""
 
-    type: Literal[ModelMessageType.TOOL_CALL] = ModelMessageType.TOOL_CALL
+    type: Literal["tool_call"] = "tool_call"
     role: Literal[ModelRole.ASSISTANT] = ModelRole.ASSISTANT
     name: str
     tool_call_id: str
@@ -53,7 +47,7 @@ class ModelToolCallMessage(_ModelMessageBase):
 class ModelToolResultMessage(_ModelMessageBase):
     """The result associated with one earlier tool call."""
 
-    type: Literal[ModelMessageType.TOOL_RESULT] = ModelMessageType.TOOL_RESULT
+    type: Literal["tool_result"] = "tool_result"
     role: Literal[ModelRole.TOOL] = ModelRole.TOOL
     content: str
     tool_call_id: str

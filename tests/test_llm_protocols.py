@@ -18,7 +18,6 @@ from codecraft.llm import (
     MockProvider,
     ModelEvent,
     ModelEventType,
-    ModelMessageType,
     ModelRequest,
     ModelRole,
     ModelTextMessage,
@@ -99,25 +98,25 @@ async def collect(provider: LLMProvider) -> list[ModelEvent]:
     "data",
     [
         {
-            "type": ModelMessageType.MESSAGE,
+            "type": "message",
             "role": ModelRole.TOOL,
             "content": "not a result",
         },
         {
-            "type": ModelMessageType.MESSAGE,
+            "type": "message",
             "role": ModelRole.USER,
             "content": "hello",
             "tool_call_id": "call_extra",
         },
         {
-            "type": ModelMessageType.TOOL_CALL,
+            "type": "tool_call",
             "role": ModelRole.USER,
             "name": "read_file",
             "tool_call_id": "call_read",
             "arguments": {},
         },
         {
-            "type": ModelMessageType.TOOL_CALL,
+            "type": "tool_call",
             "role": ModelRole.ASSISTANT,
             "content": "{}",
             "name": "read_file",
@@ -125,7 +124,7 @@ async def collect(provider: LLMProvider) -> list[ModelEvent]:
             "arguments": {},
         },
         {
-            "type": ModelMessageType.TOOL_RESULT,
+            "type": "tool_result",
             "role": ModelRole.TOOL,
             "content": "done",
         },

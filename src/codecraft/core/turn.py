@@ -8,7 +8,7 @@ from pathlib import Path
 from time import monotonic
 from typing import TYPE_CHECKING, Any
 
-from codecraft.core.conversation import Conversation
+from codecraft.core.conversation import Conversation, ConversationToolCallItem
 from codecraft.core.errors import CodecraftError
 from codecraft.core.token_budget import estimate_serialized_tokens
 from codecraft.core.turn_context import TurnContext
@@ -20,7 +20,7 @@ from codecraft.llm.events import (
     ModelTextPayload,
     ModelTokenCountPayload,
 )
-from codecraft.llm.messages import ModelMessage, ModelMessageType
+from codecraft.llm.messages import ModelMessage
 from codecraft.prompt import InstructionLoader, PromptBuilder
 from codecraft.schema.event import RuntimeEventType
 from codecraft.schema.input import SessionInput, UserMessagePayload
@@ -577,10 +577,9 @@ class Turn:
         """提取已访问路径，让后续模型调用获得对应目录的作用域指令。"""
         targets: list[Path] = []
         for item in self.session.conversation.items:
-            if item.metadata.get("type") != ModelMessageType.TOOL_CALL.value:
+            if not isinstance(item, ConversationToolCallItem):
                 continue
-            arguments = item.arguments or {}
-            path = arguments.get("path")
+            path = item.arguments.get("path")
             if isinstance(path, str) and path.strip():
                 targets.append(Path(path))
         return targets

@@ -4,11 +4,18 @@ import asyncio
 from collections.abc import AsyncIterator
 
 import pytest
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from codecraft.approval.manager import ApprovalManager
 from codecraft.approval.thread_reviewer import ThreadApprovalReviewer
-from codecraft.core.conversation import Conversation, ConversationItem, ConversationRole
+from codecraft.core.conversation import (
+    Conversation,
+    ConversationRole,
+    ConversationSummaryItem,
+    ConversationTextItem,
+    ConversationToolCallItem,
+    ConversationToolResultItem,
+)
 from codecraft.core.reconstruction import reconstruct_conversation
 from codecraft.core.runtime import AgentRuntime
 from codecraft.core.session_store import SessionStore
@@ -20,7 +27,6 @@ from codecraft.llm import (
     MockProvider,
     ModelEvent,
     ModelEventType,
-    ModelMessageType,
     ModelRequest,
     ModelToolResultMessage,
 )
@@ -118,6 +124,7 @@ def test_conversation_compaction_keeps_recent_summary_and_tool_arguments():
 
     assert compaction is not None
     summary = conversation.items[0]
+    assert isinstance(summary, ConversationSummaryItem)
     assert summary.role == ConversationRole.SUMMARY
     assert "untrusted historical data" in summary.content
     assert "important.py" in summary.content
@@ -126,22 +133,61 @@ def test_conversation_compaction_keeps_recent_summary_and_tool_arguments():
 
 
 def test_conversation_rejects_tool_call_with_non_assistant_role():
-    conversation = Conversation(
-        items=[
-            ConversationItem(
-                item_id="item_invalid",
-                role=ConversationRole.USER,
-                content="",
-                tool_call_id="call_invalid",
-                name="read_file",
-                arguments={"path": "README.md"},
-                metadata={"type": ModelMessageType.TOOL_CALL.value},
-            )
-        ]
-    )
+    with pytest.raises(ValidationError):
+        Conversation.model_validate(
+            {
+                "items": [
+                    {
+                        "type": "tool_call",
+                        "item_id": "item_invalid",
+                        "role": "user",
+                        "tool_call_id": "call_invalid",
+                        "name": "read_file",
+                        "arguments": {"path": "README.md"},
+                    }
+                ]
+            }
+        )
 
-    with pytest.raises(ValueError, match="requires the assistant role"):
-        conversation.build_model_messages()
+
+def test_conversation_discriminator_selects_concrete_items():
+    conversation = Conversation.model_validate(
+        {
+            "items": [
+                {
+                    "type": "message",
+                    "item_id": "item_user",
+                    "role": "user",
+                    "content": "read README",
+                },
+                {
+                    "type": "tool_call",
+                    "item_id": "item_call",
+                    "tool_call_id": "call_read",
+                    "name": "read_file",
+                    "arguments": {"path": "README.md"},
+                },
+                {
+                    "type": "tool_result",
+                    "item_id": "item_result",
+                    "content": "README contents",
+                    "tool_call_id": "call_read",
+                    "name": "read_file",
+                },
+                {
+                    "type": "summary",
+                    "item_id": "item_summary",
+                    "content": "Earlier context",
+                },
+            ]
+        }
+    )
+    text, call, result, summary = conversation.items
+
+    assert isinstance(text, ConversationTextItem)
+    assert isinstance(call, ConversationToolCallItem)
+    assert isinstance(result, ConversationToolResultItem)
+    assert isinstance(summary, ConversationSummaryItem)
 
 
 def test_summary_shortening_drops_oldest_entries_first():

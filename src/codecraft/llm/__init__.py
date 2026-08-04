@@ -8,7 +8,6 @@ from codecraft.llm.base import (
 from codecraft.llm.events import ModelEvent, ModelEventType
 from codecraft.llm.messages import (
     ModelMessage,
-    ModelMessageType,
     ModelRole,
     ModelTextMessage,
     ModelToolCallMessage,
@@ -32,7 +31,6 @@ __all__ = [
     "ModelEvent",
     "ModelEventType",
     "ModelMessage",
-    "ModelMessageType",
     "ModelRole",
     "ModelRequest",
     "ModelTextMessage",

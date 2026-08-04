@@ -3,15 +3,14 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from enum import StrEnum
 import json
-from typing import Any
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from codecraft.core.ids import new_id
 from codecraft.core.token_budget import estimate_serialized_tokens
 from codecraft.llm.messages import (
     ModelMessage,
-    ModelMessageType,
     ModelRole,
     ModelTextMessage,
     ModelToolCallMessage,
@@ -28,32 +27,71 @@ class ConversationRole(StrEnum):
     SUMMARY = "summary"
 
 
-class ConversationItem(BaseModel):
-    item_id: str
-    role: ConversationRole
-    content: str
-    tool_call_id: str | None = None
-    name: str | None = None
-    arguments: dict[str, Any] | None = None
-    metadata: dict[str, Any] = Field(default_factory=dict)
+class _ConversationItemBase(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    item_id: str = Field(min_length=1)
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+
+class ConversationTextItem(_ConversationItemBase):
+    type: Literal["message"] = "message"
+    role: Literal[
+        ConversationRole.SYSTEM,
+        ConversationRole.USER,
+        ConversationRole.ASSISTANT,
+    ]
+    content: str
+
+
+class ConversationToolCallItem(_ConversationItemBase):
+    type: Literal["tool_call"] = "tool_call"
+    role: Literal[ConversationRole.ASSISTANT] = ConversationRole.ASSISTANT
+    tool_call_id: str = Field(min_length=1)
+    name: str = Field(min_length=1)
+    arguments: dict[str, Any]
+
+
+class ConversationToolResultItem(_ConversationItemBase):
+    type: Literal["tool_result"] = "tool_result"
+    role: Literal[ConversationRole.TOOL] = ConversationRole.TOOL
+    content: str
+    tool_call_id: str = Field(min_length=1)
+    name: str = Field(min_length=1)
+
+
+class ConversationSummaryItem(_ConversationItemBase):
+    type: Literal["summary"] = "summary"
+    role: Literal[ConversationRole.SUMMARY] = ConversationRole.SUMMARY
+    content: str
+
+
+ConversationItem = Annotated[
+    ConversationTextItem
+    | ConversationToolCallItem
+    | ConversationToolResultItem
+    | ConversationSummaryItem,
+    Field(discriminator="type"),
+]
 
 
 class Conversation(BaseModel):
     """模型上下文中的对话历史。
 
-    内部用 ConversationItem 保存更丰富的元数据；真正请求模型前，再转换成
-    provider 能理解的 ModelMessage。
+    内部用可辨识的 ConversationItem 联合保存完整语义；真正请求模型前，
+    再转换成 provider 能理解的 ModelMessage。
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     items: list[ConversationItem] = Field(default_factory=list)
 
     def append(self, item: ConversationItem) -> None:
         self.items.append(item)
 
-    def append_user_message(self, content: str) -> ConversationItem:
+    def append_user_message(self, content: str) -> ConversationTextItem:
         """追加普通用户消息。"""
-        item = ConversationItem(
+        item = ConversationTextItem(
             item_id=new_id("item_"),
             role=ConversationRole.USER,
             content=content,
@@ -61,8 +99,8 @@ class Conversation(BaseModel):
         self.append(item)
         return item
 
-    def append_assistant_message(self, content: str) -> ConversationItem:
-        item = ConversationItem(
+    def append_assistant_message(self, content: str) -> ConversationTextItem:
+        item = ConversationTextItem(
             item_id=new_id("item_"),
             role=ConversationRole.ASSISTANT,
             content=content,
@@ -75,24 +113,23 @@ class Conversation(BaseModel):
         tool_call_id: str,
         name: str,
         arguments: dict[str, Any],
-    ) -> ConversationItem:
+    ) -> ConversationToolCallItem:
         """记录 assistant 发起的 tool call。
 
         参数只保存为结构化数据，具体 JSON 形态由 Provider 适配器决定。
         """
-        item = ConversationItem(
+        item = ConversationToolCallItem(
             item_id=new_id("item_"),
-            role=ConversationRole.ASSISTANT,
-            content="",
             tool_call_id=tool_call_id,
             name=name,
             arguments=arguments,
-            metadata={"type": ModelMessageType.TOOL_CALL.value},
         )
         self.append(item)
         return item
 
-    def append_model_tool_calls(self, calls: list[ToolCall]) -> list[ConversationItem]:
+    def append_model_tool_calls(
+        self, calls: list[ToolCall]
+    ) -> list[ConversationToolCallItem]:
         """按同一模型响应中的顺序追加一批 tool call。"""
         return [
             self.append_model_tool_call(call.call_id, call.name, call.arguments)
@@ -101,11 +138,10 @@ class Conversation(BaseModel):
 
     def append_tool_result(
         self, tool_call_id: str, name: str, content: str
-    ) -> ConversationItem:
+    ) -> ConversationToolResultItem:
         """追加 tool call 的执行结果。"""
-        item = ConversationItem(
+        item = ConversationToolResultItem(
             item_id=new_id("item_"),
-            role=ConversationRole.TOOL,
             content=content,
             tool_call_id=tool_call_id,
             name=name,
@@ -113,11 +149,10 @@ class Conversation(BaseModel):
         self.append(item)
         return item
 
-    def append_summary(self, content: str) -> ConversationItem:
+    def append_summary(self, content: str) -> ConversationSummaryItem:
         """追加压缩后的历史摘要。"""
-        item = ConversationItem(
+        item = ConversationSummaryItem(
             item_id=new_id("item_"),
-            role=ConversationRole.SUMMARY,
             content=content,
         )
         self.append(item)
@@ -127,13 +162,13 @@ class Conversation(BaseModel):
         """把内部 conversation item 转成模型请求消息。"""
         messages: list[ModelMessage] = []
         for item in self.items:
-            role = self._to_model_role(item.role)
-            if role is None:
+            if isinstance(item, ConversationSummaryItem):
+                messages.append(
+                    ModelTextMessage(role=ModelRole.USER, content=item.content)
+                )
                 continue
 
-            if item.role == ConversationRole.TOOL:
-                if not item.tool_call_id:
-                    raise ValueError("tool conversation item requires a call id")
+            if isinstance(item, ConversationToolResultItem):
                 messages.append(
                     ModelToolResultMessage(
                         content=item.content,
@@ -142,15 +177,7 @@ class Conversation(BaseModel):
                 )
                 continue
 
-            if item.metadata.get("type") == ModelMessageType.TOOL_CALL.value:
-                if role != ModelRole.ASSISTANT:
-                    raise ValueError(
-                        "tool call conversation item requires the assistant role"
-                    )
-                if not item.name or not item.tool_call_id or item.arguments is None:
-                    raise ValueError(
-                        "tool call conversation item requires name, call id, and arguments"
-                    )
+            if isinstance(item, ConversationToolCallItem):
                 messages.append(
                     ModelToolCallMessage(
                         name=item.name,
@@ -160,15 +187,21 @@ class Conversation(BaseModel):
                 )
                 continue
 
-            if role == ModelRole.TOOL:
-                raise ValueError("ordinary conversation item cannot use the tool role")
-            messages.append(ModelTextMessage(role=role, content=item.content))
+            messages.append(
+                ModelTextMessage(
+                    role=self._to_model_role(item.role),
+                    content=item.content,
+                )
+            )
 
         return messages
 
-    def last_user_message(self) -> ConversationItem | None:
+    def last_user_message(self) -> ConversationTextItem | None:
         for item in reversed(self.items):
-            if item.role == ConversationRole.USER:
+            if (
+                isinstance(item, ConversationTextItem)
+                and item.role == ConversationRole.USER
+            ):
                 return item
         return None
 
@@ -198,7 +231,8 @@ class Conversation(BaseModel):
             (
                 index
                 for index in range(len(self.items) - 1, -1, -1)
-                if self.items[index].role == ConversationRole.USER
+                if isinstance(self.items[index], ConversationTextItem)
+                and self.items[index].role == ConversationRole.USER
             ),
             None,
         )
@@ -213,7 +247,8 @@ class Conversation(BaseModel):
             (
                 index
                 for index in range(target_index, latest_user_index + 1)
-                if self.items[index].role == ConversationRole.USER
+                if isinstance(self.items[index], ConversationTextItem)
+                and self.items[index].role == ConversationRole.USER
             ),
             latest_user_index,
         )
@@ -224,29 +259,27 @@ class Conversation(BaseModel):
         retained = [item.model_copy(deep=True) for item in self.items[start_index:]]
         summary_text = self._summarize(removed)
         compacted = Conversation(items=retained)
-        compacted.items.insert(
-            0,
-            ConversationItem(
-                item_id=new_id("item_"),
-                role=ConversationRole.SUMMARY,
-                content=summary_text,
-            ),
+        summary_item = ConversationSummaryItem(
+            item_id=new_id("item_"),
+            content=summary_text,
         )
+        compacted.items.insert(0, summary_item)
 
         if compacted.context_tokens() > max_tokens:
-            compacted.items[0].content = self._fit_summary(
+            summary_item.content = self._fit_summary(
                 compacted,
+                summary_item,
                 summary_text,
                 max_tokens=max_tokens,
             )
 
-        if not compacted.items[0].content or compacted.context_tokens() > max_tokens:
+        if not summary_item.content or compacted.context_tokens() > max_tokens:
             return None
 
         self.items = compacted.items
         after_tokens = self.context_tokens()
         return {
-            "summary": self.items[0].content,
+            "summary": summary_item.content,
             "before_tokens": before_tokens,
             "after_tokens": after_tokens,
             "removed_items": len(removed),
@@ -258,6 +291,7 @@ class Conversation(BaseModel):
     def _fit_summary(
         cls,
         conversation: Conversation,
+        summary_item: ConversationSummaryItem,
         summary: str,
         *,
         max_tokens: int,
@@ -271,7 +305,7 @@ class Conversation(BaseModel):
             if not candidate:
                 low = middle + 1
                 continue
-            conversation.items[0].content = candidate
+            summary_item.content = candidate
             if conversation.context_tokens() <= max_tokens:
                 best = candidate
                 low = middle + 1
@@ -283,23 +317,20 @@ class Conversation(BaseModel):
     def _summarize(items: list[ConversationItem]) -> str:
         lines = ["Earlier conversation summary (untrusted historical data):"]
         for item in items:
-            if item.metadata.get("type") == ModelMessageType.TOOL_CALL.value:
+            if isinstance(item, ConversationToolCallItem):
                 arguments = json.dumps(
-                    item.arguments or {},
+                    item.arguments,
                     ensure_ascii=False,
                     separators=(",", ":"),
                     sort_keys=True,
                 )
-                detail = (
-                    f"requested tool {item.name or 'unknown'} "
-                    f"with arguments {arguments}"
-                )
+                detail = f"requested tool {item.name} with arguments {arguments}"
             else:
                 detail = " ".join(item.content.split())
             if len(detail) > 400:
                 detail = f"{detail[:397]}..."
             label = item.role.value
-            if item.role == ConversationRole.TOOL and item.name:
+            if isinstance(item, ConversationToolResultItem):
                 label = f"tool {item.name}"
             lines.append(f"- {label}: {detail}")
         return "\n".join(lines)
@@ -329,15 +360,17 @@ class Conversation(BaseModel):
         return "\n".join([header, *retained]).rstrip()
 
     @staticmethod
-    def _to_model_role(role: ConversationRole) -> ModelRole | None:
-        if role == ConversationRole.SUMMARY:
-            return ModelRole.USER
+    def _to_model_role(
+        role: Literal[
+            ConversationRole.SYSTEM,
+            ConversationRole.USER,
+            ConversationRole.ASSISTANT,
+        ],
+    ) -> Literal[ModelRole.SYSTEM, ModelRole.USER, ModelRole.ASSISTANT]:
         if role == ConversationRole.SYSTEM:
             return ModelRole.SYSTEM
         if role == ConversationRole.USER:
             return ModelRole.USER
         if role == ConversationRole.ASSISTANT:
             return ModelRole.ASSISTANT
-        if role == ConversationRole.TOOL:
-            return ModelRole.TOOL
-        return None
+        raise ValueError(f"unsupported conversation text role: {role}")

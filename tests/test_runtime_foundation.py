@@ -35,7 +35,6 @@ from codecraft.llm import (
     ModelEvent,
     ModelEventType,
     ModelMessage,
-    ModelMessageType,
     ModelRequest,
     ModelRole,
     ModelTextMessage,
@@ -3128,6 +3127,7 @@ def test_runtime_resume_uses_context_compaction_summary(tmp_path):
                         "items": [
                             {
                                 "item_id": "item_summary",
+                                "type": "summary",
                                 "role": "summary",
                                 "content": "old conversation summary",
                             }
@@ -3222,8 +3222,8 @@ def test_runtime_allows_final_answer_after_reaching_tool_call_limit(tmp_path):
             None,
             "tool loop works",
         ]
-        assert messages[2].type == ModelMessageType.TOOL_CALL
-        assert messages[3].type == ModelMessageType.TOOL_RESULT
+        assert isinstance(messages[2], ModelToolCallMessage)
+        assert isinstance(messages[3], ModelToolResultMessage)
 
     asyncio.run(run_test())
 
