@@ -38,10 +38,12 @@ def build_trace_report(session_id: str, events: list[RuntimeEvent]) -> dict[str,
 
 
 def render_trace_json(report: dict[str, Any]) -> str:
+    """渲染保留 Unicode、带缩进且以换行结束的稳定 Trace JSON。"""
     return json.dumps(report, ensure_ascii=False, indent=2) + "\n"
 
 
 def render_trace_html(report: dict[str, Any]) -> str:
+    """把 Trace 报告渲染为无外部依赖且所有动态文本均转义的 HTML。"""
     session = report["session"]
     metrics = report["metrics"]
     title = f"CodeCraft Trace {session['session_id']}"
@@ -151,6 +153,7 @@ def render_trace_html(report: dict[str, Any]) -> str:
 
 
 def _render_session_panel(session: dict[str, Any]) -> str:
+    """渲染 Session 身份、来源、模型和时间范围面板。"""
     rows = [
         ("Session", session.get("session_id")),
         ("Source", session.get("source") or "-"),
@@ -167,6 +170,7 @@ def _render_session_panel(session: dict[str, Any]) -> str:
 
 
 def _render_metrics(metrics: dict[str, Any]) -> str:
+    """渲染事件、Turn、Tool、审批和错误计数卡片。"""
     cards = [
         ("Events", metrics["event_count"]),
         ("Turns", metrics["turn_count"]),
@@ -183,6 +187,7 @@ def _render_metrics(metrics: dict[str, Any]) -> str:
 
 
 def _render_tool_table(tool_calls: list[dict[str, Any]]) -> str:
+    """渲染工具终态、耗时和结果预览；空列表给出显式占位行。"""
     rows = "\n".join(
         "<tr>"
         f"<td>{escape(str(call.get('seq') or '-'))}</td>"
@@ -203,6 +208,7 @@ def _render_tool_table(tool_calls: list[dict[str, Any]]) -> str:
 
 
 def _render_turn_table(turns: list[dict[str, Any]]) -> str:
+    """渲染每个 Turn 的事件数、工具数、终态和短摘要。"""
     rows = "\n".join(
         "<tr>"
         f"<td><code>{escape(str(turn.get('turn_id') or '-'))}</code></td>"
@@ -223,6 +229,7 @@ def _render_turn_table(turns: list[dict[str, Any]]) -> str:
 
 
 def _render_event_table(events: list[dict[str, Any]]) -> str:
+    """按日志顺序渲染所有事件的 seq、类型、Turn、时间与摘要。"""
     rows = "\n".join(
         "<tr>"
         f"<td>{escape(str(event['seq']))}</td>"
@@ -241,6 +248,7 @@ def _render_event_table(events: list[dict[str, Any]]) -> str:
 
 
 def _metrics(events: list[RuntimeEvent]) -> dict[str, Any]:
+    """从事件事实聚合工具成功/失败、审批、错误与最终状态。"""
     tool_finishes = [
         event for event in events if event.type == RuntimeEventType.TOOL_CALL_FINISHED
     ]
@@ -275,6 +283,7 @@ def _metrics(events: list[RuntimeEvent]) -> dict[str, Any]:
 
 
 def _turns(events: list[RuntimeEvent]) -> list[dict[str, Any]]:
+    """按首次出现的 turn_id 分组并汇总每轮时间、数量、状态与摘要。"""
     grouped: dict[str, list[RuntimeEvent]] = {}
     for event in events:
         if event.turn_id:
@@ -304,6 +313,11 @@ def _turns(events: list[RuntimeEvent]) -> list[dict[str, Any]]:
 
 
 def _tool_calls(events: list[RuntimeEvent]) -> list[dict[str, Any]]:
+    """用 call_id 对账模型请求、Runner 开始与完成事件，生成调用 Trace。
+
+    名称优先取 finish，缺失时回退 started/requested；只有 FINISHED 形成一条
+    调用记录，避免把尚未收口的请求误算成失败。
+    """
     requested: dict[str, RuntimeEvent] = {}
     started: dict[str, RuntimeEvent] = {}
     calls: list[dict[str, Any]] = []
@@ -339,6 +353,7 @@ def _tool_calls(events: list[RuntimeEvent]) -> list[dict[str, Any]]:
 
 
 def _event_row(event: RuntimeEvent) -> dict[str, Any]:
+    """把类型化 RuntimeEvent 转成 Trace schema 的完整事件行。"""
     return {
         "event_id": event.event_id,
         "seq": event.seq,
@@ -351,6 +366,7 @@ def _event_row(event: RuntimeEvent) -> dict[str, Any]:
 
 
 def _session_config(events: list[RuntimeEvent]) -> dict[str, Any]:
+    """从首事件读取 config mapping；日志为空或形态不符返回空。"""
     if not events:
         return {}
     config = events[0].payload.get("config")
@@ -358,6 +374,7 @@ def _session_config(events: list[RuntimeEvent]) -> dict[str, Any]:
 
 
 def _final_status(events: list[RuntimeEvent]) -> str:
+    """反向选择最近 Turn abort/error/finish，推导 Session Trace 终态。"""
     for event in reversed(events):
         if event.type == RuntimeEventType.TURN_ABORTED:
             return "aborted"
@@ -370,6 +387,7 @@ def _final_status(events: list[RuntimeEvent]) -> str:
 
 
 def _turn_status(events: list[RuntimeEvent]) -> str:
+    """反向选择单 Turn 最近终态；尚无终态返回 running。"""
     for event in reversed(events):
         if event.type == RuntimeEventType.TURN_ABORTED:
             return "aborted"
@@ -381,6 +399,7 @@ def _turn_status(events: list[RuntimeEvent]) -> str:
 
 
 def _turn_summary(events: list[RuntimeEvent]) -> str:
+    """优先用用户问题，其次最终答案，最后末事件摘要描述 Turn。"""
     for event in events:
         if event.type == RuntimeEventType.USER_MESSAGE:
             text = event.payload.get("text")
@@ -395,6 +414,7 @@ def _turn_summary(events: list[RuntimeEvent]) -> str:
 
 
 def _event_summary(event: RuntimeEvent) -> str:
+    """按事件类型提取最有信息量且长度受限的人类摘要。"""
     payload = event.payload
     if event.type == RuntimeEventType.USER_MESSAGE:
         return _compact(str(payload.get("text") or ""))
@@ -413,20 +433,24 @@ def _event_summary(event: RuntimeEvent) -> str:
 
 
 def _result_preview(result: Any) -> str:
+    """从工具 result mapping 选 content/error 并压缩为短预览。"""
     if not isinstance(result, dict):
         return ""
     return _compact(str(result.get("content") or result.get("error") or ""))
 
 
 def _payload_name(event: RuntimeEvent | None) -> object:
+    """空安全读取事件 payload.name。"""
     return event.payload.get("name") if event else None
 
 
 def _payload_args(event: RuntimeEvent | None) -> object:
+    """空安全读取事件 payload.arguments。"""
     return event.payload.get("arguments") if event else None
 
 
 def _compact(value: str, max_chars: int = 240) -> str:
+    """合并所有空白并用省略号截成最多 max_chars 字符。"""
     compact = " ".join(value.split())
     if len(compact) <= max_chars:
         return compact
@@ -434,20 +458,24 @@ def _compact(value: str, max_chars: int = 240) -> str:
 
 
 def _duration_ms(start: datetime | None, end: datetime | None) -> int | None:
+    """计算非负毫秒时差；任一端缺失返回 None。"""
     if start is None or end is None:
         return None
     return max(0, int((end - start).total_seconds() * 1000))
 
 
 def _format_ms(value: object) -> str:
+    """整数添加 ms，其他缺失/未知值显示短横线。"""
     return f"{value}ms" if isinstance(value, int) else "-"
 
 
 def _iso(value: datetime | None) -> str | None:
+    """空安全转换 datetime 为 ISO 8601。"""
     return value.isoformat() if value else None
 
 
 def _join_model(session: dict[str, Any]) -> str:
+    """组合 provider/model，允许任一字段缺失。"""
     provider = session.get("model_provider")
     model = session.get("model")
     if provider and model:

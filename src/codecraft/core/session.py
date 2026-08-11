@@ -29,6 +29,8 @@ from codecraft.tool.runner import ToolRunner
 
 
 class SessionStatus(StrEnum):
+    """Session 是否可调度、正执行、处理中断或永久关闭。"""
+
     IDLE = "idle"
     RUNNING = "running"
     INTERRUPTED = "interrupted"
@@ -57,6 +59,11 @@ class Session:
         seq: int = 0,
         skill_registry: SkillRegistry | None = None,
     ) -> None:
+        """装配会话状态、依赖、三类锁、输入队列和可选恢复历史。
+
+        ``seq`` 应等于恢复日志最后事件序号；默认 Reviewer 是能接收 Thread
+        旁路审批的 ThreadApprovalReviewer。Session 始终只保存一个 active_turn。
+        """
         self.session_id = config.session_id
         self.config = config
         self.conversation = conversation or Conversation()
@@ -194,6 +201,7 @@ class Session:
         await asyncio.shield(task)
 
     async def close(self) -> None:
+        """串行、幂等关闭；先取消并等待 active Turn，再持久化 SESSION_CLOSED。"""
         async with self._close_lock:
             if self._closed_event_emitted:
                 return
@@ -252,6 +260,7 @@ class Session:
                 await self.start_turn_if_idle()
 
     async def _abort_from_exception(self, turn: Turn, exc: Exception) -> None:
+        """先记录 ERROR 事件，再用同一稳定信息收口 TURN_ABORTED。"""
         error_payload = self._error_payload(exc)
         await self.emit(
             RuntimeEventType.ERROR,
@@ -266,6 +275,7 @@ class Session:
 
     @staticmethod
     def _error_payload(exc: Exception) -> dict[str, Any]:
+        """保留 CodecraftError 机器字段，未知异常归一为 runtime_error。"""
         if isinstance(exc, CodecraftError):
             return {
                 "code": exc.code,

@@ -17,6 +17,7 @@ def estimate_text_tokens(text: str) -> int:
 
 
 def estimate_serialized_tokens(value: Any) -> int:
+    """按紧凑、保留 Unicode 的 JSON 形态估算结构化值 Token。"""
     serialized = json.dumps(
         value,
         ensure_ascii=False,

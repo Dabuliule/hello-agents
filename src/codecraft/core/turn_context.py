@@ -11,6 +11,13 @@ from codecraft.schema.tool import ToolSpec
 
 
 class TurnContext(BaseModel):
+    """一次 Turn 开始时冻结的模型、权限、工具和所有执行预算快照。
+
+    SessionConfig 可以在不同 Session 间变化；已运行 Turn 的安全判断必须始终
+    使用创建时的同一份事实，因此模型 Prompt、ToolRunner、Approval 和 Sandbox
+    都接收 frozen TurnContext，而不在执行中回读可变配置。
+    """
+
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     session_id: str

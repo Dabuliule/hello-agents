@@ -33,6 +33,7 @@ class AgentRuntime:
         tool_result_observers: Sequence[ToolResultObserver] | None = None,
         skill_registry: SkillRegistry | None = None,
     ) -> None:
+        """注入持久化、模型、工具、审批、事件、Observer 与 Skill 依赖。"""
         self.session_store = session_store
         self.llm_providers = llm_providers
         self.tool_registry = tool_registry
@@ -103,10 +104,12 @@ class AgentRuntime:
         return thread
 
     async def resume_last(self, cwd: Path | None = None) -> AgentThread:
+        """恢复可选 cwd 范围内最近修改且有效的 Session。"""
         snapshot = await self.session_store.resume_last(cwd=cwd)
         return await self.resume_snapshot(snapshot)
 
     async def list_sessions(self, cwd: Path | None = None) -> list[SessionSummary]:
+        """列出可选 cwd 范围内的可恢复 Session 摘要。"""
         return await self.session_store.list_sessions(cwd=cwd)
 
     async def close(self) -> None:
@@ -123,6 +126,7 @@ class AgentRuntime:
             ) from errors[0]
 
     def _skill_snapshot(self) -> dict[str, list[dict[str, Any]]] | None:
+        """序列化可用 Skill 与发现诊断；二者都空时省略事件字段。"""
         available = [
             metadata.model_dump(mode="json") for metadata in self.skill_registry.list()
         ]

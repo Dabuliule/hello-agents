@@ -16,6 +16,7 @@ class EventBus:
     """
 
     def __init__(self) -> None:
+        """创建按登记顺序保存 handler 的空事件总线。"""
         self._handlers: list[EventHandler] = []
 
     def subscribe(

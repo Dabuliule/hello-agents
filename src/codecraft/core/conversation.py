@@ -20,6 +20,8 @@ from codecraft.schema.tool import ToolCall
 
 
 class ConversationRole(StrEnum):
+    """持久历史中的文本、工具和摘要领域角色。"""
+
     SYSTEM = "system"
     USER = "user"
     ASSISTANT = "assistant"
@@ -28,6 +30,8 @@ class ConversationRole(StrEnum):
 
 
 class _ConversationItemBase(BaseModel):
+    """所有历史项共享的唯一 ID、UTC 时间和严格字段约束。"""
+
     model_config = ConfigDict(extra="forbid")
 
     item_id: str = Field(min_length=1)
@@ -35,6 +39,8 @@ class _ConversationItemBase(BaseModel):
 
 
 class ConversationTextItem(_ConversationItemBase):
+    """System、User 或 Assistant 的普通文本消息。"""
+
     type: Literal["message"] = "message"
     role: Literal[
         ConversationRole.SYSTEM,
@@ -45,6 +51,8 @@ class ConversationTextItem(_ConversationItemBase):
 
 
 class ConversationToolCallItem(_ConversationItemBase):
+    """Assistant 发起的结构化工具名、call ID 与 arguments。"""
+
     type: Literal["tool_call"] = "tool_call"
     role: Literal[ConversationRole.ASSISTANT] = ConversationRole.ASSISTANT
     tool_call_id: str = Field(min_length=1)
@@ -53,6 +61,8 @@ class ConversationToolCallItem(_ConversationItemBase):
 
 
 class ConversationToolResultItem(_ConversationItemBase):
+    """与 call ID 关联、供模型继续推理的 Tool observation 文本。"""
+
     type: Literal["tool_result"] = "tool_result"
     role: Literal[ConversationRole.TOOL] = ConversationRole.TOOL
     content: str
@@ -61,6 +71,8 @@ class ConversationToolResultItem(_ConversationItemBase):
 
 
 class ConversationSummaryItem(_ConversationItemBase):
+    """替代已移除旧历史的确定性、不可信数据摘要。"""
+
     type: Literal["summary"] = "summary"
     role: Literal[ConversationRole.SUMMARY] = ConversationRole.SUMMARY
     content: str
@@ -87,6 +99,7 @@ class Conversation(BaseModel):
     items: list[ConversationItem] = Field(default_factory=list)
 
     def append(self, item: ConversationItem) -> None:
+        """按发生顺序追加一个已校验的可辨识历史项。"""
         self.items.append(item)
 
     def append_user_message(self, content: str) -> ConversationTextItem:
@@ -100,6 +113,7 @@ class Conversation(BaseModel):
         return item
 
     def append_assistant_message(self, content: str) -> ConversationTextItem:
+        """追加最终或已完整聚合的 Assistant 文本消息。"""
         item = ConversationTextItem(
             item_id=new_id("item_"),
             role=ConversationRole.ASSISTANT,
@@ -197,6 +211,7 @@ class Conversation(BaseModel):
         return messages
 
     def last_user_message(self) -> ConversationTextItem | None:
+        """反向查找最近用户文本；历史中没有用户消息时返回 None。"""
         for item in reversed(self.items):
             if (
                 isinstance(item, ConversationTextItem)
@@ -296,6 +311,7 @@ class Conversation(BaseModel):
         *,
         max_tokens: int,
     ) -> str:
+        """二分摘要字符预算，保留能让整个 Conversation 装入上限的最大形态。"""
         low = 0
         high = len(summary)
         best = ""
@@ -315,6 +331,11 @@ class Conversation(BaseModel):
 
     @staticmethod
     def _summarize(items: list[ConversationItem]) -> str:
+        """把旧项确定性压成角色标记行，并限制每项最多 400 字符。
+
+        Tool arguments 使用 sort_keys 紧凑 JSON；摘要 header 明确标为 untrusted
+        historical data，防止旧内容被误当成新的 system instructions。
+        """
         lines = ["Earlier conversation summary (untrusted historical data):"]
         for item in items:
             if isinstance(item, ConversationToolCallItem):
@@ -337,6 +358,7 @@ class Conversation(BaseModel):
 
     @staticmethod
     def _recent_summary(summary: str, *, max_chars: int) -> str:
+        """字符不足时优先保留较新的完整摘要行，并插入旧项省略标记。"""
         if len(summary) <= max_chars:
             return summary
         header = "Earlier conversation summary (untrusted historical data):"
@@ -367,6 +389,7 @@ class Conversation(BaseModel):
             ConversationRole.ASSISTANT,
         ],
     ) -> Literal[ModelRole.SYSTEM, ModelRole.USER, ModelRole.ASSISTANT]:
+        """穷举映射普通 ConversationRole 到 Provider-neutral ModelRole。"""
         if role == ConversationRole.SYSTEM:
             return ModelRole.SYSTEM
         if role == ConversationRole.USER:

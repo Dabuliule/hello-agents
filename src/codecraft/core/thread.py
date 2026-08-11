@@ -19,14 +19,17 @@ class AgentThread:
     """
 
     def __init__(self, session: Session) -> None:
+        """订阅 Session EventBus，并把每个事件捕获进 FIFO 异步队列。"""
         self.session = session
         self._events: asyncio.Queue[RuntimeEvent] = asyncio.Queue()
         self.session.event_bus.subscribe(self._capture_event)
 
     async def submit(self, input: SessionInput) -> str:
+        """提交消息/中止/审批输入，返回新 Turn ID 或受控操作 ID。"""
         return await self.session.submit(input)
 
     async def next_event(self) -> RuntimeEvent:
+        """等待并取出下一条 RuntimeEvent。"""
         return await self._events.get()
 
     async def events(self) -> AsyncIterator[RuntimeEvent]:
@@ -38,9 +41,11 @@ class AgentThread:
                 return
 
     async def interrupt(self, reason: str = "user_interrupt") -> None:
+        """请求幂等中止当前 active Turn。"""
         await self.session.interrupt(reason)
 
     async def close(self) -> None:
+        """关闭 Session，并在必要时先中止 active Turn。"""
         await self.session.close()
 
     def list_pending_approvals(self) -> list[ApprovalRequest]:
@@ -51,6 +56,7 @@ class AgentThread:
         return []
 
     async def read_snapshot(self) -> SessionSnapshot:
+        """从 Store 读取当前已持久化事件，返回一致 Snapshot。"""
         events = await self.session.session_store.load_events(self.session.session_id)
         return SessionSnapshot(config=self.session.config, events=events)
 
@@ -62,4 +68,5 @@ class AgentThread:
         await self.session.wait_until_idle()
 
     async def _capture_event(self, event: RuntimeEvent) -> None:
+        """EventBus handler：按发布顺序将事件放入 Thread 队列。"""
         await self._events.put(event)
