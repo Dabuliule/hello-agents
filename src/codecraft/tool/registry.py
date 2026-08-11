@@ -19,6 +19,11 @@ class ToolRegistry:
         async_providers: Iterable[AsyncToolProvider] | None = None,
         provider_close_timeout_seconds: float = 10.0,
     ) -> None:
+        """注册静态工具/异步 Provider，并初始化串行生命周期状态。
+
+        Raises:
+            ValueError: close timeout 非正或初始工具/Provider 重名。
+        """
         if provider_close_timeout_seconds <= 0:
             raise ValueError("provider close timeout must be positive")
         self._tools: dict[str, BaseTool] = {}
@@ -50,6 +55,7 @@ class ToolRegistry:
             self.register(tool)
 
     def register_async_provider(self, provider: AsyncToolProvider) -> None:
+        """在生命周期开始前登记名称唯一的异步 Provider。"""
         if self._started or self._pending_provider_closes:
             raise RuntimeError(
                 "cannot add an async tool provider after registry lifecycle begins"
@@ -62,6 +68,11 @@ class ToolRegistry:
         self._async_providers[name] = provider
 
     async def start(self) -> None:
+        """串行启动 Provider，全部成功后才原子发布其工具。
+
+        中途失败会按已启动逆序 close；未清理成功的 Provider 留在 pending，
+        禁止再次 start，直到 close 重试完成，避免资源泄漏和重复工具曝光。
+        """
         async with self._lifecycle_lock:
             if self._started:
                 return
@@ -100,6 +111,7 @@ class ToolRegistry:
             self._started = True
 
     async def close(self) -> None:
+        """撤下动态工具并逆序关闭 Provider；失败项保留以供下次 close 重试。"""
         async with self._lifecycle_lock:
             if not self._started and not self._pending_provider_closes:
                 return
@@ -119,6 +131,7 @@ class ToolRegistry:
                 ) from errors[0]
 
     async def _close_pending_providers(self) -> list[BaseException]:
+        """逐个限时关闭 pending Provider，保存失败项并正确传播取消。"""
         errors: list[BaseException] = []
         cancellation: asyncio.CancelledError | None = None
         providers = self._pending_provider_closes
@@ -153,6 +166,7 @@ class ToolRegistry:
             ) from exc
 
     def list(self) -> builtins.list[BaseTool]:
+        """按注册顺序返回当前可调用工具快照。"""
         return builtins.list(self._tools.values())
 
     def specs(self) -> builtins.list[ToolSpec]:
@@ -160,4 +174,5 @@ class ToolRegistry:
         return [tool.spec() for tool in self.list()]
 
     def async_provider_names(self) -> builtins.list[str]:
+        """按登记顺序返回异步 Provider 名称。"""
         return builtins.list(self._async_providers)

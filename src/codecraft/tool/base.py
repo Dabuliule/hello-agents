@@ -44,4 +44,6 @@ class BaseTool(ABC):
         )
 
     @abstractmethod
-    async def arun(self, args: BaseModel, context: ToolContext) -> ToolResult: ...
+    async def arun(self, args: BaseModel, context: ToolContext) -> ToolResult:
+        """执行已由 ToolRunner 校验和治理的参数，返回结构化结果。"""
+        ...

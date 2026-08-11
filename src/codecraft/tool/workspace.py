@@ -13,6 +13,7 @@ class WorkspaceGuard:
     """
 
     def __init__(self, workspace: Path) -> None:
+        """将 workspace 规范化为后续读写共享的真实绝对边界。"""
         self.workspace = workspace.expanduser().resolve()
 
     def resolve_read_path(self, path: str) -> Path:
@@ -41,6 +42,11 @@ class WorkspaceGuard:
         )
 
     def _resolve(self, path: str) -> Path:
+        """解析相对/绝对/用户目录路径，允许写目标暂时不存在。
+
+        Raises:
+            WorkspaceAccessError: path 为空；边界检查由公开 resolve 方法完成。
+        """
         if not path:
             raise WorkspaceAccessError(
                 "path must not be empty",

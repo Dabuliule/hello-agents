@@ -17,13 +17,17 @@ from codecraft.sandbox.seatbelt import SeatbeltSandboxBackend
 
 
 class UnavailableSandboxBackend(SandboxBackend):
+    """保留自动选择失败原因，并在真正执行时 fail-closed 的占位后端。"""
+
     name = "unavailable"
     isolation = "none"
 
     def __init__(self, reason: str) -> None:
+        """记录平台缺少安全后端的可操作原因。"""
         self.reason = reason
 
     async def execute(self, request: SandboxExecutionRequest) -> SandboxExecutionResult:
+        """始终拒绝执行，要求用户显式安装或选择不隔离的 process。"""
         raise SandboxBackendError(self.reason)
 
 
@@ -31,6 +35,11 @@ def build_sandbox_backend(
     backend_type: SandboxBackendType,
     docker: DockerSandboxConfig | None = None,
 ) -> SandboxBackend:
+    """按配置和平台构造后端，AUTO 缺少 OS 沙箱时不静默降级 process。
+
+    macOS 自动使用 Seatbelt；Linux 只有检测到 bwrap 才使用 Bubblewrap；其他
+    情况返回 UnavailableSandboxBackend。无隔离的 ProcessBackend 必须显式选。
+    """
     if backend_type == SandboxBackendType.AUTO:
         system = platform.system()
         if system == "Darwin":

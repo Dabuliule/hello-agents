@@ -27,9 +27,11 @@ class SeatbeltSandboxBackend(SandboxBackend):
     isolation = "os"
 
     def __init__(self, *, executable: str = "/usr/bin/sandbox-exec") -> None:
+        """设置 macOS sandbox-exec 路径。"""
         self.executable = executable
 
     async def execute(self, request: SandboxExecutionRequest) -> SandboxExecutionResult:
+        """以生成的 Seatbelt profile 启动 shell 并有界捕获输出。"""
         _, cwd = workspace_path(request)
         with tempfile.TemporaryDirectory(prefix="codecraft-seatbelt-") as temp:
             command = self.build_command(request, temp_root=Path(temp))
@@ -75,6 +77,12 @@ class SeatbeltSandboxBackend(SandboxBackend):
         *,
         temp_root: Path,
     ) -> list[str]:
+        """生成参数化 Seatbelt profile 与 shell argv。
+
+        非 full-access 先拒绝所有 file-write，再仅开放 /dev/null、临时目录，
+        WORKSPACE_WRITE 额外开放 workspace；network_access=False 拒绝网络。
+        路径通过 ``-D`` 参数传入，避免直接插进 profile 文本。
+        """
         root, _ = workspace_path(request)
         policy = ["(version 1)", "(allow default)"]
         definitions = [("TEMP_ROOT", temp_root.resolve())]

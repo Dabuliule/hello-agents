@@ -26,6 +26,11 @@ class ProcessSandboxBackend(SandboxBackend):
     isolation = "none"
 
     async def execute(self, request: SandboxExecutionRequest) -> SandboxExecutionResult:
+        """以净化环境和独立进程组在宿主机执行，不提供 OS 隔离。
+
+        该后端仍验证 cwd、限制时间/输出并重定向临时 HOME，但 metadata 明确
+        标记 ``isolation=none``；它只应由用户显式配置。
+        """
         _, cwd = workspace_path(request)
         with tempfile.TemporaryDirectory(prefix="codecraft-process-") as temp:
             try:

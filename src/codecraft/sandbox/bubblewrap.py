@@ -27,9 +27,11 @@ class BubblewrapSandboxBackend(SandboxBackend):
     isolation = "os"
 
     def __init__(self, *, executable: str = "bwrap") -> None:
+        """设置 Bubblewrap 可执行文件名或绝对路径。"""
         self.executable = executable
 
     async def execute(self, request: SandboxExecutionRequest) -> SandboxExecutionResult:
+        """构造 namespace/bind 策略，启动并有界捕获 Linux 沙箱进程。"""
         with tempfile.TemporaryDirectory(prefix="codecraft-bwrap-") as temp:
             command = self.build_command(request, temp_root=Path(temp))
             try:
@@ -73,6 +75,12 @@ class BubblewrapSandboxBackend(SandboxBackend):
         *,
         temp_root: Path,
     ) -> list[str]:
+        """将 SandboxMode 映射为根只读/可写与 workspace 可写挂载。
+
+        READ_ONLY 和 WORKSPACE_WRITE 都先把宿主根只读绑定；后者只覆盖绑定
+        workspace 为可写。DANGER_FULL_ACCESS 才把整个根可写绑定。网络关闭
+        时创建独立 network namespace。
+        """
         root, cwd = workspace_path(request)
         root_mount = (
             "--bind"

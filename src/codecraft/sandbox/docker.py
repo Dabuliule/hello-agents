@@ -28,6 +28,8 @@ _DOCKER_PROCESS_GRACE_SECONDS = 1.0
 
 
 class DockerSandboxConfig(BaseModel):
+    """固定镜像及 CPU、内存、进程数、tmpfs 的容器硬资源限制。"""
+
     image: str = Field(default="codecraft-sandbox:py311", min_length=1)
     cpus: float = Field(default=1.0, gt=0, le=32)
     memory_mb: int = Field(default=1024, ge=64, le=65_536)
@@ -37,12 +39,15 @@ class DockerSandboxConfig(BaseModel):
     @field_validator("image")
     @classmethod
     def validate_image(cls, value: str) -> str:
+        """拒绝可能被 docker CLI 解释为选项或多个参数的镜像字符串。"""
         if value.startswith("-") or any(character.isspace() for character in value):
             raise ValueError("Docker image must be a reference, not a CLI option")
         return value
 
 
 class DockerSandboxBackend(SandboxBackend):
+    """使用无特权、只读根和资源限制 Docker 容器的隔离后端。"""
+
     name = SandboxBackendType.DOCKER.value
     isolation = "container"
 
@@ -52,10 +57,16 @@ class DockerSandboxBackend(SandboxBackend):
         *,
         executable: str = "docker",
     ) -> None:
+        """设置经校验的容器配置和 docker 可执行文件。"""
         self.config = config or DockerSandboxConfig()
         self.executable = executable
 
     async def execute(self, request: SandboxExecutionRequest) -> SandboxExecutionResult:
+        """运行唯一命名容器，取消/超时时强制删除并归一化 daemon 错误。
+
+        Docker ``run`` 返回 125 表示后端/daemon 启动失败，而非容器内命令
+        失败；stderr 会同时放入 backend_error 供 BashTool 区分错误类型。
+        """
         container_name = f"codecraft-{uuid4().hex[:16]}"
         command = self.build_command(request, container_name=container_name)
         try:
@@ -114,6 +125,12 @@ class DockerSandboxBackend(SandboxBackend):
         *,
         container_name: str,
     ) -> list[str]:
+        """构造不拉镜像、只读根、资源封顶、drop capabilities 的 docker argv。
+
+        workspace 映射到固定 ``/workspace``；READ_ONLY 使用 readonly bind，
+        其余模式仅让 workspace 可写。环境变量只按名称从宿主传递，不把值
+        拼接进命令；包含逗号的宿主路径因 mount grammar 歧义而拒绝。
+        """
         mount, container_cwd = _workspace_mount(request)
         command = [
             self.executable,
@@ -164,6 +181,7 @@ class DockerSandboxBackend(SandboxBackend):
         return command
 
     async def _force_remove(self, container_name: str) -> None:
+        """启动 ``docker rm --force`` 并在五秒内尽力收口清理进程。"""
         try:
             cleanup = await asyncio.create_subprocess_exec(
                 self.executable,
@@ -189,6 +207,7 @@ class DockerSandboxBackend(SandboxBackend):
             raise
 
     async def _force_remove_resiliently(self, container_name: str) -> None:
+        """让删除任务在调用方取消期间仍优先完成，吞掉非关键清理错误。"""
         cleanup = asyncio.create_task(self._force_remove(container_name))
         try:
             await finish_task_before_cancelling(cleanup)
@@ -197,12 +216,14 @@ class DockerSandboxBackend(SandboxBackend):
 
 
 async def _terminate_cleanup_process(process: asyncio.subprocess.Process) -> None:
+    """终止卡住的 docker cleanup 进程并短暂等待其回收。"""
     kill_process_group(process)
     waiter = asyncio.create_task(_bounded_process_wait(process))
     await finish_task_before_cancelling(waiter)
 
 
 async def _bounded_process_wait(process: asyncio.subprocess.Process) -> None:
+    """最多等待一秒让已终止 cleanup 进程退出。"""
     try:
         async with asyncio.timeout(_DOCKER_PROCESS_GRACE_SECONDS):
             await process.wait()
@@ -213,6 +234,7 @@ async def _bounded_process_wait(process: asyncio.subprocess.Process) -> None:
 def _workspace_mount(
     request: SandboxExecutionRequest,
 ) -> tuple[tuple[str, str, str], str]:
+    """把宿主 workspace/cwd 映射成容器挂载三元组与 /workspace cwd。"""
     root, resolved_cwd = workspace_path(request)
     access = "ro" if request.sandbox_mode == SandboxMode.READ_ONLY else "rw"
     relative = resolved_cwd.relative_to(root)

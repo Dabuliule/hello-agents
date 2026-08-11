@@ -10,12 +10,16 @@ from pydantic import BaseModel
 
 
 class CommandRisk(StrEnum):
+    """无需审批、必须审批和绝不执行三档静态命令风险。"""
+
     SAFE = "safe"
     PROMPT = "prompt"
     DENY = "deny"
 
 
 class CommandDecision(BaseModel):
+    """命令判级、可解释原因和是否进入用户审批的结果。"""
+
     risk: CommandRisk
     reason: str
     requires_approval: bool
@@ -23,6 +27,8 @@ class CommandDecision(BaseModel):
 
 @dataclass(frozen=True)
 class _ShellScan:
+    """轻量 shell 扫描得到的命令段、控制运算符和动态求值标志。"""
+
     segments: tuple[str, ...]
     operators: tuple[str, ...]
     has_expansion: bool
@@ -110,7 +116,14 @@ class CommandPolicy:
     def classify(
         self, command: str, *, network_access: bool = False
     ) -> CommandDecision:
-        """Return the risk and approval requirement for one shell command."""
+        """返回一条 shell 命令的风险、原因和审批要求。
+
+        Example:
+            >>> CommandPolicy().classify("pwd").risk
+            <CommandRisk.SAFE: 'safe'>
+            >>> CommandPolicy().classify("sudo pwd").risk
+            <CommandRisk.DENY: 'deny'>
+        """
         return self._classify_command(
             command,
             network_access=network_access,
@@ -124,6 +137,11 @@ class CommandPolicy:
         network_access: bool,
         wrapper_depth: int,
     ) -> CommandDecision:
+        """扫描整条 shell 文本并聚合每个 segment 的最严格决定。
+
+        命令/进程替换直接 DENY；控制运算符和普通 expansion 至少 PROMPT；
+        任一 segment DENY 会压过其他结果。只有单段且完整命中只读白名单才 SAFE。
+        """
         scan = _scan_shell(command)
         if scan.has_substitution:
             return CommandDecision(
@@ -200,6 +218,7 @@ class CommandPolicy:
         wrapper_depth: int,
         has_expansion: bool,
     ) -> CommandDecision:
+        """判定一个已 shlex 拆分命令的 wrapper、破坏性、网络与白名单规则。"""
         wrapper_decision = self._classify_indirection(
             parts,
             network_access=network_access,
@@ -280,6 +299,7 @@ class CommandPolicy:
         wrapper_depth: int,
         has_expansion: bool,
     ) -> CommandDecision | None:
+        """识别赋值、env/command/exec 和 shell -c 间接调用并递归判级。"""
         assignment_count = self._leading_assignment_count(parts)
         if assignment_count:
             inner_parts = parts[assignment_count:]
@@ -343,6 +363,7 @@ class CommandPolicy:
         wrapper_depth: int,
         has_expansion: bool,
     ) -> CommandDecision:
+        """递归判定解包后的 argv；任何 wrapper 都至少把 SAFE 提升为 PROMPT。"""
         if wrapper_depth >= _MAX_WRAPPER_DEPTH:
             return self._wrapper_depth_decision()
         if has_expansion and self._contains_expansion_marker(parts[0]):
@@ -361,6 +382,7 @@ class CommandPolicy:
     def _elevate_wrapper_decision(
         decision: CommandDecision, wrapper: str
     ) -> CommandDecision:
+        """保留 DENY，否则因间接执行把决定统一提升为需审批。"""
         if decision.risk == CommandRisk.DENY:
             return decision
         return CommandDecision(
@@ -371,6 +393,7 @@ class CommandPolicy:
 
     @staticmethod
     def _opaque_wrapper_decision(reason: str) -> CommandDecision:
+        """对无法可靠还原实际命令的 wrapper 采用 fail-closed DENY。"""
         return CommandDecision(
             risk=CommandRisk.DENY,
             reason=reason,
@@ -379,6 +402,7 @@ class CommandPolicy:
 
     @staticmethod
     def _wrapper_depth_decision() -> CommandDecision:
+        """拒绝超过八层的 wrapper，防止递归消耗和策略绕过。"""
         return CommandDecision(
             risk=CommandRisk.DENY,
             reason=f"command wrapper nesting exceeds {_MAX_WRAPPER_DEPTH} levels",
@@ -387,6 +411,7 @@ class CommandPolicy:
 
     @staticmethod
     def _leading_assignment_count(parts: list[str]) -> int:
+        """统计 argv 前部连续的 ``NAME=value`` 环境赋值。"""
         index = 0
         while index < len(parts) and _SHELL_ASSIGNMENT.match(parts[index]):
             index += 1
@@ -394,6 +419,7 @@ class CommandPolicy:
 
     @classmethod
     def _unwrap_command(cls, executable: str, parts: list[str]) -> list[str] | None:
+        """按 env、command 或 exec 语法分发 wrapper 解包。"""
         if executable == "env":
             return cls._unwrap_env(parts)
         if executable == "command":
@@ -402,6 +428,7 @@ class CommandPolicy:
 
     @classmethod
     def _unwrap_env(cls, parts: list[str]) -> list[str] | None:
+        """跳过受支持 env 选项和赋值，返回实际命令；不支持 -S。"""
         index = 1
         parsing_options = True
         while index < len(parts):
@@ -423,6 +450,7 @@ class CommandPolicy:
 
     @staticmethod
     def _env_option_end(parts: list[str], index: int) -> int | None:
+        """返回受支持 env 选项后的索引，缺值或不透明选项返回 None。"""
         part = parts[index]
         if part in {"-S", "--split-string"} or part.startswith(
             ("-S", "--split-string=")
@@ -440,6 +468,7 @@ class CommandPolicy:
 
     @staticmethod
     def _unwrap_command_builtin(parts: list[str]) -> list[str] | None:
+        """处理 command 的 -p/--，返回实际 argv。"""
         index = 1
         while index < len(parts):
             part = parts[index]
@@ -456,6 +485,7 @@ class CommandPolicy:
 
     @staticmethod
     def _unwrap_exec(parts: list[str]) -> list[str] | None:
+        """处理 exec 的 -a、-c、-l 和 --，返回实际 argv。"""
         index = 1
         while index < len(parts):
             part = parts[index]
@@ -477,20 +507,24 @@ class CommandPolicy:
 
     @staticmethod
     def _unwrap_shell_script(parts: list[str]) -> str | None:
+        """只接受 shell ``-c``/``-lc`` 并返回其脚本文本。"""
         if len(parts) < 3 or parts[1] not in {"-c", "-lc"}:
             return None
         return parts[2]
 
     @staticmethod
     def _is_assignment(part: str) -> bool:
+        """判断一个 argv 是否以合法环境变量赋值开头。"""
         return _SHELL_ASSIGNMENT.match(part) is not None
 
     @staticmethod
     def _contains_expansion_marker(part: str) -> bool:
+        """保守识别变量、glob、brace 和 home expansion 标记。"""
         return any(marker in part for marker in "$*?[{~")
 
     @staticmethod
     def _split(command: str) -> list[str]:
+        """用 shlex 拆 argv；引号不闭合等无效语法返回空列表。"""
         try:
             return shlex.split(command)
         except ValueError:
@@ -498,6 +532,7 @@ class CommandPolicy:
 
     @staticmethod
     def _is_exact_read_only(parts: list[str]) -> bool:
+        """完整匹配固定命令或受限 ls/rg 语法，未知参数不放行。"""
         command = tuple(parts)
         if command in _EXACT_READ_ONLY_COMMANDS:
             return True
@@ -512,6 +547,7 @@ class CommandPolicy:
 
     @staticmethod
     def _is_read_only_ls(arguments: list[str]) -> bool:
+        """只允许无参数或由 aAlh1Fp 组成的短 ls 展示 flags。"""
         if not arguments:
             return True
         return all(
@@ -524,6 +560,7 @@ class CommandPolicy:
 
     @staticmethod
     def _is_read_only_rg(arguments: list[str]) -> bool:
+        """只允许 --files、单 pattern 或一个白名单 flag 加 pattern。"""
         if arguments == ["--files"]:
             return True
         if len(arguments) == 1:
@@ -534,6 +571,7 @@ class CommandPolicy:
 
     @staticmethod
     def _is_destructive_rm(parts: list[str]) -> bool:
+        """识别 recursive+force 且目标为根、当前目录、父目录或宽泛 glob。"""
         if not CommandPolicy._is_recursive_force_rm(parts):
             return False
 
@@ -544,6 +582,7 @@ class CommandPolicy:
 
     @staticmethod
     def _is_recursive_force_rm(parts: list[str]) -> bool:
+        """识别 rm argv 是否同时包含递归与强制 flags。"""
         if not parts or CommandPolicy._command_name(parts[0]) != "rm":
             return False
         has_recursive, has_force = CommandPolicy._rm_flags(parts[1:])
@@ -551,6 +590,7 @@ class CommandPolicy:
 
     @staticmethod
     def _rm_flags(arguments: list[str]) -> tuple[bool, bool]:
+        """解析 rm 长短及合并 flags，返回 recursive/force 两个布尔值。"""
         has_recursive = False
         has_force = False
         for part in arguments:
@@ -570,6 +610,7 @@ class CommandPolicy:
 
     @staticmethod
     def _rm_targets(arguments: list[str]) -> list[str]:
+        """跳过 -- 前选项并返回 rm 目标参数。"""
         targets: list[str] = []
         parsing_options = True
         for part in arguments:
@@ -583,6 +624,7 @@ class CommandPolicy:
 
     @staticmethod
     def _git_subcommand(parts: list[str]) -> str | None:
+        """越过带值/无值的 Git 全局选项，定位真实 subcommand。"""
         index = 1
         while index < len(parts):
             part = parts[index]
@@ -613,11 +655,15 @@ class CommandPolicy:
 
     @staticmethod
     def _command_name(executable: str) -> str:
+        """同时兼容 POSIX/Windows 分隔符提取可执行文件 basename。"""
         return executable.replace("\\", "/").rsplit("/", 1)[-1]
 
 
 class _ShellScanner:
+    """不执行 shell 的单遍词法扫描器，用于发现控制语法和动态求值。"""
+
     def __init__(self, command: str) -> None:
+        """初始化引号、转义、当前位置和累计结果状态。"""
         self.command = command
         self.segments: list[str] = []
         self.operators: list[str] = []
@@ -629,6 +675,7 @@ class _ShellScanner:
         self.index = 0
 
     def scan(self) -> _ShellScan:
+        """逐字符扫描并返回唯一运算符、非空 segments 与动态标志。"""
         while self.index < len(self.command):
             character = self.command[self.index]
             following = (
@@ -652,11 +699,13 @@ class _ShellScanner:
         )
 
     def _consume_escaped(self, character: str) -> None:
+        """把转义后的字符视为字面量并退出 escaped 状态。"""
         self.current.append(character)
         self.escaped = False
         self.index += 1
 
     def _consume_quoted(self, character: str, following: str) -> None:
+        """在引号内保留文本，并只在双引号内识别替换/变量展开。"""
         self.current.append(character)
         if character == self.quote:
             self.quote = None
@@ -670,6 +719,7 @@ class _ShellScanner:
         self.index += 1
 
     def _consume_unquoted(self, character: str, following: str) -> None:
+        """在普通状态分派引号、替换、glob、换行和 shell 运算符。"""
         if character == "\\":
             self.current.append(character)
             self.escaped = True
@@ -708,6 +758,7 @@ class _ShellScanner:
         self.index += 1
 
     def _consume_dollar(self, following: str) -> None:
+        """区分 ``$(`` 命令替换与普通 ``$VAR`` expansion。"""
         if following == "(":
             self.has_substitution = True
         else:
@@ -716,6 +767,7 @@ class _ShellScanner:
         self.index += 1
 
     def _consume_newline(self, character: str, following: str) -> None:
+        """结束当前 segment，并把 CRLF 或单换行记为控制运算符。"""
         self._flush_segment()
         self._add_operator("newline")
         if character == "\r" and following == "\n":
@@ -723,6 +775,7 @@ class _ShellScanner:
         self.index += 1
 
     def _consume_operator(self, character: str, following: str) -> None:
+        """结束 segment，并优先识别双字符 shell 运算符。"""
         self._flush_segment()
         pair = f"{character}{following}"
         if pair in _DOUBLE_SHELL_OPERATORS:
@@ -733,15 +786,24 @@ class _ShellScanner:
             self.index += 1
 
     def _flush_segment(self) -> None:
+        """去空白后保存当前非空 segment 并清空 buffer。"""
         segment = "".join(self.current).strip()
         if segment:
             self.segments.append(segment)
         self.current.clear()
 
     def _add_operator(self, operator: str) -> None:
+        """按首次出现顺序记录唯一控制运算符。"""
         if operator not in self.operators:
             self.operators.append(operator)
 
 
 def _scan_shell(command: str) -> _ShellScan:
+    """扫描 shell 文本，不做变量展开、命令替换或实际执行。
+
+    Example:
+        >>> scan = _scan_shell("pwd && rg TODO")
+        >>> scan.segments, scan.operators
+        (('pwd', 'rg TODO'), ('&&',))
+    """
     return _ShellScanner(command).scan()

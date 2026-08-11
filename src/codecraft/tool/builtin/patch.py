@@ -15,23 +15,31 @@ from codecraft.tool.workspace import WorkspaceGuard
 
 
 class ApplyPatchArgs(ToolArguments):
+    """通过工具协议传输的完整 unified diff 文本。"""
+
     patch: str
 
 
 @dataclass(frozen=True)
 class PatchFile:
+    """解析后的目标相对路径及按出现顺序排列的 hunks。"""
+
     path: str
     hunks: list[list[str]]
 
 
 @dataclass(frozen=True)
 class PreparedPatch:
+    """写入前冻结的目标绝对路径、旧内容与计算后内容。"""
+
     path: Path
     before: str
     after: str
 
 
 class PatchApplicationError(Exception):
+    """可直接转换为稳定 ToolResult 的 patch 业务失败。"""
+
     def __init__(
         self,
         *,
@@ -40,6 +48,7 @@ class PatchApplicationError(Exception):
         metadata: dict[str, object] | None = None,
         suggestion: str | None = None,
     ) -> None:
+        """保存模型可见内容、错误码、建议和安全 metadata。"""
         super().__init__(content)
         self.content = content
         self.error = error
@@ -47,6 +56,7 @@ class PatchApplicationError(Exception):
         self.suggestion = suggestion
 
     def as_result(self) -> ToolResult:
+        """把异常字段无损转换为失败 ToolResult。"""
         return ToolResult(
             success=False,
             content=self.content,
@@ -127,6 +137,11 @@ class ApplyPatchTool(BaseTool):
         files: list[PatchFile],
         guard: WorkspaceGuard,
     ) -> list[PreparedPatch]:
+        """在不写磁盘的 prepare 阶段解析路径、读原文并应用全部 hunks。
+
+        同一目标重复出现会拒绝；无实际变化的文件不会进入 commit 集合。
+        WorkspaceAccessError 被翻译成 PatchApplicationError 统一返回。
+        """
         prepared: list[PreparedPatch] = []
         seen: set[Path] = set()
 
@@ -175,6 +190,7 @@ class ApplyPatchTool(BaseTool):
 
     @staticmethod
     def _validate_target(path: Path) -> None:
+        """当前版本只接受已存在的普通文件，不支持新增、删除或目录。"""
         if not path.exists():
             raise PatchApplicationError(
                 content="Patch target does not exist.",
@@ -190,6 +206,7 @@ class ApplyPatchTool(BaseTool):
 
     @staticmethod
     def _verify_targets_unchanged(prepared: list[PreparedPatch]) -> None:
+        """commit 前重读全部目标，发现 prepare 后并发变化则整体拒绝。"""
         for change in prepared:
             try:
                 current = change.path.read_text(encoding="utf-8")
@@ -208,6 +225,11 @@ class ApplyPatchTool(BaseTool):
 
     @staticmethod
     def _commit_changes(prepared: list[PreparedPatch]) -> None:
+        """依次原子替换；中途失败时逆序尽力回滚已提交文件。
+
+        若回滚也失败，metadata 明确列出 rollback_errors 和
+        possibly_changed_files，提醒调用方先检查真实状态再重试。
+        """
         committed: list[PreparedPatch] = []
         try:
             for change in prepared:
@@ -263,6 +285,7 @@ class ApplyPatchTool(BaseTool):
 
     @staticmethod
     def _parse_patch_file(lines: list[str], index: int) -> tuple[PatchFile, int]:
+        """从一个 ---/+++ header 读取目标路径及至少一个 hunk。"""
         if index + 1 >= len(lines) or not lines[index + 1].startswith("+++ "):
             raise ValueError("missing +++ file header")
 
@@ -282,6 +305,7 @@ class ApplyPatchTool(BaseTool):
 
     @staticmethod
     def _parse_hunk(lines: list[str], index: int) -> tuple[list[str], int]:
+        """读取 @@ header 后受支持的 context/add/remove/newline records。"""
         hunk = [lines[index]]
         index += 1
         while index < len(lines):
@@ -296,6 +320,7 @@ class ApplyPatchTool(BaseTool):
 
     @staticmethod
     def _normalize_patch_path(raw_path: str) -> str:
+        """移除时间戳与 a/b 前缀，并拒绝 /dev/null 新增删除语义。"""
         if raw_path == "/dev/null":
             raise ValueError("creating or deleting files is not supported yet")
 
@@ -341,6 +366,7 @@ class ApplyPatchTool(BaseTool):
 
     @staticmethod
     def _hunk_records(lines: list[str]) -> Iterator[tuple[str, str]]:
+        """解释 hunk 行前缀及标准 no-newline marker，产生 prefix/body。"""
         index = 0
         while index < len(lines):
             line = lines[index]
@@ -361,6 +387,7 @@ class ApplyPatchTool(BaseTool):
 
     @staticmethod
     def _old_start_from_header(header: str) -> int:
+        """从 ``@@ -old_start,count +... @@`` 提取旧文件 1-based 起始行。"""
         try:
             old_range = header.split(" ", 2)[1]
             start = old_range.removeprefix("-").split(",", 1)[0]

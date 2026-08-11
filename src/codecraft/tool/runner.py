@@ -28,12 +28,16 @@ from codecraft.tool.registry import ToolRegistry
 
 @dataclass(frozen=True)
 class ToolRunnerEvent:
+    """ToolRunner 向 Turn 产生的标准 RuntimeEvent 类型与 payload。"""
+
     type: RuntimeEventType
     payload: dict[str, Any]
 
 
 @dataclass
 class _ToolRunState:
+    """跨异步生成器阶段共享的结果、审批和分段计时状态。"""
+
     started_at: float
     result: ToolResult | None = None
     approved: bool = False
@@ -45,6 +49,8 @@ class _ToolRunState:
 
 @dataclass(frozen=True)
 class _ApprovalOutcome:
+    """审批决定、等待耗时和 reviewer 失败诊断。"""
+
     decision: ApprovalDecision
     wait_ms: int
     error: str | None = None
@@ -64,6 +70,7 @@ class ToolRunner:
         approval_manager: ApprovalManager | None = None,
         observers: Sequence[ToolResultObserver] | None = None,
     ) -> None:
+        """绑定工具/审批 Registry 与名称唯一的非关键结果 Observer。"""
         self.registry = registry
         self.approval_manager = approval_manager or ApprovalManager()
         self.observers = tuple(observers or ())
@@ -76,7 +83,19 @@ class ToolRunner:
         call: ToolCall,
         context: TurnContext,
     ) -> AsyncIterator[ToolRunnerEvent]:
-        """运行一个 tool call，并按执行阶段产出事件。"""
+        """运行一个 tool call，并按开始、审批、结束、附加事件顺序产出事件。
+
+        Args:
+            call: 模型给出的工具名、call_id 与尚未校验的 arguments。
+            context: 当前 Turn 冻结的权限、预算、超时和 workspace 快照。
+
+        Yields:
+            必有 TOOL_CALL_STARTED/FINISHED；需审批时夹有 REQUESTED/DECIDED；
+            工具声明的 runtime_events 在 FINISHED 之后且 payload 被限额。
+
+        所有预期参数、业务、审批、超时和普通执行异常都变成 ToolResult，使
+        Turn 能把失败 observation 交还模型；只有内部“不产结果”不变量会抛出。
+        """
         yield ToolRunnerEvent(
             RuntimeEventType.TOOL_CALL_STARTED,
             {
@@ -125,6 +144,7 @@ class ToolRunner:
         context: TurnContext,
         state: _ToolRunState,
     ) -> AsyncIterator[ToolRunnerEvent]:
+        """收口准备/执行异常，成功时运行 Observer，最后统一限制输出。"""
         try:
             async for event in self._prepare_and_execute(call, context, state):
                 yield event
@@ -172,6 +192,11 @@ class ToolRunner:
         context: TurnContext,
         state: _ToolRunState,
     ) -> AsyncIterator[ToolRunnerEvent]:
+        """依次取工具、校验参数、检查沙箱、审批并在 deadline 内执行。
+
+        Sandbox 是审批无法覆盖的硬边界，因此 effect 不允许时直接形成
+        sandbox_denied；审批只处理沙箱已经允许但仍需要用户授权的操作。
+        """
         tool = self.registry.get(call.name)
         args = tool.args_schema.model_validate(call.arguments)
         sandbox_evaluation = self._sandbox_policy(context).evaluate_effects(
@@ -222,6 +247,7 @@ class ToolRunner:
         evaluation: ApprovalEvaluation,
         state: _ToolRunState,
     ) -> AsyncIterator[ToolRunnerEvent]:
+        """先发请求事件，再限时等待 Reviewer，发决定事件后决定是否继续。"""
         # approval 是可交互边界，先产出请求，再等待 UI 或 reviewer 处理。
         request = self.approval_manager.build_request(
             call=call,
@@ -254,6 +280,7 @@ class ToolRunner:
         *,
         timeout_seconds: int,
     ) -> _ApprovalOutcome:
+        """限时调用 Reviewer，并把超时/异常转换成 fail-closed 拒绝决定。"""
         started_at = monotonic()
         error: str | None = None
         exception_type: str | None = None
@@ -291,6 +318,7 @@ class ToolRunner:
         call: ToolCall,
         outcome: _ApprovalOutcome,
     ) -> ToolResult:
+        """把用户拒绝、Reviewer 错误或审批超时映射为稳定 ToolResult。"""
         metadata = {
             "approval_id": outcome.decision.approval_id,
             "tool": call.name,
@@ -316,6 +344,11 @@ class ToolRunner:
         context: TurnContext,
         state: _ToolRunState,
     ) -> ToolResult:
+        """只把 Runner 自己的 execution deadline 过期标成 outcome_unknown。
+
+        工具内部抛出的 TimeoutError 不是 Runner 超时，按普通 execution_error
+        处理。真正超时时操作可能已产生外部副作用，因此 retry_safe=False。
+        """
         if state.execution_deadline is not None and state.execution_deadline.expired():
             return ToolResult(
                 success=False,
@@ -341,6 +374,7 @@ class ToolRunner:
 
     @staticmethod
     def _validation_result(exc: ValidationError) -> ToolResult:
+        """把 Pydantic 错误压缩成不含输入值/文档 URL 的稳定字段列表。"""
         return ToolResult(
             success=False,
             content="Tool argument validation failed.",
@@ -364,9 +398,14 @@ class ToolRunner:
         result: ToolResult,
         context: TurnContext,
     ) -> dict[str, dict[str, Any]]:
+        """并发、独立限时运行全部 Observer，失败只写 post_actions 诊断。
+
+        Observer 只在原工具成功后运行；其超时或异常不会倒置工具成功事实。
+        """
         async def run(
             observer: ToolResultObserver,
         ) -> tuple[str, dict[str, Any] | None]:
+            """限时执行单个 Observer，并把所有非取消失败转成诊断。"""
             details: dict[str, Any] | None
             deadline = asyncio.timeout(context.tool_timeout_seconds)
             try:
@@ -400,6 +439,7 @@ class ToolRunner:
 
     @staticmethod
     def _sandbox_policy(context: TurnContext) -> SandboxPolicy:
+        """从 TurnContext 快照构造本次 effect 检查策略。"""
         return SandboxPolicy(
             mode=context.sandbox_mode,
             network_access=context.network_access,
@@ -411,6 +451,12 @@ class ToolRunner:
         max_chars: int,
         max_tokens: int,
     ) -> ToolResult:
+        """按字符、Token、结构化字段和最终 model_content 四层限制输出。
+
+        content 先限字符再限 Token；suggestion 使用最多四分之一预算；data 与
+        metadata 超大时替换为截断摘要；最后对真正发给模型的序列化文本二分
+        搜索最大可保留 content，避免包装字段使总量重新超限。
+        """
         content = result.content
         metadata = dict(result.metadata)
         data = result.data
@@ -479,6 +525,7 @@ class ToolRunner:
 
     @staticmethod
     def _fit_model_content(result: ToolResult, *, max_tokens: int) -> ToolResult:
+        """二分查找能与结构化包装共同装入 Token 上限的最长 content 前缀。"""
         if estimate_text_tokens(result.model_content()) <= max_tokens:
             return result
 
@@ -523,6 +570,7 @@ class ToolRunner:
     def _limit_mapping(
         value: dict[str, Any], max_chars: int, *, label: str
     ) -> dict[str, Any]:
+        """JSON 字符数超限时用 label 对应的最小截断摘要替换 mapping。"""
         original_chars = ToolRunner._json_chars(value)
         if original_chars <= max_chars:
             return value
@@ -533,6 +581,7 @@ class ToolRunner:
 
     @staticmethod
     def _json_chars(value: object) -> int:
+        """按实际紧凑 Unicode JSON 序列化估算结构化值字符数。"""
         return len(
             json.dumps(
                 value,
@@ -552,6 +601,11 @@ class ToolRunner:
         execution_ms: int = 0,
         observer_ms: int = 0,
     ) -> dict[str, Any]:
+        """构造最终事件，并把总耗时拆为治理/审批/执行/Observer。
+
+        governance 用总耗时减去其他已测阶段且下限为零，包含 Registry、参数、
+        effect 检查、事件生成和输出治理等框架成本。
+        """
         total_ms = int((monotonic() - started_at) * 1000)
         governance_ms = max(
             0,

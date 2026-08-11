@@ -22,23 +22,33 @@ _SKIPPED_ENTRY_NAMES = frozenset({".git", "__pycache__", ".venv", "node_modules"
 
 
 class ReadFileArgs(ToolArguments):
+    """读取路径、字符编码和返回字符硬上限。"""
+
     path: str
     encoding: str = "utf-8"
     max_chars: int = Field(default=80_000, ge=1, le=1_000_000)
 
 
 class ReadFileTool(BaseTool):
+    """在 WorkspaceGuard 边界内有界读取文本文件的只读工具。"""
+
     name = "read_file"
     description = "Read a text file inside the workspace."
     args_schema = ReadFileArgs
     effects = {ToolEffect.READ_ONLY}
 
     async def arun(self, args: BaseModel, context: ToolContext) -> ToolResult:
+        """严格校验参数后在线程池执行阻塞文件读取。"""
         read_args = ReadFileArgs.model_validate(args)
         return await asyncio.to_thread(self._read_sync, read_args, context)
 
     @staticmethod
     def _read_sync(read_args: ReadFileArgs, context: ToolContext) -> ToolResult:
+        """读取至 max_chars+1 以判断截断，并返回完整性和实际字节统计。
+
+        成功 data 中的 line_count 只描述可见前缀；line_count_complete 明确告诉
+        调用方它是否代表完整文件。解码、缺失、目录和 I/O 使用稳定错误码。
+        """
         guard = WorkspaceGuard(context.context.cwd)
         path = guard.resolve_read_path(read_args.path)
 
@@ -105,6 +115,8 @@ class ReadFileTool(BaseTool):
 
 
 class WriteFileArgs(ToolArguments):
+    """写入路径、完整替换文本、编码和是否创建父目录。"""
+
     path: str
     content: str
     encoding: str = "utf-8"
@@ -112,6 +124,8 @@ class WriteFileArgs(ToolArguments):
 
 
 class WriteFileTool(BaseTool):
+    """审批后在 workspace 内原子创建或完整替换文本文件。"""
+
     name = "write_file"
     description = "Write text content to a file inside the workspace."
     args_schema = WriteFileArgs
@@ -119,6 +133,11 @@ class WriteFileTool(BaseTool):
     requires_approval = True
 
     async def arun(self, args: BaseModel, context: ToolContext) -> ToolResult:
+        """编码预检、读取旧值、原子写入并返回 changed/status/unified diff。
+
+        内容相同不触碰文件，status=unchanged；真正变更使用同目录临时文件和
+        os.replace，避免异常留下部分写入。编码失败发生在创建父目录之前。
+        """
         write_args = WriteFileArgs.model_validate(args)
         guard = WorkspaceGuard(context.context.cwd)
         path = guard.resolve_write_path(write_args.path)
@@ -205,6 +224,7 @@ class WriteFileTool(BaseTool):
 
     @staticmethod
     def _ensure_parent(path: Path, *, create: bool) -> ToolResult | None:
+        """确认父目录存在，或按显式参数递归创建并归一化失败。"""
         if path.parent.exists():
             return None
         if not create:
@@ -232,6 +252,7 @@ class WriteFileTool(BaseTool):
 
     @staticmethod
     def _diff(*, before: str, after: str, path: Path) -> str:
+        """生成以目标 basename 标记的 unified diff 审计事实。"""
         return "".join(
             difflib.unified_diff(
                 before.splitlines(keepends=True),
@@ -243,18 +264,23 @@ class WriteFileTool(BaseTool):
 
 
 class ListFilesArgs(ToolArguments):
+    """列表根、是否递归和最大可见条目数。"""
+
     path: str = "."
     recursive: bool = False
     max_entries: int = Field(default=500, ge=1, le=10_000)
 
 
 class ListFilesTool(BaseTool):
+    """确定性列出 workspace 内文件/目录且不递归 symlink 目录。"""
+
     name = "list_files"
     description = "List files and directories inside the workspace."
     args_schema = ListFilesArgs
     effects = {ToolEffect.READ_ONLY}
 
     async def arun(self, args: BaseModel, context: ToolContext) -> ToolResult:
+        """严格校验参数后在线程池执行阻塞目录遍历。"""
         list_args = ListFilesArgs.model_validate(args)
         return await asyncio.to_thread(self._list_sync, list_args, context)
 
@@ -264,6 +290,7 @@ class ListFilesTool(BaseTool):
         list_args: ListFilesArgs,
         context: ToolContext,
     ) -> ToolResult:
+        """多取一项判断截断，再排序、格式化成相对路径结果。"""
         guard = WorkspaceGuard(context.context.cwd)
         path = guard.resolve_read_path(list_args.path)
 
@@ -314,6 +341,7 @@ class ListFilesTool(BaseTool):
 
     @staticmethod
     def _iter_entries(path: Path, *, recursive: bool) -> Generator[Path, None, None]:
+        """按名称深度优先遍历，跳过重目录且不跟随目录 symlink。"""
         with os.scandir(path) as directory:
             entries = sorted(directory, key=lambda item: item.name)
         for item in entries:
@@ -332,6 +360,7 @@ class ListFilesTool(BaseTool):
 
     @staticmethod
     def _format_entry(entry: Path, root: Path) -> str:
+        """转换成相对 root 的展示路径，目录附加斜杠，逃逸则拒绝。"""
         suffix = "/" if entry.is_dir() else ""
         try:
             relative = entry.relative_to(root)
@@ -344,6 +373,8 @@ class ListFilesTool(BaseTool):
 
 
 class WorkspaceSearchArgs(ToolArguments):
+    """检索查询、作用域、匹配模式、策略及结果/文件预算。"""
+
     query: str = Field(min_length=1)
     path: str = "."
     mode: Literal["both", "content", "path"] = "both"
@@ -360,6 +391,8 @@ class WorkspaceSearchArgs(ToolArguments):
 
 
 class WorkspaceSearchTool(BaseTool):
+    """把 ContextEngine 的扫描/索引/路由能力暴露为模型只读工具。"""
+
     name = "workspace_search"
     description = (
         "Search workspace paths, text, or indexed symbols with scan, lexical, or "
@@ -369,9 +402,15 @@ class WorkspaceSearchTool(BaseTool):
     effects = {ToolEffect.READ_ONLY}
 
     def __init__(self, context_engine: ContextEngine | None = None) -> None:
+        """注入检索引擎；默认创建可直接扫描的 ContextEngine。"""
         self.context_engine = context_engine or ContextEngine()
 
     async def arun(self, args: BaseModel, context: ToolContext) -> ToolResult:
+        """约束 scope 后执行策略检索，并同时返回人类文本与结构化诊断。
+
+        data/metadata 都保留 retriever、fallback_from、route_reason、attempted
+        链和扫描成本，便于 ToolRunner、评测和 UI 在不同消费边界使用。
+        """
         search_args = WorkspaceSearchArgs.model_validate(args)
         guard = WorkspaceGuard(context.context.cwd)
         root = guard.resolve_read_path(search_args.path)
@@ -442,6 +481,7 @@ class WorkspaceSearchTool(BaseTool):
 
     @staticmethod
     def _format_match(match: dict[str, object]) -> str:
+        """把路径命中或内容命中格式化为紧凑可读单行。"""
         if match["type"] == "path":
             return f"{match['path']} [path]"
         return f"{match['path']}:{match['line']}: {match['snippet']}"

@@ -18,6 +18,8 @@ from codecraft.tool.workspace import WorkspaceGuard
 
 
 class BashArgs(ToolArguments):
+    """Shell 文本、可选 workspace 子目录 cwd 和进程超时。"""
+
     command: str
     cwd: str | None = None
     timeout_seconds: int = Field(default=30, ge=1, le=300)
@@ -40,6 +42,7 @@ class BashTool(BaseTool):
         self,
         sandbox_backend: SandboxBackend | None = None,
     ) -> None:
+        """注入隔离后端；直接构造时默认使用明确标注无隔离的 Process 后端。"""
         self.sandbox_backend = sandbox_backend or ProcessSandboxBackend()
 
     async def arun(self, args: BaseModel, context: ToolContext) -> ToolResult:
@@ -157,12 +160,14 @@ class BashTool(BaseTool):
 
     @staticmethod
     def _truncate(value: str, max_chars: int) -> tuple[str, bool]:
+        """保留字符串前 max_chars 字符并返回是否截断。"""
         if len(value) <= max_chars:
             return value, False
         return value[:max_chars], True
 
 
 def _execution_error(execution: SandboxExecutionResult) -> str:
+    """按超时、后端启动错误、命令非零的优先级生成稳定错误码。"""
     if execution.timed_out:
         return "command_timed_out"
     if execution.backend_error is not None:

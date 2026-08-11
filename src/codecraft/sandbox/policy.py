@@ -8,6 +8,8 @@ from codecraft.schema.tool import ToolEffect
 
 
 class SandboxMode(StrEnum):
+    """从只读、workspace 可写到危险全访问的文件系统能力等级。"""
+
     READ_ONLY = "read_only"
     WORKSPACE_WRITE = "workspace_write"
     DANGER_FULL_ACCESS = "danger_full_access"
@@ -47,12 +49,15 @@ class SandboxPolicy(BaseModel):
 
 
 class SandboxEvaluation(BaseModel):
+    """Tool effects 是否被沙箱覆盖，以及首个被拒绝的 effect。"""
+
     allowed: bool
     reason: str
     denied_effect: ToolEffect | None = None
 
     @classmethod
     def deny(cls, reason: str, *, denied_effect: ToolEffect) -> "SandboxEvaluation":
+        """构造携带稳定原因和具体 effect 的拒绝结果。"""
         return cls(
             allowed=False,
             reason=reason,
