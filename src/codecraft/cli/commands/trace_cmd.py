@@ -18,12 +18,16 @@ from codecraft.core.trace_report import (
 
 
 class TraceFormat(StrEnum):
+    """Trace export 的 JSON、HTML 或双格式选择。"""
+
     JSON = "json"
     HTML = "html"
     BOTH = "both"
 
 
 def register_trace_command(app: typer.Typer) -> None:
+    """注册按 Session ID 导出事件 Trace 的命令。"""
+
     @app.command("trace")
     def trace_command(
         session_id: Annotated[
@@ -44,6 +48,7 @@ def register_trace_command(app: typer.Typer) -> None:
             typer.Option("--format", help="Trace output format."),
         ] = TraceFormat.BOTH,
     ) -> None:
+        """同步桥接异步导出，并把恢复失败映射为退出码。"""
         import asyncio
 
         exit_code = asyncio.run(
@@ -65,6 +70,7 @@ async def run_trace(
     output_dir: Path | None,
     format: TraceFormat,
 ) -> int:
+    """严格加载事件、构建一次报告，并按选择写 JSON/HTML。"""
     console = make_console()
     store = SessionStore(codecraft_home)
     try:

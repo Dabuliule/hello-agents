@@ -11,6 +11,7 @@ def session_header(
     width: int,
     palette: TUIColorPalette,
 ) -> Text:
+    """按可用宽度依次省略 model、workspace，返回永不换行 Header。"""
     workspace = config.cwd.name or str(config.cwd)
     candidates = (
         (workspace, f"{config.model_provider}/{config.model}"),
@@ -31,6 +32,7 @@ def runtime_status(
     width: int,
     palette: TUIColorPalette,
 ) -> Text:
+    """按宽度依次省略 sandbox/MCP、Token，只保留状态时仍可渲染。"""
     status_style = {
         "idle": palette.success,
         "running": palette.accent,
@@ -65,6 +67,7 @@ def _session_header(
     model: str | None,
     palette: TUIColorPalette,
 ) -> Text:
+    """组合 CodeCraft、可选 workspace/model 的语义着色 Header。"""
     header = Text(no_wrap=True, overflow="ellipsis")
     header.append("CodeCraft", style=f"bold {palette.strong}")
     if workspace is not None:
@@ -85,6 +88,7 @@ def _runtime_status(
     mcp_count: int = 0,
     palette: TUIColorPalette,
 ) -> Text:
+    """组合状态、sandbox、Token 和 MCP 数量的单行 Text。"""
     line = Text(no_wrap=True, overflow="ellipsis")
     line.append(status, style=f"bold {status_style}")
     for value in (

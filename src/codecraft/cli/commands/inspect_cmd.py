@@ -14,6 +14,8 @@ from codecraft.core.session_store import SessionStore
 
 
 def register_inspect_command(app: typer.Typer) -> None:
+    """注册查看 Session 摘要、事件、工具、错误或 raw JSONL 的命令。"""
+
     @app.command("inspect")
     def inspect_command(
         session_id: Annotated[str, typer.Argument(help="Session id to inspect.")],
@@ -35,6 +37,7 @@ def register_inspect_command(app: typer.Typer) -> None:
             typer.Option("--raw", help="Print raw JSONL lines without validation."),
         ] = False,
     ) -> None:
+        """同步桥接 run_inspect，并把读取失败映射为退出码。"""
         import asyncio
 
         exit_code = asyncio.run(
@@ -60,6 +63,7 @@ async def run_inspect(
     errors: bool,
     raw: bool,
 ) -> int:
+    """raw 模式不验证逐行输出；普通模式严格加载后按选择渲染视图。"""
     console = make_console()
     store = SessionStore(codecraft_home)
     if raw:
@@ -100,6 +104,7 @@ def print_restore_error(
     session_id: str,
     exc: SessionRestoreError,
 ) -> None:
+    """区分日志不存在与损坏/版本等恢复错误，输出人类可读诊断。"""
     if exc.code == "session_file_not_found":
         console.print(f"No session found: {session_id}")
         return

@@ -12,6 +12,8 @@ from codecraft.tui import CodeCraftTUI, TUIThemeMode, resolve_color_scheme
 
 
 def register_root_command(app: typer.Typer) -> None:
+    """注册无子命令时启动交互 TUI 的根 callback。"""
+
     @app.callback(invoke_without_command=True)
     def root_command(
         context: typer.Context,
@@ -62,6 +64,10 @@ def register_root_command(app: typer.Typer) -> None:
             ),
         ] = TUIThemeMode.AUTO,
     ) -> None:
+        """验证 resume 选项、装配 CLI_TUI Runtime 并以解析后的主题运行 Textual。
+
+        Typer 已选择子命令时立即返回，避免根 callback 重复启动 TUI。
+        """
         if context.invoked_subcommand is not None:
             return
 

@@ -14,6 +14,8 @@ from codecraft.schema.session import SessionSource
 
 
 def register_exec_command(app: typer.Typer) -> None:
+    """向 Typer 应用注册一次性 ``exec`` Agent 任务。"""
+
     @app.command("exec")
     def exec_command(
         task: Annotated[str, typer.Argument(help="User task to submit to Codecraft.")],
@@ -49,6 +51,7 @@ def register_exec_command(app: typer.Typer) -> None:
             typer.Option("--debug", help="Show verbose runtime events."),
         ] = False,
     ) -> None:
+        """将 CLI options 转交异步 runner，并用非零结果退出 shell。"""
         import asyncio
 
         exit_code = asyncio.run(
@@ -80,6 +83,7 @@ async def run_exec(
     network: bool | None,
     debug: bool = False,
 ) -> int:
+    """构造 CLI_EXEC Runtime、提交一条任务、渲染至终态并始终关闭资源。"""
     from codecraft.cli import app as cli_app
 
     config = cli_app._load_session_config(

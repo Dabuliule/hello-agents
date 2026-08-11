@@ -12,10 +12,14 @@ from codecraft.schema.session import SessionSummary
 
 
 class SessionRenderer:
+    """渲染 Session 列表、Inspect 事件及错误/工具筛选视图。"""
+
     def __init__(self, console: Console) -> None:
+        """绑定输出 Console。"""
         self.console = console
 
     def render_sessions(self, summaries: Iterable[SessionSummary]) -> None:
+        """表格展示 Session ID、来源、事件数、有效性与紧凑 cwd。"""
         table = Table(title="Recent Sessions")
         table.add_column("Session")
         table.add_column("Source")
@@ -36,6 +40,7 @@ class SessionRenderer:
     def render_inspect_summary(
         self, session_id: str, events: list[RuntimeEvent]
     ) -> None:
+        """展示指定日志的事件数、末事件和是否存在最终 answer。"""
         table = Table.grid(padding=(0, 2))
         table.add_column(style="muted")
         table.add_column()
@@ -46,6 +51,7 @@ class SessionRenderer:
         self.console.print(Panel(table, title="session inspect", border_style="cyan"))
 
     def render_events(self, events: list[RuntimeEvent]) -> None:
+        """按 seq 表格展示全部事件的类型、Turn 和短摘要。"""
         table = Table(title="Events")
         table.add_column("Seq", justify="right")
         table.add_column("Type")
@@ -61,6 +67,7 @@ class SessionRenderer:
         self.console.print(table)
 
     def render_tool_events(self, events: list[RuntimeEvent]) -> None:
+        """筛选模型请求/开始/完成 Tool 事件并显示状态与预览。"""
         table = Table(title="Tool Events")
         table.add_column("Seq", justify="right")
         table.add_column("Tool")
@@ -102,6 +109,7 @@ class SessionRenderer:
         self.console.print(table)
 
     def render_error_events(self, events: list[RuntimeEvent]) -> None:
+        """筛选 ERROR、TURN_ABORTED 和失败 ToolResult。"""
         table = Table(title="Errors")
         table.add_column("Seq", justify="right")
         table.add_column("Type")
@@ -125,10 +133,12 @@ class SessionRenderer:
 
     @staticmethod
     def status_text(summary: SessionSummary) -> str:
+        """返回 valid 或带稳定 error code 的 invalid 状态。"""
         return "valid" if summary.valid else f"invalid:{summary.error_code or '-'}"
 
 
 def shorten_path(path: Path | None, *, max_chars: int = 48) -> str:
+    """保留路径末尾的最长可见部分，缺失路径显示短横线。"""
     if path is None:
         return "-"
     text = str(path)
@@ -138,6 +148,7 @@ def shorten_path(path: Path | None, *, max_chars: int = 48) -> str:
 
 
 def last_answer(events: list[RuntimeEvent]) -> str | None:
+    """反向读取最近 TURN_FINISHED 的字符串 answer。"""
     for event in reversed(events):
         if event.type == RuntimeEventType.TURN_FINISHED:
             answer = event.payload.get("answer")
@@ -147,6 +158,7 @@ def last_answer(events: list[RuntimeEvent]) -> str | None:
 
 
 def event_summary(event: RuntimeEvent) -> str:
+    """按类型从 payload 选取最多 120 字符的检查视图摘要。"""
     payload = event.payload
     if event.type in {
         RuntimeEventType.ASSISTANT_MESSAGE,

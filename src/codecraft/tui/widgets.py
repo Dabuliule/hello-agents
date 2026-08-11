@@ -15,15 +15,20 @@ from codecraft.tui.theme import palette_for
 
 
 class SessionHeader(Static):
+    """随宽度和 Theme 自适应显示 workspace/model 的顶部 Header。"""
+
     def __init__(self, config: SessionConfig, *, id: str | None = None) -> None:
+        """保存当前 SessionConfig。"""
         super().__init__(id=id)
         self.config = config
 
     def set_config(self, config: SessionConfig) -> None:
+        """替换恢复后的配置并请求重绘。"""
         self.config = config
         self.refresh()
 
     def render(self) -> Text:
+        """用当前内容宽度和 Theme Palette 生成 Header Text。"""
         return session_header(
             self.config,
             max(self.content_size.width, 1),
@@ -32,7 +37,10 @@ class SessionHeader(Static):
 
 
 class RuntimeStatusLine(Static):
+    """显示 Turn 状态、Sandbox、Token 和 MCP 数量的底部状态行。"""
+
     def __init__(self, config: SessionConfig, *, id: str | None = None) -> None:
+        """初始化 starting 状态与零 Token。"""
         super().__init__(id=id)
         self.config = config
         self.status = "starting"
@@ -44,12 +52,14 @@ class RuntimeStatusLine(Static):
         status: str,
         token_usage: dict[str, int],
     ) -> None:
+        """原子替换状态栏输入并请求重绘。"""
         self.config = config
         self.status = status
         self.token_usage = token_usage
         self.refresh()
 
     def render(self) -> Text:
+        """按当前宽度和 Theme 渲染自适应状态 Text。"""
         return runtime_status(
             self.config,
             self.status,
@@ -60,16 +70,21 @@ class RuntimeStatusLine(Static):
 
 
 class MessageBlock(Static):
+    """按 Assistant/User/Error/其他角色渲染对话文本的 Widget。"""
+
     def __init__(self, role: str, text: str = "") -> None:
+        """保存角色/正文，并以角色小写设置 CSS class。"""
         super().__init__(classes=role.casefold())
         self.role = role
         self.text = text
 
     def set_text(self, text: str) -> None:
+        """更新流式/完整正文并请求布局级刷新。"""
         self.text = text
         self.refresh(layout=True)
 
     def render(self) -> RenderableType:
+        """Assistant 用 Markdown，User/Error 用图标语义色，其余用 Group。"""
         palette = palette_for(self.app.current_theme.dark)
         if self.role == "Assistant":
             return Markdown(self.text)
@@ -105,6 +120,7 @@ class ActivityBlock(Static):
         duration_ms: int | None = None,
         detail: str = "",
     ) -> None:
+        """初始化 Tool/notice 身份、参数、状态、耗时和详情。"""
         super().__init__()
         self.call_id = call_id
         self.tool_name = name
@@ -115,22 +131,27 @@ class ActivityBlock(Static):
 
     @classmethod
     def notice(cls, text: str, *, failed: bool = False) -> ActivityBlock:
+        """创建普通或失败的非 Tool 活动提示。"""
         return cls(text, status="failed" if failed else "notice")
 
     def mark_waiting(self) -> None:
+        """将 Tool 标为等待审批并刷新。"""
         self.status = "waiting"
         self.refresh(layout=True)
 
     def mark_running(self) -> None:
+        """将审批后的 Tool 恢复为运行并刷新。"""
         self.status = "running"
         self.refresh(layout=True)
 
     def mark_stopped(self) -> None:
+        """只把尚在 running/waiting 的残留活动标为 stopped。"""
         if self.status in {"running", "waiting"}:
             self.status = "stopped"
             self.refresh(layout=True)
 
     def finish(self, payload: EventPayload) -> None:
+        """从 TOOL_CALL_FINISHED 设置成功/失败、合法耗时和最多 500 字错误详情。"""
         result = payload.get("result")
         success = isinstance(result, dict) and result.get("success") is True
         self.status = "completed" if success else "failed"
@@ -149,6 +170,7 @@ class ActivityBlock(Static):
         self.refresh(layout=True)
 
     def render(self) -> Text:
+        """按状态选择 symbol/colors，并按宽度显示参数、耗时与失败详情。"""
         palette = palette_for(self.app.current_theme.dark)
         symbol, symbol_style = {
             "running": ("·", f"bold {palette.accent}"),
@@ -182,6 +204,7 @@ class ActivityBlock(Static):
 
 
 def _compact_arguments(arguments: dict[str, Any]) -> str:
+    """优先显示 path/command/query/pattern/url，否则稳定 JSON，最多 140 字符。"""
     if not arguments:
         return ""
     for key in ("path", "command", "query", "pattern", "url"):

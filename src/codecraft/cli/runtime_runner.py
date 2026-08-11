@@ -14,11 +14,17 @@ async def submit_user_message(
     renderer: RuntimeEventRenderer,
     text: str,
 ) -> int:
+    """提交一条新用户消息并消费其 Turn，返回 shell exit code。"""
     await thread.submit(SessionInput.user_message(new_id("inp_"), text))
     return await consume_turn(thread, renderer)
 
 
 async def consume_turn(thread: AgentThread, renderer: RuntimeEventRenderer) -> int:
+    """消费直到 Turn 终态；审批事件同步询问并作为旁路输入回送。
+
+    成功返回 0，中止返回 1；KeyboardInterrupt 会先拒绝 pending approvals、
+    中止并关闭 Thread，再重新抛出给 Typer/终端处理。
+    """
     try:
         while True:
             event = await thread.next_event()
@@ -43,6 +49,7 @@ async def consume_turn(thread: AgentThread, renderer: RuntimeEventRenderer) -> i
 
 
 async def shutdown_thread(thread: AgentThread) -> None:
+    """拒绝所有待审批项、中止/关闭 Session，并短暂等待后台 Task 收口。"""
     for approval in thread.list_pending_approvals():
         await thread.submit(
             SessionInput.approval_decision(

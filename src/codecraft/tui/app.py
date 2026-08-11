@@ -47,6 +47,8 @@ MAX_RESTORED_TOOL_EVENTS = 200
 
 
 class CodeCraftTUI(App[None]):
+    """Textual 交互客户端：驱动 Runtime、渲染事件并回送消息/审批。"""
+
     TITLE = "CodeCraft"
     BINDINGS = [
         Binding("ctrl+q", "quit", show=False, priority=True),
@@ -68,6 +70,11 @@ class CodeCraftTUI(App[None]):
         browse_sessions: bool = True,
         color_scheme: TUIColorScheme = TUIColorScheme.LIGHT,
     ) -> None:
+        """注册主题，保存启动/恢复选择，并初始化流、活动、审批和 handler 状态。
+
+        runtime_factory 允许恢复到与当前启动配置不同的 Session 时重建依赖；
+        没有 factory 则只允许完全相同配置的 Snapshot。
+        """
         super().__init__()
         for theme in CODECRAFT_THEMES:
             self.register_theme(theme)
@@ -112,12 +119,14 @@ class CodeCraftTUI(App[None]):
         }
 
     def get_theme_variable_defaults(self) -> dict[str, str]:
+        """在 Textual 默认变量上叠加 CodeCraft 语义色默认值。"""
         return {
             **super().get_theme_variable_defaults(),
             **CODECRAFT_THEME_VARIABLE_DEFAULTS,
         }
 
     def compose(self) -> ComposeResult:
+        """声明 Header、滚动 Conversation、Composer 菜单、审批选项和状态栏。"""
         with Vertical(id="app-shell"):
             with Center(id="header-frame"):
                 yield SessionHeader(self.config, id="session-header")
@@ -145,6 +154,7 @@ class CodeCraftTUI(App[None]):
                     yield RuntimeStatusLine(self.config, id="runtime-status")
 
     async def on_mount(self) -> None:
+        """Textual mount 回调：刷新初态并启动独占 Runtime startup worker。"""
         self.sub_title = f"{self.config.model_provider}/{self.config.model}"
         self._refresh_status()
         self.run_worker(
@@ -155,6 +165,10 @@ class CodeCraftTUI(App[None]):
         )
 
     async def _start_runtime(self) -> None:
+        """选择新建/恢复 Session，启用输入框并启动唯一事件消费 worker。
+
+        启动错误留在 TUI 中显示，不让 Textual app 因后台异常直接退出。
+        """
         try:
             snapshot = await self._select_session()
             if snapshot is None:
@@ -183,6 +197,7 @@ class CodeCraftTUI(App[None]):
         )
 
     async def _select_session(self) -> SessionSnapshot | None:
+        """按显式 ID、last、禁用浏览、交互浏览的优先级选择 Snapshot。"""
         if self.resume_session_id is not None:
             return await self.runtime.session_store.resume(self.resume_session_id)
 
@@ -199,6 +214,7 @@ class CodeCraftTUI(App[None]):
         return await self.runtime.session_store.resume(session_id)
 
     async def _resume_snapshot(self, snapshot: SessionSnapshot) -> None:
+        """必要时替换 Runtime，先恢复有限 UI 历史，再恢复可继续执行的 Thread。"""
         if self.runtime_factory is not None:
             previous_runtime = self.runtime
             self.runtime = self.runtime_factory(snapshot.config)
@@ -214,6 +230,11 @@ class CodeCraftTUI(App[None]):
         self.thread = await self.runtime.resume_snapshot(snapshot)
 
     async def _restore_history(self, events: list[RuntimeEvent]) -> None:
+        """恢复最近 100 条消息、200 个工具终态和全部 Token usage。
+
+        早期 UI 项只显示 omission notice；Runtime 的 Conversation 恢复仍使用完整
+        日志，限制只影响视图 DOM 大小，不影响模型上下文。
+        """
         message_events = [
             event
             for event in events
@@ -261,6 +282,7 @@ class CodeCraftTUI(App[None]):
 
     @on(Input.Submitted, "#prompt")
     async def on_prompt_submitted(self, event: Input.Submitted) -> None:
+        """Input submit 回调：处理菜单/slash，或只在 idle 提交普通用户消息。"""
         text = event.value.strip()
         if not text or self.thread is None or self.turn_status != "idle":
             return
@@ -297,12 +319,14 @@ class CodeCraftTUI(App[None]):
 
     @on(Input.Changed, "#prompt")
     def on_prompt_changed(self, event: Input.Changed) -> None:
+        """Input changed 回调：idle 时刷新 slash/skill 菜单，否则关闭。"""
         if self.turn_status != "idle" or event.input.disabled:
             self._close_composer_menu()
             return
         self._refresh_composer_menu(event.value)
 
     async def on_key(self, event: events.Key) -> None:
+        """菜单打开且 prompt 聚焦时接管上下移动与 Tab 选择。"""
         if not self._composer_menu_open() or self.focused is not self.query_one(
             "#prompt", Input
         ):
@@ -323,10 +347,12 @@ class CodeCraftTUI(App[None]):
         self,
         event: OptionList.OptionSelected,
     ) -> None:
+        """Composer OptionList 点击/回车回调：按 option ID 接受选择。"""
         if event.option.id is not None:
             await self._accept_composer_choice(event.option.id)
 
     async def action_trace(self) -> None:
+        """Ctrl+T action：从持久化事件构建并打开 TraceScreen。"""
         try:
             events = await self.runtime.session_store.load_events(
                 self.config.session_id
@@ -343,6 +369,7 @@ class CodeCraftTUI(App[None]):
         self.push_screen(TraceScreen(report))
 
     def action_reject_approval(self) -> None:
+        """Escape action：优先关闭菜单，否则拒绝当前 inline approval。"""
         if self._composer_menu_open():
             self._close_composer_menu()
             self.query_one("#prompt", Input).focus()
@@ -351,6 +378,7 @@ class CodeCraftTUI(App[None]):
             self._approval_result.set_result(False)
 
     def _refresh_composer_menu(self, value: str) -> None:
+        """解析输入并以当前 Skill metadata 刷新菜单和容器 CSS 状态。"""
         opened = self.query_one(ComposerMenu).refresh_for(
             value,
             self.runtime.skill_registry.list(),
@@ -359,14 +387,21 @@ class CodeCraftTUI(App[None]):
         self.query_one("#composer").set_class(opened, "composer-menu-active")
 
     def _close_composer_menu(self) -> None:
+        """清空 ComposerMenu 并移除活跃布局 class。"""
         self.query_one(ComposerMenu).close()
         self.query_one("#composer-frame").remove_class("composer-menu-active")
         self.query_one("#composer").remove_class("composer-menu-active")
 
     def _composer_menu_open(self) -> bool:
+        """返回 ComposerMenu 当前是否显示。"""
         return self.query_one("#composer-menu").display
 
     async def _accept_composer_choice(self, choice_id: str | None = None) -> bool:
+        """插入 Skill mention、进入 skill 搜索或执行 slash command。
+
+        Returns:
+            是否找到并处理了一个 Choice；False 让 submit path 展示未知提示。
+        """
         menu = self.query_one(ComposerMenu)
         choice = menu.selected_choice(choice_id)
         if choice is None:
@@ -396,6 +431,7 @@ class CodeCraftTUI(App[None]):
         return True
 
     async def _execute_slash_command(self, command: str) -> None:
+        """执行 status/tools/mcp/trace/quit 本地命令，不提交给模型。"""
         if command == "status":
             await self._append_message(
                 "Status",
@@ -431,18 +467,22 @@ class CodeCraftTUI(App[None]):
 
     @on(OptionList.OptionSelected, "#approval-options")
     def on_approval_selected(self, event: OptionList.OptionSelected) -> None:
+        """Inline approval OptionList 回调：只完成当前尚未决的 Future。"""
         if self._approval_result is None or self._approval_result.done():
             return
         self._approval_result.set_result(event.option.id == "approve")
 
     async def action_quit(self) -> None:
+        """Ctrl+Q/C action：先关闭 Runtime 再退出 Textual。"""
         await self._shutdown_runtime()
         self.exit()
 
     async def on_unmount(self) -> None:
+        """Textual unmount 回调：幂等执行 Runtime 清理。"""
         await self._shutdown_runtime()
 
     async def _consume_events(self) -> None:
+        """持续消费 Thread 队列到 SESSION_CLOSED，异常时留错误消息并收口 Turn。"""
         if self.thread is None:
             return
         try:
@@ -461,11 +501,13 @@ class CodeCraftTUI(App[None]):
             self._finish_turn("failed")
 
     async def _handle_event(self, event: RuntimeEvent) -> None:
+        """异步分发已支持 RuntimeEventType；不影响 UI 的类型安全忽略。"""
         handler = self._runtime_event_handlers.get(event.type)
         if handler is not None:
             await handler(event)
 
     async def _handle_turn_started(self, event: RuntimeEvent) -> None:
+        """Turn 开始时清错误去重状态、关闭菜单、禁用 Prompt 并显示 running。"""
         self._last_error_turn_id = None
         self.turn_status = "running"
         self._close_composer_menu()
@@ -473,11 +515,13 @@ class CodeCraftTUI(App[None]):
         self._refresh_status()
 
     async def _handle_user_message(self, event: RuntimeEvent) -> None:
+        """把类型正确的用户文本追加为 MessageBlock。"""
         text = event.payload.get("text")
         if isinstance(text, str):
             await self._append_message("User", text)
 
     async def _handle_assistant_delta(self, event: RuntimeEvent) -> None:
+        """累计 delta，创建/更新唯一 Assistant MessageBlock 并滚到底部。"""
         delta = event.payload.get("text")
         if not isinstance(delta, str):
             return
@@ -488,6 +532,7 @@ class CodeCraftTUI(App[None]):
         self._scroll_conversation()
 
     async def _handle_assistant_message(self, event: RuntimeEvent) -> None:
+        """用完整文本创建或校准流式块，再清空流状态避免重复消息。"""
         text = event.payload.get("text")
         if not isinstance(text, str):
             return
@@ -500,24 +545,31 @@ class CodeCraftTUI(App[None]):
         self._scroll_conversation()
 
     async def _handle_tool_started(self, event: RuntimeEvent) -> None:
+        """委托创建 running ActivityBlock。"""
         await self._render_tool_started(event.payload)
 
     async def _handle_tool_finished(self, event: RuntimeEvent) -> None:
+        """委托按 call_id 收口 ActivityBlock。"""
         await self._render_tool_finished(event.payload)
 
     async def _handle_approval_requested(self, event: RuntimeEvent) -> None:
+        """进入 inline approval 状态并将决定回送当前 Thread。"""
         await self._request_approval(event.payload)
 
     async def _handle_token_count(self, event: RuntimeEvent) -> None:
+        """累加非负整数 Token 并刷新状态栏。"""
         self._add_token_usage(event.payload)
 
     async def _handle_context_compacted(self, event: RuntimeEvent) -> None:
+        """追加 Context compacted 活动提示。"""
         await self._append_activity(ActivityBlock.notice("Context compacted"))
 
     async def _handle_session_restored(self, event: RuntimeEvent) -> None:
+        """追加 Session restored 活动提示。"""
         await self._append_activity(ActivityBlock.notice("Session restored"))
 
     async def _handle_runtime_error(self, event: RuntimeEvent) -> None:
+        """显示 ERROR，并记住 turn_id 防止随后 TURN_ABORTED 重复同一错误。"""
         payload = event.payload
         message = str(payload.get("message") or payload.get("code") or "Error")
         if event.turn_id is None or event.turn_id != self._last_error_turn_id:
@@ -525,6 +577,7 @@ class CodeCraftTUI(App[None]):
         self._last_error_turn_id = event.turn_id
 
     async def _handle_turn_aborted(self, event: RuntimeEvent) -> None:
+        """必要时显示中止消息，清错误去重并恢复 idle Composer。"""
         payload = event.payload
         message = str(payload.get("message") or payload.get("reason") or "Aborted")
         if event.turn_id is None or event.turn_id != self._last_error_turn_id:
@@ -533,14 +586,21 @@ class CodeCraftTUI(App[None]):
         self._finish_turn("idle")
 
     async def _handle_turn_finished(self, event: RuntimeEvent) -> None:
+        """清错误去重并恢复 idle Composer。"""
         self._last_error_turn_id = None
         self._finish_turn("idle")
 
     async def _handle_session_closed(self, event: RuntimeEvent) -> None:
+        """清错误去重并把 UI 收口为 closed。"""
         self._last_error_turn_id = None
         self._finish_turn("closed")
 
     async def _request_approval(self, payload: EventPayload) -> None:
+        """标记对应 Tool waiting，等待 UI 决定并提交旁路 SessionInput。
+
+        缺失 approval_id 或提交失败会显示错误并中止当前 Turn，避免 Reviewer
+        永久悬挂；成功后 Activity 恢复 running。
+        """
         if self.thread is None:
             return
         activity = self._activity_for_payload(payload)
@@ -576,6 +636,11 @@ class CodeCraftTUI(App[None]):
         self._refresh_status()
 
     async def _show_inline_approval(self, payload: EventPayload) -> bool:
+        """用单个 Future 暂停事件 handler，展示 Reject/Approve once 并返回选择。
+
+        finally 始终恢复 prompt layout 和 CSS class；同时存在第二个审批会明确
+        报错，因此 Tool 批次中需审批调用本身不会在 TUI 里并发交互。
+        """
         if self._approval_result is not None:
             raise RuntimeError("another approval decision is already active")
 
@@ -607,15 +672,18 @@ class CodeCraftTUI(App[None]):
             self.query_one("#composer").remove_class("approval-active")
 
     async def _append_message(self, role: str, text: str) -> MessageBlock:
+        """挂载角色消息、滚到底部并返回可供流式更新的 Block。"""
         block = MessageBlock(role, text)
         await self.query_one("#conversation-pane", VerticalScroll).mount(block)
         self._scroll_conversation()
         return block
 
     def _scroll_conversation(self) -> None:
+        """无动画滚到 Conversation 末尾以跟随新事件。"""
         self.query_one("#conversation-pane", VerticalScroll).scroll_end(animate=False)
 
     async def _append_activity(self, block: ActivityBlock) -> ActivityBlock:
+        """挂载活动；非连续 Activity 前增加 group-start 视觉间隔。"""
         conversation = self.query_one("#conversation-pane", VerticalScroll)
         if not conversation.children or not isinstance(
             conversation.children[-1], ActivityBlock
@@ -626,6 +694,7 @@ class CodeCraftTUI(App[None]):
         return block
 
     async def _render_tool_started(self, payload: EventPayload) -> None:
+        """创建带名称/参数的 ActivityBlock，并按合法 call_id 建立映射。"""
         call_id_value = payload.get("call_id")
         call_id = call_id_value if isinstance(call_id_value, str) else None
         name = str(payload.get("name") or "tool")
@@ -641,6 +710,7 @@ class CodeCraftTUI(App[None]):
             self._activity_blocks[call_id] = block
 
     async def _render_tool_finished(self, payload: EventPayload) -> None:
+        """按 call_id、最近同名 running、最后新建的顺序找 Block 并完成。"""
         call_id_value = payload.get("call_id")
         call_id = call_id_value if isinstance(call_id_value, str) else None
         name = str(payload.get("name") or "tool")
@@ -653,12 +723,14 @@ class CodeCraftTUI(App[None]):
         self._scroll_conversation()
 
     def _activity_for_payload(self, payload: EventPayload) -> ActivityBlock | None:
+        """按合法 call_id 查当前运行 Activity。"""
         call_id = payload.get("call_id")
         if not isinstance(call_id, str):
             return None
         return self._activity_blocks.get(call_id)
 
     def _latest_running_activity(self, name: str) -> ActivityBlock | None:
+        """恢复历史或缺 call_id 时反向匹配最近同名 running/waiting Block。"""
         blocks = list(self.query(ActivityBlock))
         for block in reversed(blocks):
             if block.tool_name == name and block.status in {"running", "waiting"}:
@@ -668,16 +740,19 @@ class CodeCraftTUI(App[None]):
         return None
 
     def _add_token_usage(self, payload: EventPayload) -> None:
+        """累加 Token 后刷新 Header/Status。"""
         self._accumulate_token_usage(payload)
         self._refresh_status()
 
     def _accumulate_token_usage(self, payload: EventPayload) -> None:
+        """只累加已有字段中的非布尔、非负 int。"""
         for name in self.token_usage:
             value = payload.get(name)
             if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
                 self.token_usage[name] += value
 
     def _finish_turn(self, status: str) -> None:
+        """清流、停止残留活动、设置状态并仅在 idle 重新启用/focus Prompt。"""
         self._assistant_block = None
         self._assistant_buffer = ""
         for block in self._activity_blocks.values():
@@ -692,6 +767,7 @@ class CodeCraftTUI(App[None]):
         self._refresh_status()
 
     def _refresh_status(self) -> None:
+        """把最新 config、Turn 状态与累计 Token 推送给 Header/Status widgets。"""
         self.query_one("#session-header", SessionHeader).set_config(self.config)
         self.query_one("#runtime-status", RuntimeStatusLine).set_state(
             self.config,
@@ -700,6 +776,7 @@ class CodeCraftTUI(App[None]):
         )
 
     async def _show_startup_error(self, message: str, suggestion: str | None) -> None:
+        """标记 failed，并把启动消息与建议保留在 Conversation。"""
         self.turn_status = "failed"
         self._refresh_status()
         await self._append_message(
@@ -707,6 +784,7 @@ class CodeCraftTUI(App[None]):
         )
 
     async def _shutdown_runtime(self) -> None:
+        """幂等关闭 Thread 与 Runtime；退出路径吞掉清理错误避免阻塞 UI 终止。"""
         if self._closed:
             return
         self._closed = True

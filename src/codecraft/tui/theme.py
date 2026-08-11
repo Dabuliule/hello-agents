@@ -14,18 +14,24 @@ from textual.theme import Theme
 
 
 class TUIThemeMode(StrEnum):
+    """用户选择自动探测、强制浅色或强制深色。"""
+
     AUTO = "auto"
     LIGHT = "light"
     DARK = "dark"
 
 
 class TUIColorScheme(StrEnum):
+    """主题解析后的二值浅/深方案。"""
+
     LIGHT = "light"
     DARK = "dark"
 
 
 @dataclass(frozen=True, slots=True)
 class TUIColorPalette:
+    """Widget/Renderer 共用的语义前景、状态和分隔色。"""
+
     strong: str
     foreground: str
     secondary: str
@@ -82,6 +88,7 @@ def _theme_variables(
     table_header: str,
     cursor_text: str,
 ) -> dict[str, str]:
+    """把 Palette 与 Surface 颜色映射为 Textual/CSS 变量表。"""
     return {
         "codecraft-strong": palette.strong,
         "codecraft-secondary": palette.secondary,
@@ -179,10 +186,12 @@ _TerminalAttributes: TypeAlias = list[int | list[bytes | int]]
 
 
 def palette_for(dark: bool) -> TUIColorPalette:
+    """按 Textual current_theme.dark 返回对应不可变 Palette。"""
     return DARK_PALETTE if dark else LIGHT_PALETTE
 
 
 def textual_theme_name(scheme: TUIColorScheme) -> str:
+    """映射 ColorScheme 到已注册的 Textual Theme 名。"""
     return "codecraft-dark" if scheme == TUIColorScheme.DARK else "codecraft-light"
 
 
@@ -193,6 +202,11 @@ def resolve_color_scheme(
     terminal_background: Callable[[], tuple[int, int, int] | None] | None = None,
     fallback: TUIColorScheme = TUIColorScheme.LIGHT,
 ) -> TUIColorScheme:
+    """解析显式模式，或按 COLORFGBG→OSC 11→fallback 自动选择主题。
+
+    依赖参数可注入以测试；显式 light/dark 不读取环境或终端。COLORFGBG 是
+    无 I/O 快路径，只有缺失/无效时才短暂查询终端背景。
+    """
     if mode != TUIThemeMode.AUTO:
         return TUIColorScheme(mode.value)
 
@@ -207,6 +221,7 @@ def resolve_color_scheme(
 
 
 def parse_osc_background(response: bytes) -> tuple[int, int, int] | None:
+    """解析 OSC 11 的 rgb: 或 #RGB/#RRGGBB/高位宽响应并缩放到 8-bit。"""
     rgb_match = _OSC_RGB.search(response)
     if rgb_match is not None:
         red, green, blue = rgb_match.groups()
@@ -287,6 +302,7 @@ def query_terminal_background(timeout: float = 0.1) -> tuple[int, int, int] | No
 
 
 def _scheme_from_colorfgbg(value: str | None) -> TUIColorScheme | None:
+    """解析 COLORFGBG 最后 ANSI 0-15 背景索引并判断浅/深。"""
     if not value:
         return None
     try:
@@ -303,11 +319,13 @@ def _scheme_from_colorfgbg(value: str | None) -> TUIColorScheme | None:
 
 
 def _scheme_from_rgb(rgb: tuple[int, int, int]) -> TUIColorScheme:
+    """用加权感知亮度阈值 0.5 把 RGB 分类为浅/深。"""
     red, green, blue = rgb
     brightness = (299 * red + 587 * green + 114 * blue) / 255_000
     return TUIColorScheme.LIGHT if brightness >= 0.5 else TUIColorScheme.DARK
 
 
 def _scale_hex_channel(value: bytes) -> int:
+    """把 1-4 位十六进制通道按其最大值线性缩放到 0-255。"""
     maximum = (16 ** len(value)) - 1
     return int(round(int(value, 16) * 255 / maximum))

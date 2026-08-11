@@ -12,6 +12,8 @@ from codecraft.retrieval import RepositoryIndex
 
 
 def register_index_command(app: typer.Typer) -> None:
+    """注册同步 workspace 索引并打印增量统计的 ``index`` 子命令。"""
+
     @app.command("index")
     def index_command(
         path: Annotated[
@@ -28,6 +30,7 @@ def register_index_command(app: typer.Typer) -> None:
             ),
         ] = 1_000_000,
     ) -> None:
+        """验证目录，在线程中 sync RepositoryIndex，并映射用法/运行错误码。"""
         workspace = path.expanduser().resolve()
         console = make_console()
         if not workspace.is_dir():

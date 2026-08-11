@@ -22,4 +22,5 @@ CODECRAFT_THEME = Theme(
 
 
 def make_console(*, stderr: bool = False) -> Console:
+    """创建应用统一语义主题的 stdout 或 stderr Rich Console。"""
     return Console(theme=CODECRAFT_THEME, stderr=stderr)

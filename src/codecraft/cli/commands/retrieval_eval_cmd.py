@@ -20,12 +20,16 @@ from codecraft.retrieval import (
 
 
 class RetrievalEvalFormat(StrEnum):
+    """Retrieval benchmark 可输出的报告格式。"""
+
     JSON = "json"
     HTML = "html"
     BOTH = "both"
 
 
 class RetrievalEvalStrategy(StrEnum):
+    """可直接比较的自动、扫描、词法和符号策略。"""
+
     AUTO = "auto"
     SCAN = "scan"
     LEXICAL = "lexical"
@@ -33,6 +37,8 @@ class RetrievalEvalStrategy(StrEnum):
 
 
 def register_retrieval_eval_command(app: typer.Typer) -> None:
+    """注册固定语料检索 benchmark 子命令。"""
+
     @app.command("retrieval-eval")
     def retrieval_eval_command(
         codecraft_home: CodecraftHomeOption = Path("~/.codecraft"),
@@ -66,6 +72,7 @@ def register_retrieval_eval_command(app: typer.Typer) -> None:
             typer.Option("--list", help="List the fixed queries without running them."),
         ] = False,
     ) -> None:
+        """列出 cases 或同步驱动异步 benchmark 并映射退出码。"""
         if list_only:
             _print_case_list()
             return
@@ -91,6 +98,7 @@ async def run_retrieval_eval(
     strategy: RetrievalEvalStrategy,
     format: RetrievalEvalFormat,
 ) -> int:
+    """运行 benchmark、按选择写报告并打印质量和延迟摘要。"""
     console = make_console()
     cases = get_retrieval_cases()
     console.print(
@@ -142,12 +150,14 @@ async def run_retrieval_eval(
 
 
 def _default_output_dir(home: Path) -> Path:
+    """用 UTC 时间和随机短后缀生成默认 retrieval-evals 目录。"""
     timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     suffix = new_id("")[:8]
     return home / "retrieval-evals" / f"{timestamp}-{suffix}"
 
 
 def _print_case_list() -> None:
+    """打印 case id、category 与 query，不创建 workspace。"""
     console = make_console()
     for case in get_retrieval_cases():
         console.print(

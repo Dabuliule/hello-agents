@@ -43,6 +43,8 @@ _DEMO_PATCH = """\
 
 
 def register_demo_command(app: typer.Typer) -> None:
+    """注册无需 API Key 的确定性治理编辑 demo。"""
+
     @app.command("demo")
     def demo_command(
         codecraft_home: CodecraftHomeOption = Path("~/.codecraft"),
@@ -58,6 +60,11 @@ def register_demo_command(app: typer.Typer) -> None:
 
 
 async def run_demo(*, codecraft_home: Path, debug: bool = False) -> int:
+    """创建独立样例仓库，运行 read→approval→patch 脚本并验证事件顺序。
+
+    退出 0 表示文件与治理 Trace 都符合预期；2 表示未修改；3 表示文件已改但
+    Trace 验证失败。Workspace 和 Session 日志保留，便于用户用 inspect 查看。
+    """
     session_id = new_id("ses_demo_")
     home = codecraft_home.expanduser().resolve()
     workspace = home / "demos" / session_id
@@ -127,6 +134,7 @@ def _demo_config(
     workspace: Path,
     codecraft_home: Path,
 ) -> SessionConfig:
+    """构造 ON_REQUEST、workspace_write、Mock Provider 的 Demo Session。"""
     return SessionConfig(
         session_id=session_id,
         source=SessionSource.CLI_DEMO,
@@ -142,6 +150,7 @@ def _demo_config(
 
 
 def _demo_script() -> list[ModelEvent]:
+    """返回三次模型响应组成的确定性 read/patch/final 事件脚本。"""
     return [
         ModelMessageDeltaEvent(
             payload={"text": "I will inspect the target before editing it."},
@@ -178,6 +187,7 @@ def _demo_script() -> list[ModelEvent]:
 
 
 def _demo_trace_succeeded(events: Sequence[RuntimeEvent]) -> bool:
+    """验证 read 成功、patch 审批请求/批准、结果和 PATCH_APPLIED 的严格顺序。"""
     read_index = _successful_tool_result_index(events, "call_demo_read")
     patch_index = _successful_tool_result_index(events, "call_demo_patch")
     approval_indices = _approved_patch_indices(events)
@@ -197,6 +207,7 @@ def _successful_tool_result_index(
     events: Sequence[RuntimeEvent],
     call_id: str,
 ) -> int | None:
+    """返回指定 call 首个成功 TOOL_CALL_FINISHED 的事件索引。"""
     for index, event in enumerate(events):
         if event.type != RuntimeEventType.TOOL_CALL_FINISHED:
             continue
@@ -211,6 +222,7 @@ def _successful_tool_result_index(
 def _approved_patch_indices(
     events: Sequence[RuntimeEvent],
 ) -> tuple[int, int] | None:
+    """按 approval_id 对账 demo patch 的 REQUESTED 与 approved DECIDED 索引。"""
     for requested_index, event in enumerate(events):
         if event.type != RuntimeEventType.APPROVAL_REQUESTED:
             continue
@@ -232,6 +244,7 @@ def _approved_patch_indices(
 
 
 def _patch_applied_index(events: Sequence[RuntimeEvent]) -> int | None:
+    """返回 demo patch 对应 PATCH_APPLIED 附加事件的索引。"""
     for index, event in enumerate(events):
         if (
             event.type == RuntimeEventType.PATCH_APPLIED

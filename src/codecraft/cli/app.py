@@ -39,6 +39,7 @@ def _load_session_config(
     approval_policy: ApprovalPolicy | None,
     network: bool | None,
 ) -> SessionConfig:
+    """测试可替换的 CLI 配置加载 seam，委托 bootstrap。"""
     return bootstrap.load_session_config(
         source=source,
         provider=provider,
@@ -52,6 +53,7 @@ def _load_session_config(
 
 
 def _build_runtime(config: SessionConfig) -> AgentRuntime:
+    """通过可 monkeypatch 的 Provider/Tool builders 装配 Runtime。"""
     return bootstrap.build_runtime(
         config,
         llm_providers=_build_provider_registry(config),
@@ -60,18 +62,22 @@ def _build_runtime(config: SessionConfig) -> AgentRuntime:
 
 
 def _build_provider_registry(config: SessionConfig) -> LLMProviderRegistry:
+    """CLI seam：构造模型 Provider Registry。"""
     return bootstrap.build_provider_registry(config)
 
 
 def _provider_api_key_env(config: SessionConfig, provider: str) -> str | None:
+    """CLI seam：解析指定 Provider 的 API Key 环境名。"""
     return bootstrap.provider_api_key_env(config, provider)
 
 
 def _model_api_key_env(provider: str, configured: str | None) -> str | None:
+    """CLI seam：解析显式或默认 API Key 环境名。"""
     return bootstrap.model_api_key_env(provider, configured)
 
 
 def _build_tool_registry(config: SessionConfig | None = None) -> ToolRegistry:
+    """CLI seam：构造默认或配置感知的 Tool Registry。"""
     return bootstrap.build_tool_registry(config)
 
 

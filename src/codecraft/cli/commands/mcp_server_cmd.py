@@ -11,6 +11,8 @@ from codecraft.mcp.server import create_repository_mcp_server
 
 
 def register_mcp_server_command(app: typer.Typer) -> None:
+    """注册以 stdio 运行只读 Repository MCP Server 的命令。"""
+
     @app.command("mcp-server")
     def mcp_server_command(
         workspace: Annotated[
@@ -23,6 +25,7 @@ def register_mcp_server_command(app: typer.Typer) -> None:
         ] = Path("."),
         codecraft_home: CodecraftHomeOption = Path("~/.codecraft"),
     ) -> None:
+        """验证 workspace 后创建 FastMCP，并让 stdout 专用于 stdio 协议。"""
         root = workspace.expanduser().resolve()
         if not root.is_dir():
             make_console(stderr=True).print(

@@ -9,12 +9,16 @@ from codecraft.schema.event import EventPayload
 
 
 class ToolRenderer:
+    """按内置 Tool 语义渲染开始/成功/失败摘要和输出预览。"""
+
     def __init__(self, console: Console, config: RenderConfig) -> None:
+        """绑定 Console/config，并初始化 call_id 到开始参数的临时映射。"""
         self.console = console
         self.config = config
         self._started_args: dict[str, dict[str, Any]] = {}
 
     def render_started(self, payload: EventPayload) -> None:
+        """保存合法 arguments 供完成事件补路径，并打印开始摘要。"""
         name = str(payload.get("name") or "tool")
         arguments = payload.get("arguments")
         if isinstance(arguments, dict):
@@ -26,6 +30,7 @@ class ToolRenderer:
         )
 
     def render_finished(self, payload: EventPayload) -> None:
+        """按 result.success 渲染语义统计；失败另输出头尾保留的内容预览。"""
         name = str(payload.get("name") or "tool")
         result = payload.get("result")
         duration_ms = payload.get("duration_ms")
@@ -57,6 +62,7 @@ class ToolRenderer:
             self.console.print(content)
 
     def render_patch_applied(self, payload: EventPayload) -> None:
+        """显示 Patch 附加事件中的修改/新增/删除数量。"""
         self.console.print(
             f"✓ patch applied · {payload.get('modified', 0)} modified · "
             f"{payload.get('added', 0)} added · {payload.get('deleted', 0)} deleted",
@@ -65,6 +71,7 @@ class ToolRenderer:
         )
 
     def _format_started(self, name: str, arguments: Any) -> str:
+        """为搜索/Bash 提取关键参数，其余 Tool 输出紧凑名称。"""
         if name == "read_file":
             return "• read_file"
         if name == "list_files":
@@ -92,6 +99,7 @@ class ToolRenderer:
         duration_ms: Any,
         arguments: dict[str, Any],
     ) -> str:
+        """按 Tool 类型提取路径、行数、字节、命中、策略、状态和耗时。"""
         duration = f" · {duration_ms}ms" if isinstance(duration_ms, int) else ""
         if name == "read_file":
             path = self._display_path(result, arguments)
@@ -133,11 +141,13 @@ class ToolRenderer:
         return f"✓ {name} completed{duration}"
 
     def _format_failure(self, name: str, duration_ms: Any, content: str) -> str:
+        """组合失败 Tool 名、可选耗时和紧凑原因。"""
         duration = f" · {duration_ms}ms" if isinstance(duration_ms, int) else ""
         summary = f": {content}" if content else ""
         return f"✗ {name} failed{duration}{summary}"
 
     def _display_path(self, result: dict[str, Any], arguments: dict[str, Any]) -> str:
+        """按 data→metadata→原 arguments 优先级读取路径。"""
         data = result.get("data")
         metadata = result.get("metadata")
         path = None
@@ -153,6 +163,7 @@ class ToolRenderer:
         return "-"
 
     def _line_count(self, result: dict[str, Any]) -> int | None:
+        """优先使用结构化 line_count，否则从 content 可见行数回退。"""
         data = result.get("data")
         if isinstance(data, dict):
             line_count = data.get("line_count")
@@ -164,6 +175,7 @@ class ToolRenderer:
         return None
 
     def _byte_size(self, result: dict[str, Any]) -> int | None:
+        """优先 bytes，其次 chars，最后以 content UTF-8 长度回退。"""
         metadata = result.get("metadata")
         if isinstance(metadata, dict):
             byte_count = metadata.get("bytes")
@@ -179,6 +191,7 @@ class ToolRenderer:
 
 
 def format_bytes(size: int) -> str:
+    """按十进制 B/KB/MB/GB 格式化非负字节数。"""
     units = ("B", "KB", "MB", "GB")
     value = float(size)
     for unit in units:
@@ -191,6 +204,7 @@ def format_bytes(size: int) -> str:
 
 
 def preview_tool_output(value: str, max_chars: int) -> str:
+    """短输出完整保留，长输出等分保留首尾并插入省略行。"""
     compact = value.strip()
     if len(compact) <= max_chars:
         return compact

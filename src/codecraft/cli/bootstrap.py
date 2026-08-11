@@ -42,6 +42,8 @@ from codecraft.tool import (
 
 @dataclass(frozen=True)
 class RuntimeBootstrapResult:
+    """CLI 配置加载与依赖装配的一次性 SessionConfig/AgentRuntime 对。"""
+
     config: SessionConfig
     runtime: AgentRuntime
 
@@ -57,6 +59,12 @@ def bootstrap_runtime(
     approval_policy: ApprovalPolicy | None,
     network: bool | None,
 ) -> RuntimeBootstrapResult:
+    """从 CLI 选择加载 SessionConfig 并构造匹配的完整 Runtime。
+
+    Example:
+        ``bootstrap_runtime(source=SessionSource.CLI_EXEC, provider=None, ...)``
+        会按配置优先级生成新 session_id，并装配 Provider、Tool、MCP 和 Skill。
+    """
     config = load_session_config(
         source=source,
         provider=provider,
@@ -81,6 +89,12 @@ def load_session_config(
     approval_policy: ApprovalPolicy | None,
     network: bool | None,
 ) -> SessionConfig:
+    """合并默认/用户/profile/项目/显式/CLI 配置为新 Session 快照。
+
+    当前 ``Path.cwd()`` 同时作为配置发现根和 Session cwd；CLI 的 None 表示
+    不覆盖较低层，显式 False 仍可关闭网络。Provider 的 API key env 使用
+    用户配置优先、已知 Provider 默认名兜底。
+    """
     settings = ConfigLoader(
         cwd=Path.cwd(),
         codecraft_home=codecraft_home,
@@ -137,6 +151,12 @@ def build_runtime(
     tool_registry: ToolRegistry | None = None,
     skill_registry: SkillRegistry | None = None,
 ) -> AgentRuntime:
+    """装配 Store、Provider、Tool、审批、索引 Observer 和同一 SkillRegistry。
+
+    注入自定义 ToolRegistry 时，如果 Skill 非空就确保存在绑定同一个 Registry
+    的 LoadSkillTool；名称已被其他 Tool 占用则拒绝，避免 Prompt 与工具激活源
+    不一致。
+    """
     index = RepositoryIndex(config.codecraft_home / "indexes")
     skills = (
         skill_registry if skill_registry is not None else build_skill_registry(config)
@@ -165,6 +185,7 @@ def build_runtime(
 
 
 def build_skill_registry(config: SessionConfig) -> SkillRegistry:
+    """从用户级 codecraft_home/skills 与项目 .codecraft/skills 发现 Skill。"""
     return SkillRegistry.discover(
         user_root=config.codecraft_home / "skills",
         project_root=config.cwd / ".codecraft" / "skills",
@@ -172,6 +193,7 @@ def build_skill_registry(config: SessionConfig) -> SkillRegistry:
 
 
 def build_provider_registry(config: SessionConfig) -> LLMProviderRegistry:
+    """注册 OpenAI/Qwen/DeepSeek，并只给当前 Provider 应用配置覆盖。"""
     return LLMProviderRegistry(
         [
             OpenAIProvider(
@@ -191,11 +213,13 @@ def build_provider_registry(config: SessionConfig) -> LLMProviderRegistry:
 
 
 def provider_api_key_env(config: SessionConfig, provider: str) -> str | None:
+    """非当前 Provider 忽略 Session 的显式 key env，再使用其默认环境名。"""
     configured = config.model_api_key_env if config.model_provider == provider else None
     return model_api_key_env(provider, configured)
 
 
 def model_api_key_env(provider: str, configured: str | None) -> str | None:
+    """返回显式名称，或已知 Provider 的标准 API Key 环境变量。"""
     if configured:
         return configured
     if provider == "qwen":
@@ -212,6 +236,11 @@ def build_tool_registry(
     *,
     skill_registry: SkillRegistry | None = None,
 ) -> ToolRegistry:
+    """构造内置 Tool、可选索引检索、Sandbox、Skill 与启用的 MCP Provider。
+
+    无 config 的测试/兼容路径使用 ScanRetriever 与显式 ProcessBackend；正常
+    Runtime 按配置创建 OS/container 后端，并注册 scan/lexical/symbol。
+    """
     if config is None:
         context_engine = ContextEngine()
     else:

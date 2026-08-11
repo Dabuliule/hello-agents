@@ -7,23 +7,31 @@ from codecraft.skill import SkillMetadata
 
 
 class ComposerChoiceKind(StrEnum):
+    """Composer 候选是本地命令还是待插入的 Skill mention。"""
+
     COMMAND = "command"
     SKILL = "skill"
 
 
 class ComposerMenuMode(StrEnum):
+    """菜单当前搜索 slash commands 或 Skills。"""
+
     COMMANDS = "commands"
     SKILLS = "skills"
 
 
 @dataclass(frozen=True)
 class SlashCommand:
+    """本地 slash command 的稳定名称和用户描述。"""
+
     name: str
     description: str
 
 
 @dataclass(frozen=True)
 class ComposerChoice:
+    """OptionList 使用的唯一 ID、行为类型、值和展示文本。"""
+
     id: str
     kind: ComposerChoiceKind
     value: str
@@ -33,6 +41,8 @@ class ComposerChoice:
 
 @dataclass(frozen=True)
 class ComposerMenuQuery:
+    """解析出的菜单模式、查询词和选中 Skill 要替换的字符区间。"""
+
     mode: ComposerMenuMode
     query: str
     replace_start: int
@@ -80,6 +90,7 @@ def parse_composer_menu(value: str) -> ComposerMenuQuery | None:
 
 
 def command_choices(query: str) -> tuple[ComposerChoice, ...]:
+    """按名称或描述的大小写不敏感子串过滤 slash commands。"""
     normalized = query.casefold()
     return tuple(
         ComposerChoice(
@@ -100,6 +111,7 @@ def skill_choices(
     skills: tuple[SkillMetadata, ...],
     query: str,
 ) -> tuple[ComposerChoice, ...]:
+    """按 Skill 名/描述过滤，并在候选描述显示 USER/PROJECT 来源。"""
     normalized = query.casefold()
     return tuple(
         ComposerChoice(

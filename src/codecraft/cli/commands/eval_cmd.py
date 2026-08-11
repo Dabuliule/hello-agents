@@ -22,12 +22,16 @@ from codecraft.schema.session import SessionSource
 
 
 class EvalFormat(StrEnum):
+    """CLI 可写出的评测报告格式组合。"""
+
     JSON = "json"
     HTML = "html"
     BOTH = "both"
 
 
 def register_eval_command(app: typer.Typer) -> None:
+    """向 Typer 应用注册 ``eval`` 子命令。"""
+
     @app.command("eval")
     def eval_command(
         provider: Annotated[
@@ -88,6 +92,7 @@ def register_eval_command(app: typer.Typer) -> None:
             ),
         ] = False,
     ) -> None:
+        """列出内置任务或同步驱动异步 Eval Suite，并映射退出码。"""
         tasks = get_eval_tasks()
         if list_only:
             _print_task_list(tasks)
@@ -126,6 +131,11 @@ async def run_eval(
     output_dir: Path | None,
     format: EvalFormat,
 ) -> int:
+    """选择 Task、强制安全配置、运行评测并写 JSON/HTML 报告。
+
+    返回 0 表示全部 attempts 通过，1 表示至少一个失败，2 表示选择/输出目录
+    用法错误；每次 attempt 的进度即时写到 Console。
+    """
     from codecraft.cli import app as cli_app
 
     console = make_console()
@@ -202,6 +212,7 @@ def _select_tasks(
     task_ids: list[str] | None,
     limit: int | None,
 ) -> tuple[EvalTask, ...]:
+    """按用户顺序选择唯一已知 Task，再应用可选前 N 项限制。"""
     by_id = {task.task_id: task for task in tasks}
     if task_ids:
         duplicates = sorted(
@@ -219,12 +230,14 @@ def _select_tasks(
 
 
 def _default_output_dir(home: Path) -> Path:
+    """用 UTC 时间与随机短后缀生成不碰撞的默认 eval run 目录。"""
     timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     suffix = new_id("")[:8]
     return home / "evals" / f"{timestamp}-{suffix}"
 
 
 def _print_task_list(tasks: tuple[EvalTask, ...]) -> None:
+    """打印稳定 task id、category 和 title，不启动 Provider。"""
     console = make_console()
     for task in tasks:
         console.print(
