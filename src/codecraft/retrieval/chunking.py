@@ -9,6 +9,8 @@ from tree_sitter import Language, Node, Parser
 
 @dataclass(frozen=True, slots=True)
 class CodeChunk:
+    """一段保留原文件行号、语法类型和可选所属符号的索引文本。"""
+
     start_line: int
     end_line: int
     kind: str
@@ -18,6 +20,8 @@ class CodeChunk:
 
 @dataclass(frozen=True, slots=True)
 class CodeSymbol:
+    """从语法树抽取的可独立按名称检索的代码符号。"""
+
     name: str
     kind: str
     line: int
@@ -26,6 +30,8 @@ class CodeSymbol:
 
 @dataclass(frozen=True, slots=True)
 class ChunkedFile:
+    """单个文件的语言识别、文本块与符号抽取结果。"""
+
     language: str
     chunks: tuple[CodeChunk, ...]
     symbols: tuple[CodeSymbol, ...]
@@ -69,7 +75,18 @@ _SYMBOL_NODES = {
 
 
 class TreeSitterChunker:
+    """优先沿顶层符号边界、必要时按重叠行窗口切分源文件。"""
+
     def __init__(self, *, max_lines: int = 120, overlap_lines: int = 12) -> None:
+        """配置每块最大行数及相邻长块的重叠行数。
+
+        Raises:
+            ValueError: 最大行数非正，或重叠不在 ``[0, max_lines)``。
+
+        Example:
+            ``TreeSitterChunker(max_lines=80, overlap_lines=8)`` 会让超长符号
+            每 72 行开始一个新块，从而保留 8 行邻接上下文。
+        """
         if max_lines < 1:
             raise ValueError("max_lines must be positive")
         if overlap_lines < 0 or overlap_lines >= max_lines:
@@ -79,6 +96,19 @@ class TreeSitterChunker:
         self._languages = _load_languages()
 
     def chunk(self, path: Path, content: str) -> ChunkedFile:
+        """解析文件并返回可检索块与所有嵌套符号。
+
+        Args:
+            path: 仅用后缀选择语言的源文件路径。
+            content: UTF-8 解码后的完整文本。
+
+        Returns:
+            支持语言按最外层符号分块；未知语言退化为普通行窗口的结果。
+
+        Example:
+            ``chunk(Path("service.py"), "def run():\\n    pass")`` 会产生
+            kind 为 ``function_definition``、symbol 为 ``run`` 的块。
+        """
         language_name = _EXTENSIONS.get(path.suffix.casefold(), "text")
         language = self._languages.get(language_name)
         if language is None:
@@ -133,6 +163,7 @@ class TreeSitterChunker:
         )
 
     def _line_chunks(self, content: str, *, kind: str) -> list[CodeChunk]:
+        """把完整文本委托给通用行区间切分器。"""
         lines = content.splitlines()
         return self._range_chunks(lines, 0, len(lines), kind=kind)
 
@@ -145,6 +176,7 @@ class TreeSitterChunker:
         kind: str,
         symbol: str | None = None,
     ) -> list[CodeChunk]:
+        """将半开行区间切成带重叠、非空且使用 1-based 行号的块。"""
         chunks: list[CodeChunk] = []
         step = self.max_lines - self.overlap_lines
         position = start
@@ -168,6 +200,7 @@ class TreeSitterChunker:
 
 
 def _load_languages() -> dict[str, Language]:
+    """延迟导入并构造项目支持的 Tree-sitter Language 对象。"""
     import tree_sitter_go
     import tree_sitter_javascript
     import tree_sitter_python
@@ -183,6 +216,7 @@ def _load_languages() -> dict[str, Language]:
 
 
 def _walk_symbol_nodes(node: Node, language: str) -> Any:
+    """深度优先产生该语言定义为符号的全部语法节点。"""
     if node.type in _SYMBOL_NODES[language]:
         yield node
     for child in node.named_children:
@@ -190,6 +224,7 @@ def _walk_symbol_nodes(node: Node, language: str) -> Any:
 
 
 def _outermost_nodes(nodes: list[Node]) -> list[Node]:
+    """过滤嵌套符号，仅保留用于划分互不重叠区间的最外层节点。"""
     ordered = sorted(nodes, key=lambda node: (node.start_byte, -node.end_byte))
     selected: list[Node] = []
     for node in ordered:
@@ -203,6 +238,7 @@ def _outermost_nodes(nodes: list[Node]) -> list[Node]:
 
 
 def _node_name(node: Node, source: bytes) -> str | None:
+    """从通用 name 字段或 Go type_spec 中读取节点名称。"""
     name = node.child_by_field_name("name")
     if name is None and node.type == "type_declaration":
         name = next(
@@ -217,6 +253,7 @@ def _node_name(node: Node, source: bytes) -> str | None:
 
 
 def _signature(lines: list[str], row: int) -> str:
+    """返回符号起始行最多 240 字符的单行签名。"""
     if row >= len(lines):
         return ""
     return lines[row].strip()[:240]

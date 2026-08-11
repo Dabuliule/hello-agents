@@ -54,6 +54,7 @@ __all__ = [
 
 
 def __getattr__(name: str) -> Any:
+    """仅在访问 benchmark API 时延迟导入其较重依赖。"""
     if name == "run_retrieval_benchmark":
         from codecraft.retrieval.benchmark import run_retrieval_benchmark
 

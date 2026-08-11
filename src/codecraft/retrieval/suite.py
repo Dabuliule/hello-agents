@@ -9,6 +9,8 @@ RETRIEVAL_SUITE_NAME = "codecraft-repository-retrieval-v1"
 
 @dataclass(frozen=True)
 class RetrievalCase:
+    """固定语料上的查询、类别、相关路径与检索作用域期望。"""
+
     case_id: str
     category: str
     query: str
@@ -142,12 +144,17 @@ _CASES = (
 
 
 def get_retrieval_cases() -> tuple[RetrievalCase, ...]:
-    """Return the stable retrieval cases used to compare implementations."""
+    """返回用于横向比较检索实现的不可变、稳定用例集合。"""
     return _CASES
 
 
 def seed_retrieval_workspace(workspace: Path) -> None:
-    """Create the fixed multi-language corpus used by the retrieval benchmark."""
+    """创建评测使用的固定 Python/TS/Go/配置/文档语料和忽略项。
+
+    Example:
+        ``seed_retrieval_workspace(tmp_path / "workspace")`` 会创建
+        ``src/auth/service.py`` 等文件，以及不应被检索的 ``__pycache__`` 文件。
+    """
     workspace.mkdir(parents=True, exist_ok=True)
     for relative_path, content in _CORPUS.items():
         target = workspace / relative_path

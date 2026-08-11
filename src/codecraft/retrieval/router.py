@@ -30,6 +30,8 @@ _CJK = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]")
 
 @dataclass(frozen=True, slots=True)
 class RetrievalPlan:
+    """按尝试顺序排列的 Retriever 名称及可解释路由原因。"""
+
     retrievers: tuple[str, ...]
     reason: str
 
@@ -38,6 +40,23 @@ class QueryRouter:
     """Build a deterministic, sequential retrieval plan from query shape."""
 
     def route(self, request: RetrievalRequest) -> RetrievalPlan:
+        """根据 mode、路径特征、标识符和自然语言形态生成确定性计划。
+
+        Args:
+            request: 尚未执行的标准检索请求。
+
+        Returns:
+            例如大小写不敏感标识符优先 ``symbol → lexical → scan``；
+            路径提示优先 ``scan → lexical``。
+
+        Example:
+            >>> from pathlib import Path
+            >>> request = RetrievalRequest(
+            ...     query="PaymentGateway", root=Path("."), workspace_root=Path(".")
+            ... )
+            >>> QueryRouter().route(request).reason
+            'identifier'
+        """
         query = request.query.strip()
         retrievers: tuple[str, ...]
         if request.mode == "path":
@@ -62,6 +81,7 @@ class QueryRouter:
 
 
 def _looks_like_path(query: str) -> bool:
+    """识别含目录分隔符或常见源码/配置后缀的路径查询。"""
     if "/" in query or "\\" in query:
         return True
     folded = query.casefold()

@@ -24,6 +24,8 @@ _STOP_WORDS = frozenset({"a", "an", "are", "is", "of", "the", "to", "where"})
 
 @dataclass(frozen=True, slots=True)
 class IndexSyncStats:
+    """全量或增量同步后的文件、块、符号、跳过项与字节统计。"""
+
     candidate_file_count: int
     indexed_file_count: int
     updated_file_count: int
@@ -39,6 +41,8 @@ class IndexSyncStats:
 
 @dataclass(frozen=True, slots=True)
 class IndexedMatch:
+    """通过索引验证为新鲜的路径、行号和短摘要命中。"""
+
     path: str
     line: int
     snippet: str
@@ -46,6 +50,8 @@ class IndexedMatch:
 
 @dataclass(frozen=True, slots=True)
 class IndexQueryResult:
+    """索引查询命中及索引规模、陈旧文件和截断事实。"""
+
     matches: tuple[IndexedMatch, ...]
     indexed_file_count: int
     stale_file_count: int
@@ -54,6 +60,8 @@ class IndexQueryResult:
 
 @dataclass(frozen=True, slots=True)
 class _FileRefreshResult:
+    """单文件增量刷新对同步统计的贡献。"""
+
     updated_file_count: int = 0
     unchanged_file_count: int = 0
     deleted_file_count: int = 0
@@ -63,6 +71,8 @@ class _FileRefreshResult:
 
 
 class _IndexRow(TypedDict):
+    """查询层交给新鲜度验证层的 SQLite 行形态。"""
+
     path: str
     line: int
     snippet: str
@@ -71,17 +81,27 @@ class _IndexRow(TypedDict):
 
 
 class RepositoryIndex:
+    """按 workspace 隔离的 SQLite FTS5、代码块与符号持久索引。"""
+
     def __init__(self, index_root: Path, *, chunker: TreeSitterChunker | None = None):
+        """设置索引存储根，并可注入 Chunker 以便测试或替换切分策略。"""
         self.index_root = index_root.expanduser().resolve()
         self._chunker = chunker
 
     @property
     def chunker(self) -> TreeSitterChunker:
+        """首次索引源码时延迟构造 TreeSitterChunker。"""
         if self._chunker is None:
             self._chunker = TreeSitterChunker()
         return self._chunker
 
     def database_path(self, workspace_root: Path) -> Path:
+        """用 workspace 绝对路径哈希生成稳定且互相隔离的数据库路径。
+
+        Example:
+            ``RepositoryIndex(cache).database_path(repo)`` 形如
+            ``cache/<24位sha256>/index.sqlite3``。
+        """
         root = workspace_root.expanduser().resolve()
         workspace_id = hashlib.sha256(str(root).encode()).hexdigest()[:24]
         return self.index_root / workspace_id / "index.sqlite3"
@@ -92,6 +112,22 @@ class RepositoryIndex:
         *,
         max_file_bytes: int = 1_000_000,
     ) -> IndexSyncStats:
+        """全量对账 workspace 文件与索引，复用未变项并删除消失项。
+
+        快路径先比较 ``mtime_ns + size``；时间变化后再比较 SHA-256，内容
+        未变时只更新元数据。文本变化才重新分块并在同一事务替换文件、FTS
+        和符号记录。二进制或超大文件会从旧索引删除，避免返回过期内容。
+
+        Args:
+            workspace_root: 要建立或更新索引的仓库根。
+            max_file_bytes: 单文件可索引字节上限。
+
+        Returns:
+            本次候选、更新、复用、删除、跳过和当前数据库规模。
+
+        Raises:
+            ValueError: workspace_root 不是目录。
+        """
         root = workspace_root.expanduser().resolve()
         if not root.is_dir():
             raise ValueError(f"workspace root must be a directory: {root}")
@@ -201,6 +237,16 @@ class RepositoryIndex:
         *,
         max_file_bytes: int = 1_000_000,
     ) -> IndexSyncStats:
+        """只对账工具已改动的安全路径，要求该 workspace 已完成首次 sync。
+
+        Args:
+            workspace_root: 初次建索引时的同一 workspace 根。
+            paths: 绝对路径或相对 workspace 的潜在变更路径。
+            max_file_bytes: 单文件可索引字节上限。
+
+        Raises:
+            RetrievalUnavailableError: 数据库尚未创建或不可兼容。
+        """
         root = workspace_root.expanduser().resolve()
         database = self.database_path(root)
         if not database.is_file():
@@ -249,6 +295,7 @@ class RepositoryIndex:
         )
 
     def _select_refresh_paths(self, root: Path, paths: list[Path]) -> list[Path]:
+        """解析、去重并过滤 workspace 外或索引存储目录内的刷新目标。"""
         selected: list[Path] = []
         for path in paths:
             candidate = path.expanduser()
@@ -271,6 +318,7 @@ class RepositoryIndex:
         *,
         max_file_bytes: int,
     ) -> _FileRefreshResult:
+        """对账一个路径的存在性、大小、二进制、时间、摘要和索引正文。"""
         relative = str(file_path.relative_to(root))
         previous = connection.execute(
             "SELECT mtime_ns, size, digest FROM files WHERE path = ?",
@@ -332,6 +380,12 @@ class RepositoryIndex:
         case_sensitive: bool = False,
         max_results: int = 100,
     ) -> IndexQueryResult:
+        """执行 FTS5 内容检索或文件路径子串检索并过滤陈旧命中。
+
+        Raises:
+            RetrievalUnavailableError: 索引不存在/不兼容、大小写敏感内容查询
+            无法由 FTS5 提供，或查询没有可索引词。
+        """
         root, connection = self._open_existing(workspace_root)
         with closing(connection):
             indexed_file_count = connection.execute(
@@ -375,6 +429,7 @@ class RepositoryIndex:
         case_sensitive: bool = False,
         max_results: int = 100,
     ) -> IndexQueryResult:
+        """按符号精确名称优先、前缀次之检索，并过滤陈旧命中。"""
         root, connection = self._open_existing(workspace_root)
         comparison = "name = ?" if case_sensitive else "name = ? COLLATE NOCASE"
         prefix = "name LIKE ?" if case_sensitive else "name LIKE ? COLLATE NOCASE"
@@ -403,11 +458,17 @@ class RepositoryIndex:
 
     @staticmethod
     def _connect(database: Path) -> sqlite3.Connection:
+        """打开带五秒锁等待和名称列访问的 SQLite 连接。"""
         connection = sqlite3.connect(database, timeout=5)
         connection.row_factory = sqlite3.Row
         return connection
 
     def _open_existing(self, workspace_root: Path) -> tuple[Path, sqlite3.Connection]:
+        """打开并验证 schema version 与 workspace 所有权元数据。
+
+        任一验证失败都会先关闭连接，再转成 RetrievalUnavailableError，供
+        ContextEngine 降级到无索引扫描。
+        """
         root = workspace_root.expanduser().resolve()
         database = self.database_path(root)
         if not database.is_file():
@@ -437,6 +498,7 @@ class RepositoryIndex:
 
     @staticmethod
     def _initialize(connection: sqlite3.Connection, root: Path) -> None:
+        """幂等创建 WAL、外键、metadata/files/chunks/FTS/symbols schema。"""
         connection.executescript(
             """
             PRAGMA journal_mode = WAL;
@@ -494,6 +556,7 @@ class RepositoryIndex:
         chunks: tuple[CodeChunk, ...],
         symbols: tuple[CodeSymbol, ...],
     ) -> None:
+        """在事务内删除旧版本并原子写入文件、块、FTS 行与符号。"""
         self._delete_file(connection, path)
         connection.execute(
             "INSERT INTO files(path, mtime_ns, size, digest, language) VALUES(?, ?, ?, ?, ?)",
@@ -526,6 +589,7 @@ class RepositoryIndex:
 
     @staticmethod
     def _delete_file(connection: sqlite3.Connection, path: str) -> None:
+        """按依赖顺序删除一个文件的 FTS、符号、块和主记录。"""
         connection.execute(
             "DELETE FROM chunk_fts WHERE rowid IN (SELECT id FROM chunks WHERE path = ?)",
             (path,),
@@ -542,6 +606,7 @@ class RepositoryIndex:
         scope: str,
         limit: int,
     ) -> list[_IndexRow]:
+        """执行带 scope 与 BM25 排序的 FTS 查询，并定位首个匹配行。"""
         scope_sql, scope_args = _scope_clause(scope, column="chunks.path")
         sql = f"""
             SELECT chunks.path, chunks.start_line AS line, chunks.content,
@@ -577,6 +642,7 @@ class RepositoryIndex:
         case_sensitive: bool,
         limit: int,
     ) -> list[_IndexRow]:
+        """执行可选大小写敏感的文件路径子串查询。"""
         scope_sql, scope_args = _scope_clause(scope, column="files.path")
         predicate = (
             "instr(files.path, ?) > 0"
@@ -609,6 +675,12 @@ class RepositoryIndex:
         indexed_file_count: int,
         max_results: int,
     ) -> IndexQueryResult:
+        """按当前 stat 丢弃陈旧行、按路径行号去重并限制输出数量。
+
+        索引查询会预取最多三倍结果，使少量陈旧/重复行被过滤后仍有机会填满
+        max_results；但只要命中过陈旧文件，就计入 stale_file_count 供上层
+        决定整次降级，避免混合新旧事实。
+        """
         matches: list[IndexedMatch] = []
         stale_paths: set[str] = set()
         seen: set[tuple[str, int]] = set()
@@ -649,6 +721,12 @@ class RepositoryIndex:
 
 
 def _fts_expression(query: str) -> str:
+    """提取非停用词并构造安全的 FTS5 quoted OR 表达式。
+
+    Example:
+        >>> _fts_expression("where is payment_timeout_ms")
+        '"payment_timeout_ms"'
+    """
     tokens = [
         token
         for token in _QUERY_TOKEN.findall(query)
@@ -658,6 +736,7 @@ def _fts_expression(query: str) -> str:
 
 
 def _scope_clause(scope: str, *, column: str) -> tuple[str, list[str]]:
+    """生成精确目录或其子路径的参数化 SQL 条件与绑定参数。"""
     normalized = scope.strip("./")
     if not normalized:
         return "", []
@@ -665,6 +744,7 @@ def _scope_clause(scope: str, *, column: str) -> tuple[str, list[str]]:
 
 
 def _matching_line(content: str, expression: str) -> tuple[int, str]:
+    """返回块中首个命中词所在的 0-based 偏移和去空白文本。"""
     terms = [term.strip('"').casefold() for term in expression.split(" OR ")]
     lines = content.splitlines()
     for offset, line in enumerate(lines):

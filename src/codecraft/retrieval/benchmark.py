@@ -21,10 +21,14 @@ from codecraft.retrieval.suite import (
 
 
 class SearchTool(Protocol):
+    """Benchmark 所需的最小 workspace_search 工具结构协议。"""
+
     name: str
     args_schema: Any
 
-    async def arun(self, args: Any, context: Any) -> Any: ...
+    async def arun(self, args: Any, context: Any) -> Any:
+        """以已校验参数和只读 ToolContext 执行一次公开搜索接口。"""
+        ...
 
 
 RETRIEVAL_REPORT_SCHEMA_VERSION = 1
@@ -39,7 +43,23 @@ async def run_retrieval_benchmark(
     tool: SearchTool | None = None,
     on_case_complete: Callable[[int, int, dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
-    """Run fixed repository queries through the public workspace search tool."""
+    """用公开 workspace_search 工具重复运行固定语料并汇总质量/成本。
+
+    Args:
+        cases: 唯一 case_id 的确定性评测用例。
+        output_dir: 必须没有既有 run artifacts 的新运行目录。
+        repeat: 每个用例重复次数，用于观测延迟分布。
+        strategy: 传给工具的 ``scan``、``auto`` 等策略。
+        tool: 可选替身；省略时构造真实 Scan 或 RepositoryIndex 工具链。
+        on_case_complete: 每次评估完成后的进度回调。
+
+    Returns:
+        含 schema/run/metrics/cases/results 的可序列化报告。
+
+    Raises:
+        ValueError: repeat 非正或 case_id 重复。
+        FileExistsError: 输出目录已有本评测保留产物。
+    """
     if repeat < 1:
         raise ValueError("repeat must be at least 1")
     case_ids = [case.case_id for case in cases]
@@ -123,6 +143,7 @@ async def _run_case(
     *,
     strategy: str,
 ) -> dict[str, Any]:
+    """执行单次 case，测量工具延迟并计算排名和扫描成本指标。"""
     call = ToolCall(
         call_id=new_id("call_retrieval_"),
         name=tool.name,
@@ -176,6 +197,7 @@ async def _run_case(
 
 
 def _tool_context(workspace: Path, call: ToolCall) -> Any:
+    """构造禁止审批、只读、无网络且仅允许一次工具调用的评测上下文。"""
     from codecraft.tool.base import ToolContext
 
     now = datetime.now(UTC)
@@ -197,6 +219,7 @@ def _tool_context(workspace: Path, call: ToolCall) -> Any:
 
 
 def _unique_paths(matches: object) -> list[str]:
+    """从不可信工具数据中按首次出现顺序提取唯一合法路径。"""
     if not isinstance(matches, list):
         return []
     paths: list[str] = []
@@ -210,12 +233,14 @@ def _unique_paths(matches: object) -> list[str]:
 
 
 def _recall_at_k(retrieved: list[str], relevant: set[str], k: int) -> float:
+    """计算前 k 条结果覆盖的相关路径比例。"""
     if not relevant:
         return 0.0
     return len(relevant.intersection(retrieved[:k])) / len(relevant)
 
 
 def _reciprocal_rank(retrieved: list[str], relevant: set[str]) -> float:
+    """返回首个相关结果排名的倒数，完全未命中返回 0。"""
     for rank, path in enumerate(retrieved, start=1):
         if path in relevant:
             return 1 / rank
@@ -223,6 +248,7 @@ def _reciprocal_rank(retrieved: list[str], relevant: set[str]) -> float:
 
 
 def _precision_at_k(retrieved: list[str], relevant: set[str], k: int) -> float:
+    """计算实际可见的前 k 条中相关路径比例。"""
     visible = retrieved[:k]
     if not visible:
         return 0.0
@@ -230,6 +256,7 @@ def _precision_at_k(retrieved: list[str], relevant: set[str], k: int) -> float:
 
 
 def _aggregate_metrics(results: list[dict[str, Any]]) -> dict[str, Any]:
+    """汇总所有重复结果的质量、最近秩、延迟、资源和路由分布。"""
     count = len(results)
     latencies = [float(result["latency_ms"]) for result in results]
     return {
@@ -270,6 +297,7 @@ def _aggregate_metrics(results: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def _case_summary(case: RetrievalCase, results: list[dict[str, Any]]) -> dict[str, Any]:
+    """只聚合指定 case 的重复结果，生成 HTML 表格数据。"""
     selected = [result for result in results if result["case_id"] == case.case_id]
     return {
         "case_id": case.case_id,
@@ -290,12 +318,14 @@ def _case_summary(case: RetrievalCase, results: list[dict[str, Any]]) -> dict[st
 
 
 def _mean(results: list[dict[str, Any]], field: str) -> float:
+    """求数字字段均值并保留四位小数，空输入返回 0。"""
     if not results:
         return 0.0
     return round(sum(float(result[field]) for result in results) / len(results), 4)
 
 
 def _percentile(values: list[float], percent: int) -> float:
+    """用 nearest-rank 方法计算百分位并保留三位小数。"""
     if not values:
         return 0.0
     ordered = sorted(values)
@@ -304,6 +334,7 @@ def _percentile(values: list[float], percent: int) -> float:
 
 
 def _ensure_new_run_directory(output_dir: Path) -> None:
+    """拒绝覆盖 workspace 或既有 JSON/HTML 报告，保护评测可追溯性。"""
     reserved = (
         output_dir / "workspace",
         output_dir / "retrieval-report.json",

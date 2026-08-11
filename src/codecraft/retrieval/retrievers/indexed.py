@@ -16,12 +16,16 @@ from codecraft.retrieval.retrievers.base import Retriever
 
 
 class LexicalRetriever(Retriever):
+    """把 RepositoryIndex 的 FTS/path 查询适配为标准 RetrievalResponse。"""
+
     name = "lexical"
 
     def __init__(self, index: RepositoryIndex) -> None:
+        """绑定一个可按 workspace 定位数据库的仓库索引。"""
         self.index = index
 
     async def retrieve(self, request: RetrievalRequest) -> RetrievalResponse:
+        """在线程池查询 SQLite，并在任何命中已陈旧时请求上层降级。"""
         workspace_root, scope = _workspace_and_scope(request)
         result = await asyncio.to_thread(
             self.index.search_lexical,
@@ -54,12 +58,16 @@ class LexicalRetriever(Retriever):
 
 
 class SymbolRetriever(Retriever):
+    """按 Tree-sitter 抽取的符号精确名或前缀检索代码定义。"""
+
     name = "symbol"
 
     def __init__(self, index: RepositoryIndex) -> None:
+        """绑定 RepositoryIndex。"""
         self.index = index
 
     async def retrieve(self, request: RetrievalRequest) -> RetrievalResponse:
+        """检索符号并拒绝 path 模式或包含陈旧文件的结果。"""
         if request.mode == "path":
             raise RetrievalUnavailableError("symbol retrieval does not search paths")
         workspace_root, scope = _workspace_and_scope(request)
@@ -92,6 +100,11 @@ class SymbolRetriever(Retriever):
 
 
 def _workspace_and_scope(request: RetrievalRequest) -> tuple[Path, str]:
+    """把 request.root 安全转换成索引 workspace 下的相对 scope。
+
+    Raises:
+        RetrievalUnavailableError: root 不位于索引 workspace 内。
+    """
     resolved = request.root.resolve(strict=False)
     workspace_root = request.workspace_root.resolve(strict=False)
     try:

@@ -6,10 +6,16 @@ from typing import Any
 
 
 def render_retrieval_json(report: dict[str, Any]) -> str:
+    """将报告渲染为保留 Unicode、带缩进且以换行结束的 JSON。"""
     return json.dumps(report, ensure_ascii=False, indent=2) + "\n"
 
 
 def render_retrieval_html(report: dict[str, Any]) -> str:
+    """把报告摘要渲染成无外部资源的可分享 HTML 页面。
+
+    所有来自 report 的字符串进入 HTML 前均经过 escape，避免查询、用例名称
+    或指标内容成为可执行标记。
+    """
     run = report["run"]
     metrics = report["metrics"]
     rows = "\n".join(_case_row(case) for case in report["cases"])
@@ -71,6 +77,7 @@ def render_retrieval_html(report: dict[str, Any]) -> str:
 
 
 def _metric(label: str, value: Any) -> str:
+    """渲染一个转义后的指标卡。"""
     return (
         f'<div class="metric"><strong>{escape(str(value))}</strong>'
         f'<span class="muted">{escape(label)}</span></div>'
@@ -78,6 +85,7 @@ def _metric(label: str, value: Any) -> str:
 
 
 def _case_row(case: dict[str, Any]) -> str:
+    """渲染单个用例的转义 HTML 表格行。"""
     return (
         "<tr>"
         f"<td><code>{escape(case['case_id'])}</code></td>"
@@ -94,8 +102,10 @@ def _case_row(case: dict[str, Any]) -> str:
 
 
 def _score(value: float) -> str:
+    """把检索质量分数固定格式化为三位小数。"""
     return f"{value:.3f}"
 
 
 def _milliseconds(value: float) -> str:
+    """为延迟数值添加毫秒单位。"""
     return f"{value} ms"

@@ -12,9 +12,12 @@ from codecraft.schema.tool import ToolCall, ToolResult
 
 
 class WorkspaceIndexObserver:
+    """在成功写文件或打补丁后，增量刷新已存在的仓库索引。"""
+
     name = "workspace_index"
 
     def __init__(self, index: RepositoryIndex) -> None:
+        """绑定负责所有 workspace 数据库的 RepositoryIndex。"""
         self.index = index
 
     async def after_result(
@@ -23,6 +26,12 @@ class WorkspaceIndexObserver:
         result: ToolResult,
         context: TurnContext,
     ) -> dict[str, Any] | None:
+        """从工具结果提取实际变更文件并在线程中刷新索引。
+
+        Returns:
+            非写操作/失败/无变更返回 ``None``；成功刷新返回计数。索引尚未
+            构建时返回 ``status=skipped``，不会让原工具调用失败。
+        """
         paths = _changed_paths(call, result)
         if not paths:
             return None
@@ -57,6 +66,7 @@ class WorkspaceIndexObserver:
 
 
 def _changed_paths(call: ToolCall, result: ToolResult) -> list[Path]:
+    """只信任成功 write_file/apply_patch 的结构化结果提取变更路径。"""
     if not result.success or result.data is None:
         return []
     if call.name == "write_file":
@@ -73,6 +83,7 @@ def _changed_paths(call: ToolCall, result: ToolResult) -> list[Path]:
 
 
 def _paths_in_workspace(paths: list[Path], workspace_root: Path) -> list[Path]:
+    """解析并保留 workspace 内路径，阻止观察器刷新外部文件。"""
     selected: list[Path] = []
     for path in paths:
         resolved = path.expanduser().resolve(strict=False)

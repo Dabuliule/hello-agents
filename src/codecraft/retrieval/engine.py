@@ -19,6 +19,11 @@ class ContextEngine:
         default_retriever: str | None = None,
         router: QueryRouter | None = None,
     ) -> None:
+        """注册唯一名称 Retriever，并选择默认实现和查询路由器。
+
+        Raises:
+            ValueError: Retriever 为空、名称重复或默认名称不存在。
+        """
         configured = tuple(retrievers) if retrievers is not None else (ScanRetriever(),)
         if not configured:
             raise ValueError("context engine requires at least one retriever")
@@ -33,6 +38,7 @@ class ContextEngine:
 
     @property
     def retriever_names(self) -> tuple[str, ...]:
+        """按配置顺序返回可选 Retriever 名称。"""
         return tuple(self._retrievers)
 
     async def retrieve(
@@ -42,6 +48,21 @@ class ContextEngine:
         retriever_name: str | None = None,
         fallback_retriever: str | None = None,
     ) -> RetrievalResponse:
+        """通过指定、默认或 auto 策略检索，并记录完整尝试链。
+
+        Args:
+            request: 查询及 workspace 约束。
+            retriever_name: 实现名；``auto`` 表示使用 QueryRouter。
+            fallback_retriever: 首选未知或不可用时的显式备用实现。
+
+        Returns:
+            补齐 retriever、fallback_from、route_reason 和 attempted_retrievers
+            的标准响应。
+
+        Raises:
+            ValueError: 指定的实现名未知且没有可用 fallback。
+            RetrievalUnavailableError: 实现存在但当前无法服务，且没有成功降级。
+        """
         selected = retriever_name or self._default_retriever
         if selected == "auto":
             return await self._retrieve_auto(request)
@@ -64,6 +85,7 @@ class ContextEngine:
         )
 
     async def _retrieve_auto(self, request: RetrievalRequest) -> RetrievalResponse:
+        """顺序执行路由计划，遇到首个非空结果即停止。"""
         plan = self._router.route(request)
         attempted: list[str] = []
         last_response: RetrievalResponse | None = None
@@ -102,6 +124,7 @@ class ContextEngine:
         selected: str,
         fallback: str,
     ) -> RetrievalResponse:
+        """用显式 fallback 执行一次，并在响应保留原首选名称。"""
         try:
             retriever = self._retrievers[fallback]
         except KeyError as exc:

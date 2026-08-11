@@ -28,6 +28,8 @@ _DEFAULT_MAX_RESULTS = 1_000
 
 @dataclass(slots=True)
 class _ScanState:
+    """一次有界扫描的可变命中、成本、跳过原因和截断状态。"""
+
     matches: list[RetrievalMatch]
     skipped: dict[str, int]
     candidate_file_count: int = 0
@@ -37,6 +39,7 @@ class _ScanState:
     limit_reached: bool = False
 
     def has_extra_result(self, max_results: int) -> bool:
+        """是否已多取一个结果，足以证明输出发生截断。"""
         return len(self.matches) > max_results
 
 
@@ -52,6 +55,11 @@ class ScanRetriever(Retriever):
         max_scanned_bytes: int = _DEFAULT_MAX_SCANNED_BYTES,
         max_results: int = _DEFAULT_MAX_RESULTS,
     ) -> None:
+        """配置文件数、总读取字节数和服务级最大结果数硬上限。
+
+        Raises:
+            ValueError: 任意上限小于 1。
+        """
         if max_files < 1:
             raise ValueError("max_files must be at least 1")
         if max_scanned_bytes < 1:
@@ -63,9 +71,15 @@ class ScanRetriever(Retriever):
         self.max_results = max_results
 
     async def retrieve(self, request: RetrievalRequest) -> RetrievalResponse:
+        """把阻塞文件遍历放入工作线程，避免阻塞 Agent 事件循环。"""
         return await asyncio.to_thread(self._retrieve_sync, request)
 
     def _retrieve_sync(self, request: RetrievalRequest) -> RetrievalResponse:
+        """在 workspace、安全和三类资源预算内执行确定性扫描。
+
+        扫描会多保留一个命中用于准确设置 ``truncated``，响应前再裁到调用方
+        上限；统计中明确区分 binary、large、escaped、unreadable 等原因。
+        """
         if not is_inside_workspace(request.root, request.workspace_root):
             raise RetrievalUnavailableError("request root is outside workspace")
         query = request.query if request.case_sensitive else request.query.casefold()
@@ -125,6 +139,7 @@ class ScanRetriever(Retriever):
         root: Path,
         state: _ScanState,
     ) -> Generator[Path, None, None]:
+        """接受单文件或目录作用域，无法读取时累加统计而非中止请求。"""
         try:
             if root.is_file():
                 yield root
@@ -142,6 +157,7 @@ class ScanRetriever(Retriever):
         directory: Path,
         state: _ScanState,
     ) -> Generator[Path, None, None]:
+        """按名称排序递归目录，不跟随目录 symlink 并跳过已知重目录。"""
         try:
             with os.scandir(directory) as scanner:
                 entries = sorted(scanner, key=lambda item: item.name)
@@ -172,6 +188,7 @@ class ScanRetriever(Retriever):
         *,
         result_limit: int,
     ) -> bool:
+        """先匹配展示路径，再按 mode 和预算决定是否读取、匹配正文。"""
         if not is_inside_workspace(file_path, request.workspace_root):
             state.skipped["escaped"] += 1
             return True
@@ -208,6 +225,7 @@ class ScanRetriever(Retriever):
         request: RetrievalRequest,
         state: _ScanState,
     ) -> bytes | None:
+        """防 TOCTOU 式尺寸变化地有界读取，并维护精确字节预算。"""
         try:
             stat = file_path.stat()
         except OSError:
@@ -250,6 +268,7 @@ class ScanRetriever(Retriever):
         query: str,
         state: _ScanState,
     ) -> None:
+        """在 path/both 模式追加一次大小写策略一致的路径命中。"""
         if request.mode not in {"both", "path"}:
             return
         candidate_path = (
@@ -268,6 +287,7 @@ class ScanRetriever(Retriever):
         *,
         result_limit: int,
     ) -> None:
+        """逐行追加子串命中，获得额外一项后立即停止证明截断。"""
         for line_number, line in enumerate(text.splitlines(), start=1):
             candidate_line = line if request.case_sensitive else line.casefold()
             if query not in candidate_line:
@@ -285,6 +305,12 @@ class ScanRetriever(Retriever):
 
     @staticmethod
     def _trim_line(line: str, max_chars: int = 240) -> str:
+        """去除首尾空白并把过长单行截成最多 max_chars 字符。
+
+        Example:
+            >>> ScanRetriever._trim_line("  answer  ")
+            'answer'
+        """
         normalized = line.strip()
         if len(normalized) <= max_chars:
             return normalized
