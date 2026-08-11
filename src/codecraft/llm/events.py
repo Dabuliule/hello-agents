@@ -8,6 +8,8 @@ from codecraft.schema.tool import ToolCall
 
 
 class ModelTextPayload(BaseModel):
+    """不可变的非空模型文本载荷。"""
+
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     text: str = Field(min_length=1)
@@ -27,6 +29,20 @@ class ModelTokenCountPayload(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def fill_total_tokens(cls, value: Any) -> Any:
+        """在调用方省略 total 时用 input 与 output 之和补齐。
+
+        Args:
+            value: Pydantic 校验前收到的原始载荷。
+
+        Returns:
+            对字典输入返回补齐后的浅拷贝；其他输入保持不变。
+
+        Example:
+            >>> ModelTokenCountPayload(
+            ...     input_tokens=7, output_tokens=3
+            ... ).total_tokens
+            10
+        """
         if isinstance(value, dict) and "total_tokens" not in value:
             normalized = dict(value)
             input_tokens = normalized.get("input_tokens", 0)
@@ -43,39 +59,55 @@ class ModelTokenCountPayload(BaseModel):
 
     @model_validator(mode="after")
     def validate_total_tokens(self) -> ModelTokenCountPayload:
+        """确认 total 等于 input 与 output 之和。
+
+        Returns:
+            校验成功的当前不可变载荷。
+
+        Raises:
+            ValueError: total 使用了与内部口径不一致的值。
+        """
         if self.total_tokens != self.input_tokens + self.output_tokens:
             raise ValueError("total_tokens must equal input_tokens + output_tokens")
         return self
 
 
 class _ModelEventBase(BaseModel):
-    """Provider-to-runtime success event; failures are raised as exceptions."""
+    """Provider 到 Runtime 的不可变成功事件；失败统一使用异常。"""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
 
 class ModelMessageDeltaEvent(_ModelEventBase):
+    """模型流式产生的一段非空文本。"""
+
     type: Literal["message_delta"] = "message_delta"
     payload: ModelTextPayload
 
 
 class ModelMessageCompletedEvent(_ModelEventBase):
+    """非流式响应一次性产生的完整非空文本。"""
+
     type: Literal["message_completed"] = "message_completed"
     payload: ModelTextPayload
 
 
 class ModelToolCallEvent(_ModelEventBase):
+    """模型请求 Runtime 执行的一个结构化工具调用。"""
+
     type: Literal["tool_call"] = "tool_call"
     payload: ToolCall
 
 
 class ModelTokenCountEvent(_ModelEventBase):
+    """一次供应商响应确认后的统一 Token 用量。"""
+
     type: Literal["token_count"] = "token_count"
     payload: ModelTokenCountPayload
 
 
 class ModelCompletedEvent(_ModelEventBase):
-    """Successful terminal marker for one provider response stream."""
+    """一次 Provider 响应流成功闭合的无载荷终止标志。"""
 
     type: Literal["completed"] = "completed"
 

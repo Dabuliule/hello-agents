@@ -238,6 +238,32 @@ def test_token_count_does_not_add_reasoning_twice():
         )
 
 
+def test_chat_usage_rejects_inconsistent_total_tokens():
+    with pytest.raises(LLMProtocolError, match=r"input_tokens \+ output_tokens"):
+        QwenProvider._chat_usage(
+            {
+                "usage": {
+                    "prompt_tokens": 7,
+                    "completion_tokens": 3,
+                    "total_tokens": 11,
+                }
+            }
+        )
+
+
+def test_responses_usage_rejects_inconsistent_total_tokens():
+    with pytest.raises(LLMProtocolError, match=r"input_tokens \+ output_tokens"):
+        OpenAIProvider._usage(
+            {
+                "usage": {
+                    "input_tokens": 7,
+                    "output_tokens": 3,
+                    "total_tokens": 11,
+                }
+            }
+        )
+
+
 def test_responses_stream_rejects_missing_terminal_event():
     provider = OpenAIProvider(
         client=FakeResponsesClient(
@@ -320,6 +346,39 @@ def test_chat_stream_requires_successful_finish_reason(finish_reason, message):
 
     with pytest.raises(LLMProtocolError, match=message):
         asyncio.run(collect(provider))
+
+
+@pytest.mark.parametrize(
+    ("finish_reason", "has_tool_calls"),
+    [
+        ("stop", False),
+        ("tool_calls", True),
+    ],
+)
+def test_chat_finish_reason_accepts_consistent_terminal_state(
+    finish_reason,
+    has_tool_calls,
+):
+    QwenProvider._validate_finish_reason(finish_reason, has_tool_calls)
+
+
+@pytest.mark.parametrize(
+    ("finish_reason", "has_tool_calls", "error_type", "message"),
+    [
+        ("content_filter", False, LLMProviderError, "content filter"),
+        ("unknown", False, LLMProtocolError, "unsupported"),
+        ("stop", True, LLMProtocolError, "does not match"),
+        ("tool_calls", False, LLMProtocolError, "does not match"),
+    ],
+)
+def test_chat_finish_reason_rejects_failure_or_mismatch(
+    finish_reason,
+    has_tool_calls,
+    error_type,
+    message,
+):
+    with pytest.raises(error_type, match=message):
+        QwenProvider._validate_finish_reason(finish_reason, has_tool_calls)
 
 
 def test_chat_stream_ignores_empty_role_chunk():
