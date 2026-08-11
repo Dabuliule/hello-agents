@@ -21,6 +21,8 @@ from codecraft.tool import WorkspaceGuard
 
 
 class RepositoryMatchResult(BaseModel):
+    """Repository MCP 对外结构化的路径或内容命中。"""
+
     type: Literal["content", "path"]
     path: str
     line: int | None = None
@@ -28,6 +30,8 @@ class RepositoryMatchResult(BaseModel):
 
 
 class RepositorySearchResult(BaseModel):
+    """Repository 搜索命中、路由事实和扫描成本的稳定输出 schema。"""
+
     query: str
     path: str
     matches: list[RepositoryMatchResult]
@@ -49,6 +53,22 @@ def create_repository_mcp_server(
     *,
     codecraft_home: Path | None = None,
 ) -> FastMCP:
+    """创建只读 Repository Context MCP Server。
+
+    Args:
+        workspace: 唯一允许搜索和读取项目指令的仓库根。
+        codecraft_home: RepositoryIndex 存储根的可选覆盖。
+
+    Returns:
+        暴露 ``search_repository`` tool、workspace metadata 和 project
+        instructions 两个 resource 的 FastMCP 实例。
+
+    Raises:
+        ValueError: workspace 不是已存在目录。
+
+    Server 默认同时配置 scan/lexical/symbol；索引不存在或陈旧时 Engine 会
+    降级 scan，因此 MCP consumer 无需先知道本机索引状态。
+    """
     root = workspace.expanduser().resolve()
     if not root.is_dir():
         raise ValueError(f"workspace must be a directory: {root}")
@@ -93,6 +113,13 @@ def create_repository_mcp_server(
         max_results: Annotated[int, Field(ge=1, le=100)] = 20,
         max_file_bytes: Annotated[int, Field(ge=1, le=10_000_000)] = 1_000_000,
     ) -> RepositorySearchResult:
+        """在 workspace 子目录内执行有界策略检索并返回完整结构化诊断。
+
+        Example:
+            MCP 调用参数 ``{"query": "Session", "path": "src", "strategy":
+            "auto"}`` 会按查询形态选择 symbol/lexical/scan，并在响应记录实际
+            retriever 与 attempted_retrievers。
+        """
         search_root = guard.resolve_read_path(path)
         if not search_root.is_dir():
             raise ValueError(f"search path must be a directory: {path}")
@@ -136,6 +163,7 @@ def create_repository_mcp_server(
         mime_type="application/json",
     )
     def workspace_metadata() -> str:
+        """返回 workspace、索引是否存在及可用 Retriever 的稳定 JSON。"""
         return json.dumps(
             {
                 "workspace": str(root),
@@ -152,6 +180,7 @@ def create_repository_mcp_server(
         mime_type="text/markdown",
     )
     def workspace_instructions() -> str:
+        """返回 workspace 根作用域的项目指令，缺失时返回明确文本。"""
         return (
             InstructionLoader().load_project_instructions(cwd=root)
             or "No project instructions found."

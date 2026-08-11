@@ -32,17 +32,21 @@ _TOOL_NAME_CHARACTER = re.compile(r"[^A-Za-z0-9_-]")
 
 
 class MCPConnectionError(CodecraftError):
-    pass
+    """MCP server 建连、发现或关闭生命周期失败。"""
 
 
 @dataclass(frozen=True, slots=True)
 class _StartedMCP:
+    """Owner 初始化完成后一次性交付的 Session、server info 与适配工具。"""
+
     session: ClientSession
     server_info: dict[str, Any]
     tools: tuple[MCPTool, ...]
 
 
 class MCPStdioProvider(AsyncToolProvider):
+    """拥有一个 stdio MCP 子进程/Session 并将远程工具适配进 Registry。"""
+
     def __init__(
         self,
         server_name: str,
@@ -50,6 +54,7 @@ class MCPStdioProvider(AsyncToolProvider):
         *,
         workspace_cwd: Path,
     ) -> None:
+        """保存服务器配置和 workspace 基准，初始化尚未启动的 owner 状态。"""
         self.server_name = server_name
         self.name = f"mcp:{server_name}"
         self.settings = settings
@@ -60,6 +65,19 @@ class MCPStdioProvider(AsyncToolProvider):
         self._server_info: dict[str, Any] = {}
 
     async def start(self) -> tuple[BaseTool, ...]:
+        """启动 owner task，等待初始化完成后才向 ToolRegistry 发布工具。
+
+        Returns:
+            名称安全、schema 已验证且附有本地治理 effects 的 MCPTool 元组。
+
+        Raises:
+            RuntimeError: Provider 已启动。
+            MCPConnectionError: 进程、握手、发现或失败清理异常。
+
+        Cancellation:
+            ready 等待被 shield；调用方取消时显式取消 owner 并完成退出栈清理，
+            再传播 CancelledError，不留下 stdio 子进程。
+        """
         if self._owner_task is not None:
             raise RuntimeError(f"MCP server is already started: {self.server_name}")
 
@@ -103,6 +121,7 @@ class MCPStdioProvider(AsyncToolProvider):
         stop_event: asyncio.Event,
         original: BaseException,
     ) -> Exception | None:
+        """根据原始取消/异常停止 owner，消费 Future 异常并清空生命周期状态。"""
         if isinstance(original, asyncio.CancelledError):
             owner.cancel()
         else:
@@ -124,6 +143,11 @@ class MCPStdioProvider(AsyncToolProvider):
         return cleanup_error
 
     async def close(self) -> None:
+        """通知 owner 退出并等待其在原任务内关闭 Session/stdio AsyncExitStack。
+
+        外层取消不会取消被 shield 的 owner；若 owner 自身意外取消，则翻译成
+        mcp_close_failed。正常、失败和可判定异常都会清理本地引用。
+        """
         owner = self._owner_task
         stop_event = self._stop_event
         if owner is None or stop_event is None:
@@ -155,6 +179,12 @@ class MCPStdioProvider(AsyncToolProvider):
         ready: asyncio.Future[_StartedMCP],
         stop_event: asyncio.Event,
     ) -> None:
+        """在单一 task 内进入、持有并退出 stdio 与 ClientSession 上下文。
+
+        初始化/分页发现受统一 timeout 保护；ready 交付后 owner 等 stop_event，
+        finally 再限时 aclose。保持 enter/exit task affinity 避免 anyio cancel
+        scope 跨任务退出错误。
+        """
         stack = AsyncExitStack()
         try:
             async with asyncio.timeout(self.settings.timeout_seconds):
@@ -205,12 +235,18 @@ class MCPStdioProvider(AsyncToolProvider):
                 await stack.aclose()
 
     def _clear_owner(self) -> None:
+        """清除 owner、stop event、Session 和 server metadata 引用。"""
         self._owner_task = None
         self._stop_event = None
         self._session = None
         self._server_info = {}
 
     async def _list_tools(self, session: ClientSession) -> tuple[types.Tool, ...]:
+        """有界遍历远程工具分页，限制页数、工具数、总 JSON bytes 与 cursor。
+
+        重复 cursor 会拒绝，防止恶意/错误服务器无限循环；每页在追加前检查
+        max_tools，工具 schema 和 cursor 都计入 discovery byte budget。
+        """
         tools: list[types.Tool] = []
         cursor: str | None = None
         seen_cursors: set[str] = set()
@@ -254,6 +290,11 @@ class MCPStdioProvider(AsyncToolProvider):
         session: ClientSession,
         remote_tools: tuple[types.Tool, ...],
     ) -> tuple[MCPTool, ...]:
+        """映射远程名称/schema/annotations，并应用本地而非远端声明的治理策略。
+
+        清洗/截断后的本地名在同一服务器内冲突会拒绝整个启动，避免模型调用
+        一个名字却无法确定实际远程目标。
+        """
         tools: list[MCPTool] = []
         local_names: set[str] = set()
         for remote in remote_tools:
@@ -278,6 +319,7 @@ class MCPStdioProvider(AsyncToolProvider):
         return tuple(tools)
 
     def _environment(self) -> dict[str, str]:
+        """从 MCP SDK 默认环境加显式 allowlist 构造子进程环境。"""
         environment = get_default_environment()
         for name in self.settings.env_allowlist:
             value = os.environ.get(name)
@@ -286,6 +328,7 @@ class MCPStdioProvider(AsyncToolProvider):
         return environment
 
     def _cwd(self) -> Path:
+        """相对 cwd 基于 workspace 解析，并要求启动时已存在且是目录。"""
         configured = self.settings.cwd
         cwd = (
             self.workspace_cwd
@@ -300,6 +343,8 @@ class MCPStdioProvider(AsyncToolProvider):
 
 
 class MCPTool(BaseTool):
+    """把一个 MCP Tool 的 JSON Schema、调用与多模态结果适配为 BaseTool。"""
+
     def __init__(
         self,
         *,
@@ -311,6 +356,7 @@ class MCPTool(BaseTool):
         requires_approval: bool,
         timeout_seconds: int,
     ) -> None:
+        """绑定共享 Session、远程身份、本地策略、schema 和 timeout。"""
         self.session = session
         self.server_name = server_name
         self.remote_name = remote_tool.name
@@ -328,6 +374,12 @@ class MCPTool(BaseTool):
         self.server_info: dict[str, Any] = {}
 
     async def arun(self, args: BaseModel, context: ToolContext) -> ToolResult:
+        """限时调用远程工具并归一化文本、资源、多媒体和 structured content。
+
+        超时标记 outcome_unknown/retry_safe=False，因为远程副作用可能已完成；
+        MCP isError 决定 ToolResult success，而非是否存在文本。structuredContent
+        在没有文本 block 时作为稳定排序 JSON 提供给模型。
+        """
         try:
             result = await asyncio.wait_for(
                 self.session.call_tool(
@@ -378,6 +430,7 @@ class MCPTool(BaseTool):
         )
 
     def _metadata(self) -> dict[str, Any]:
+        """返回服务器/远程工具/annotations/握手信息组成的审计身份。"""
         return {
             "mcp_server": self.server_name,
             "mcp_tool": self.remote_name,
@@ -387,6 +440,12 @@ class MCPTool(BaseTool):
 
 
 def mcp_tool_name(server_name: str, remote_name: str) -> str:
+    """生成不超过 64 字符的稳定本地 Tool 名，长名称附远程名摘要。
+
+    Example:
+        >>> mcp_tool_name("repo", "search/files")
+        'mcp__repo__search_files'
+    """
     sanitized = _TOOL_NAME_CHARACTER.sub("_", remote_name).strip("_") or "tool"
     candidate = f"mcp__{server_name}__{sanitized}"
     if len(candidate) <= 64:
@@ -396,6 +455,7 @@ def mcp_tool_name(server_name: str, remote_name: str) -> str:
 
 
 def _tool_size(tool: types.Tool) -> int:
+    """按紧凑 Unicode JSON 的 UTF-8 bytes 计算远程工具发现成本。"""
     serialized = json.dumps(
         tool.model_dump(mode="json"),
         ensure_ascii=False,
@@ -405,16 +465,25 @@ def _tool_size(tool: types.Tool) -> int:
 
 
 def mcp_args_model(name: str, schema: dict[str, Any]) -> type[BaseModel]:
+    """从远程 Draft 2020-12 JSON Schema 创建动态 Pydantic 参数模型。
+
+    Schema 自身先经 meta-schema 校验；实例校验保留 MCP 原 schema 语义，
+    Pydantic 允许 extra 以免自行施加远程未声明的限制；model_json_schema
+    返回深拷贝原 schema，使暴露给模型的协议不被 Pydantic 重写。
+    """
     input_schema = deepcopy(schema)
     Draft202012Validator.check_schema(input_schema)
     validator = Draft202012Validator(input_schema)
 
     class MCPArguments(BaseModel):
+        """闭包绑定远程 JSON Schema 的动态工具参数模型。"""
+
         model_config = ConfigDict(extra="allow")
 
         @model_validator(mode="before")
         @classmethod
         def validate_mcp_schema(cls, value: Any) -> Any:
+            """运行 JSON Schema 校验并用首个路径明确的错误拒绝参数。"""
             errors = sorted(
                 validator.iter_errors(value), key=lambda error: list(error.path)
             )
@@ -434,6 +503,7 @@ def mcp_args_model(name: str, schema: dict[str, Any]) -> type[BaseModel]:
             *,
             union_format: Literal["any_of", "primitive_type_array"] = "any_of",
         ) -> dict[str, Any]:
+            """忽略 Pydantic 生成选项并返回远程 inputSchema 深拷贝。"""
             return deepcopy(input_schema)
 
     MCPArguments.__name__ = f"{name}_arguments"
@@ -443,6 +513,11 @@ def mcp_args_model(name: str, schema: dict[str, Any]) -> type[BaseModel]:
 def _format_mcp_content(
     content: list[types.ContentBlock],
 ) -> tuple[str, list[dict[str, Any]]]:
+    """把 MCP content blocks 转为模型文本和不含二进制正文的结构摘要。
+
+    文本与 text resource 保留正文；resource link 变成 URI 提示；blob/image/
+    audio 只记录 MIME 与解码后 bytes，避免 base64 大对象直接进入模型文本。
+    """
     text_parts: list[str] = []
     blocks: list[dict[str, Any]] = []
     for block in content:
@@ -489,6 +564,7 @@ def _format_mcp_content(
 
 
 def _base64_size(value: str) -> int:
+    """严格解码 base64 后返回字节数，无效数据安全返回 0。"""
     try:
         return len(base64.b64decode(value, validate=True))
     except ValueError:
