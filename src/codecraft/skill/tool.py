@@ -12,6 +12,8 @@ SKILL_ACTIVATION_METADATA_KEY = "skill_activation"
 
 
 class LoadSkillArgs(ToolArguments):
+    """模型选择的、符合统一 Skill 名称模式的激活参数。"""
+
     name: str = Field(
         min_length=1,
         max_length=64,
@@ -31,9 +33,15 @@ class LoadSkillTool(BaseTool):
     effects = {ToolEffect.READ_ONLY}
 
     def __init__(self, registry: SkillRegistry) -> None:
+        """绑定当前 Session 发现后冻结使用的 Skill Registry。"""
         self.registry = registry
 
     async def arun(self, args: BaseModel, context: ToolContext) -> ToolResult:
+        """校验 Skill 名称并返回由 Turn 识别的激活 metadata。
+
+        正文不直接作为工具输出返回；Turn 收到 ``skill_activation`` 后把 Skill
+        加入 active 集合，下一次模型请求才在 ``<active_skills>`` 中注入正文。
+        """
         load_args = LoadSkillArgs.model_validate(args)
         skill = self.registry.get(load_args.name)
         metadata = skill.metadata

@@ -11,6 +11,8 @@ SKILL_NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 
 
 class SkillSource(StrEnum):
+    """Skill 来自用户目录还是当前项目目录。"""
+
     USER = "user"
     PROJECT = "project"
 
@@ -26,6 +28,7 @@ class SkillManifest(BaseModel):
     @field_validator("name")
     @classmethod
     def validate_name(cls, value: str) -> str:
+        """规范并校验可安全用于目录、mention 和工具参数的 Skill 名。"""
         normalized = value.strip()
         if not SKILL_NAME_PATTERN.fullmatch(normalized):
             raise ValueError(
@@ -36,6 +39,7 @@ class SkillManifest(BaseModel):
     @field_validator("description")
     @classmethod
     def validate_description(cls, value: str) -> str:
+        """规范描述并拒绝空白、多行和不可见控制字符。"""
         normalized = value.strip()
         if not normalized:
             raise ValueError("description must not be blank")

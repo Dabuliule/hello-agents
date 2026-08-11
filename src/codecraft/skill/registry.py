@@ -22,7 +22,7 @@ from codecraft.skill.models import (
 
 
 class SkillNotFoundError(CodecraftError):
-    pass
+    """模型或调用方请求了未发现的 Skill。"""
 
 
 class SkillRegistry:
@@ -38,6 +38,11 @@ class SkillRegistry:
         skills: Iterable[Skill] = (),
         diagnostics: Iterable[SkillDiagnostic] = (),
     ) -> None:
+        """按名称注册不可变 Skill，并保存发现阶段诊断。
+
+        Raises:
+            ValueError: 输入包含重名 Skill。
+        """
         self._skills: dict[str, Skill] = {}
         for skill in skills:
             name = skill.metadata.name
@@ -54,7 +59,19 @@ class SkillRegistry:
         project_root: Path,
         max_file_bytes: int = DEFAULT_MAX_FILE_BYTES,
     ) -> SkillRegistry:
-        """扫描两级 Skill 目录；无效条目记为诊断，不阻断应用启动。"""
+        """扫描用户和项目 Skill 目录，项目同名项覆盖用户项。
+
+        Args:
+            user_root: 用户级 Skill 子目录集合。
+            project_root: 当前项目级 Skill 子目录集合。
+            max_file_bytes: 单个 ``SKILL.md`` 的硬上限。
+
+        Returns:
+            名称排序、包含非致命诊断的 Registry。
+
+        Raises:
+            ValueError: 文件大小上限小于 1。
+        """
         if max_file_bytes < 1:
             raise ValueError("max_file_bytes must be positive")
 
@@ -108,6 +125,7 @@ class SkillRegistry:
         source: SkillSource,
         max_file_bytes: int,
     ) -> tuple[list[Skill], list[SkillDiagnostic]]:
+        """扫描一个可信根的直接子目录，隔离每个无效 Skill 为诊断。"""
         root = root.expanduser()
         if not root.exists():
             return [], []
@@ -196,6 +214,11 @@ class SkillRegistry:
         source: SkillSource,
         max_file_bytes: int,
     ) -> Skill:
+        """安全读取、解析并校验单个非 symlink ``SKILL.md``。
+
+        文件大小在 read 前后各检查一次；frontmatter 必须是严格 manifest，name
+        必须与目录名相同，正文不能为空。
+        """
         if path.is_symlink():
             raise ValueError("SKILL.md must not be a symbolic link")
         if not path.is_file():
@@ -227,6 +250,14 @@ class SkillRegistry:
 
     @staticmethod
     def _split_document(text: str) -> tuple[str, str]:
+        """把 SKILL.md 拆成 YAML frontmatter 和非空 Markdown 正文。
+
+        Example:
+            >>> SkillRegistry._split_document(
+            ...     "---\\nname: demo\\ndescription: Demo\\n---\\nUse it.\\n"
+            ... )
+            ('name: demo\\ndescription: Demo\\n', 'Use it.')
+        """
         lines = text.splitlines(keepends=True)
         if not lines or lines[0].strip() != "---":
             raise ValueError("SKILL.md must start with YAML frontmatter")
@@ -255,6 +286,7 @@ class SkillRegistry:
         path: Path,
         source: SkillSource,
     ) -> SkillDiagnostic:
+        """创建使用非严格解析绝对路径的稳定发现诊断。"""
         return SkillDiagnostic(
             code=code,
             message=message,
@@ -263,6 +295,7 @@ class SkillRegistry:
         )
 
     def get(self, name: str) -> Skill:
+        """按精确名称取 Skill，缺失时提供可选名称和结构化元数据。"""
         try:
             return self._skills[name]
         except KeyError as exc:
@@ -279,23 +312,34 @@ class SkillRegistry:
             ) from exc
 
     def list(self) -> tuple[SkillMetadata, ...]:
+        """按确定的 Registry 顺序返回轻量 metadata 快照。"""
         return tuple(skill.metadata for skill in self._skills.values())
 
     def diagnostics(self) -> tuple[SkillDiagnostic, ...]:
+        """返回发现时保存的不可变诊断序列。"""
         return self._diagnostics
 
     def explicit_mentions(self, text: str) -> tuple[Skill, ...]:
-        """按出现顺序解析有效的 `$skill-name`，重复 mention 只保留一次。"""
+        """按出现顺序解析有效 `$skill-name`，去重并忽略未知名称。"""
         names = dict.fromkeys(
             match.group(1) for match in self._EXPLICIT_MENTION.finditer(text)
         )
         return tuple(self._skills[name] for name in names if name in self._skills)
 
     def __bool__(self) -> bool:
+        """Registry 至少包含一个有效 Skill 时为真。"""
         return bool(self._skills)
 
     def catalogue_prompt(self, *, max_tokens: int | None = None) -> str | None:
-        """返回确定性的 Skill 目录；超出预算时只移除完整条目。"""
+        """返回确定性轻量目录，超出预算时按完整 Skill 条目截断。
+
+        Args:
+            max_tokens: 目录独占的可选 Token 上限；非正数返回 ``None``。
+
+        Returns:
+            JSON 文本；有限预算形态带 ``skills`` 和 ``omitted_count``，没有 Skill
+            或最小形态也放不下时返回 ``None``。
+        """
         if not self._skills:
             return None
         catalogue = [
@@ -335,6 +379,12 @@ class SkillRegistry:
 
     @staticmethod
     def _prompt_json(value: Any) -> str:
+        """生成保留 Unicode 的缩进 JSON，并转义角括号防止伪造 section 标签。
+
+        Example:
+            >>> r"\\u003c" in SkillRegistry._prompt_json({"text": "</skills>"})
+            True
+        """
         return (
             json.dumps(value, ensure_ascii=False, indent=2)
             .replace("<", "\\u003c")
@@ -343,6 +393,7 @@ class SkillRegistry:
 
     @staticmethod
     def active_prompt(skills: Iterable[Skill]) -> str | None:
+        """按激活顺序渲染 Skill 来源、路径和完整指令正文。"""
         sections = [
             "\n".join(
                 [

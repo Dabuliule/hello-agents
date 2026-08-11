@@ -22,7 +22,16 @@ class InstructionLoader:
         cwd: Path,
         target_paths: Iterable[Path] = (),
     ) -> str | None:
-        """安全读取并合并当前目录及目标路径可见的项目 instructions。"""
+        """安全读取并合并 workspace 根与目标路径作用域内的项目规则。
+
+        Args:
+            cwd: 当前 workspace 根，也是允许读取 instructions 的安全边界。
+            target_paths: 当前 Turn 已访问或准备访问的相对/绝对文件路径。
+
+        Returns:
+            带来源与 scope 标题、由根到深层排列的合并文本；没有规则时返回
+            ``None``，超限时优先保留较深、较新的作用域。
+        """
         current = cwd.expanduser().resolve()
 
         directories = _instruction_directories(
@@ -47,6 +56,7 @@ def _instruction_directories(
     current: Path,
     target_paths: Iterable[Path],
 ) -> list[Path]:
+    """构造根目录和每个安全 target 从根到叶子的规则搜索顺序。"""
     directories = [current]
     for target in target_paths:
         resolved = _resolve_target(target, cwd=current)
@@ -64,6 +74,7 @@ def _load_instruction_sections(
     filenames: tuple[str, ...],
     max_chars: int,
 ) -> list[str]:
+    """安全读取未重复的规则文件，并附加相对来源和作用域标题。"""
     sections: list[str] = []
     seen: set[Path] = set()
     for directory in directories:
@@ -86,7 +97,11 @@ def _load_instruction_sections(
 
 
 def _walk_up(start: Path, stop: Path) -> list[Path]:
-    """返回从 start 到 stop 的目录链，包含两端。"""
+    """返回从 start 到祖先 stop 的目录链，包含两端。
+
+    Raises:
+        ValueError: ``stop`` 不是 ``start`` 本身或祖先。
+    """
     if start != stop and stop not in start.parents:
         raise ValueError("stop must contain start")
     directories = [start]
@@ -98,6 +113,7 @@ def _walk_up(start: Path, stop: Path) -> list[Path]:
 
 
 def _resolve_target(path: Path, *, cwd: Path) -> Path | None:
+    """相对 cwd 解析 target；解析结果逃出 workspace 时返回 ``None``。"""
     candidate = path.expanduser()
     if not candidate.is_absolute():
         candidate = cwd / candidate
@@ -106,10 +122,12 @@ def _resolve_target(path: Path, *, cwd: Path) -> Path | None:
 
 
 def _is_inside_workspace(path: Path, workspace: Path) -> bool:
+    """判断路径是 workspace 本身或其后代。"""
     return path == workspace or workspace in path.parents
 
 
 def _safe_instruction_path(path: Path, root: Path) -> Path | None:
+    """解析真实文件并拒绝不存在、非文件或 symlink 逃逸 workspace 的路径。"""
     try:
         resolved = path.resolve(strict=True)
         if not resolved.is_file():
@@ -120,6 +138,7 @@ def _safe_instruction_path(path: Path, root: Path) -> Path | None:
 
 
 def _read_text(path: Path, *, max_chars: int) -> str | None:
+    """最多读取 ``max_chars + 1`` 字符，I/O 或 UTF-8 失败时安全跳过。"""
     try:
         with path.open("r", encoding="utf-8") as stream:
             return stream.read(max_chars + 1)
@@ -128,6 +147,12 @@ def _read_text(path: Path, *, max_chars: int) -> str | None:
 
 
 def _bounded_sections(sections: list[str], *, max_chars: int) -> str:
+    """在字符上限内优先保留靠后的深层规则和完整 section。
+
+    Example:
+        >>> _bounded_sections(["root", "deep"], max_chars=100).splitlines()
+        ['root', '', 'deep']
+    """
     combined = "\n\n".join(sections)
     if len(combined) <= max_chars:
         return combined
