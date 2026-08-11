@@ -14,6 +14,8 @@ from codecraft.tool.base import BaseTool
 
 
 class ApprovalEvaluation(BaseModel):
+    """工具治理阶段的审批需求、风险原因和可选命令分类结果。"""
+
     requires_approval: bool
     reason: str
     risk: str
@@ -21,6 +23,8 @@ class ApprovalEvaluation(BaseModel):
 
 
 class ApprovalRequest(BaseModel):
+    """Reviewer 决策所需的 Session、Turn、工具和风险快照。"""
+
     approval_id: str
     session_id: str
     turn_id: str
@@ -32,6 +36,8 @@ class ApprovalRequest(BaseModel):
 
 
 class ApprovalDecision(BaseModel):
+    """用户或自动 Reviewer 对一个 approval ID 的不可歧义决定。"""
+
     approval_id: str
     approved: bool
     reviewer: Literal["user", "auto"] = "auto"
@@ -39,25 +45,45 @@ class ApprovalDecision(BaseModel):
 
     @classmethod
     def approve(cls, approval_id: str, reason: str | None = None) -> ApprovalDecision:
+        """创建默认 reviewer 为 auto 的允许决定。
+
+        Example:
+            >>> ApprovalDecision.approve("appr_1").approved
+            True
+        """
         return cls(approval_id=approval_id, approved=True, reason=reason)
 
     @classmethod
     def deny(cls, approval_id: str, reason: str | None = None) -> ApprovalDecision:
+        """创建默认 reviewer 为 auto 的拒绝决定。
+
+        Example:
+            >>> ApprovalDecision.deny("appr_1", "unsafe").reason
+            'unsafe'
+        """
         return cls(approval_id=approval_id, approved=False, reason=reason)
 
 
 class ApprovalReviewer(ABC):
+    """同步策略或交互式审批通道必须实现的异步接口。"""
+
     @abstractmethod
-    async def review(self, request: ApprovalRequest) -> ApprovalDecision: ...
+    async def review(self, request: ApprovalRequest) -> ApprovalDecision:
+        """等待或立即返回与 ``request.approval_id`` 对应的决定。"""
+        ...
 
 
 class AutoApprovalReviewer(ApprovalReviewer):
+    """按固定结果响应并记录请求的测试/显式自动 Reviewer。"""
+
     def __init__(self, *, approved: bool = True, reason: str | None = None) -> None:
+        """配置所有后续请求共用的决定和原因。"""
         self.approved = approved
         self.reason = reason
         self.requests: list[ApprovalRequest] = []
 
     async def review(self, request: ApprovalRequest) -> ApprovalDecision:
+        """记录请求并立即返回固定决定。"""
         self.requests.append(request)
         if self.approved:
             return ApprovalDecision.approve(request.approval_id, self.reason)
@@ -65,12 +91,14 @@ class AutoApprovalReviewer(ApprovalReviewer):
 
 
 class DenyApprovalReviewer(ApprovalReviewer):
-    """Fail-closed reviewer used when no interactive reviewer is configured."""
+    """未配置交互 Reviewer 时使用的 fail-closed 拒绝实现。"""
 
     def __init__(self) -> None:
+        """创建空的请求审计列表。"""
         self.requests: list[ApprovalRequest] = []
 
     async def review(self, request: ApprovalRequest) -> ApprovalDecision:
+        """记录请求并以稳定原因拒绝。"""
         self.requests.append(request)
         return ApprovalDecision.deny(
             request.approval_id,
@@ -91,6 +119,7 @@ class ApprovalManager:
         reviewer: ApprovalReviewer | None = None,
         command_policy: CommandPolicy | None = None,
     ) -> None:
+        """注入 Reviewer 和 shell 命令分类策略，默认无 Reviewer 时拒绝。"""
         self.reviewer = reviewer if reviewer is not None else DenyApprovalReviewer()
         self.command_policy = command_policy or CommandPolicy()
 
@@ -101,7 +130,12 @@ class ApprovalManager:
         args: BaseModel,
         context: TurnContext,
     ) -> ApprovalEvaluation:
-        """评估一次 tool call 是否需要 approval。"""
+        """结合审批策略、工具副作用和 shell 风险评估一次调用。
+
+        Bash 始终先经过 ``CommandPolicy``；DENY 与 policy=NEVER 不创建审批，
+        而把命令决定交给 ToolRunner 做硬拒绝或直接执行。其他工具在 UNTRUSTED
+        下按副作用审批，在 ON_REQUEST 下按工具声明审批。
+        """
         if call.name == "bash":
             # shell command 的风险和 tool effect 不完全等价，需要交给 CommandPolicy。
             command = str(getattr(args, "command", ""))
@@ -164,7 +198,7 @@ class ApprovalManager:
         )
 
     async def request(self, request: ApprovalRequest) -> ApprovalDecision:
-        """把审批请求交给 reviewer，并等待结果。"""
+        """把请求交给 Reviewer，并校验返回决定没有串错 approval ID。"""
         decision = await self.reviewer.review(request)
         if decision.approval_id != request.approval_id:
             raise RuntimeError("approval decision does not match its request")
@@ -176,6 +210,7 @@ class ApprovalManager:
         *,
         timed_out: bool,
     ) -> ApprovalDecision:
+        """把审批超时或 Reviewer 异常 fail-closed 成自动拒绝决定。"""
         return ApprovalDecision.deny(
             request.approval_id,
             "approval timed out" if timed_out else "approval review failed",
@@ -188,6 +223,11 @@ class ApprovalManager:
         context: TurnContext,
         evaluation: ApprovalEvaluation,
     ) -> ApprovalRequest:
+        """从调用、Turn 快照和风险评估创建唯一审批请求。
+
+        Returns:
+            带新 ``appr_`` ID 且复制调用参数和上下文标识的请求。
+        """
         return ApprovalRequest(
             approval_id=new_id("appr_"),
             session_id=context.session_id,

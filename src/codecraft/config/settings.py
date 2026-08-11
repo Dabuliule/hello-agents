@@ -13,6 +13,8 @@ _ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 class ModelSettings(BaseModel):
+    """模型连接标识与上下文、输出 Token 预算。"""
+
     provider: str = "qwen"
     name: str = "qwen-plus"
     api_key_env: str | None = None
@@ -22,10 +24,14 @@ class ModelSettings(BaseModel):
 
 
 class ApprovalSettings(BaseModel):
+    """Runtime 默认审批策略。"""
+
     policy: ApprovalPolicy = ApprovalPolicy.ON_REQUEST
 
 
 class SandboxSettings(BaseModel):
+    """沙箱模式、网络、后端、环境变量和 Docker 配置。"""
+
     mode: SandboxMode = SandboxMode.WORKSPACE_WRITE
     network_access: bool = False
     backend: SandboxBackendType = SandboxBackendType.AUTO
@@ -35,6 +41,7 @@ class SandboxSettings(BaseModel):
     @field_validator("env_allowlist")
     @classmethod
     def validate_env_names(cls, values: list[str]) -> list[str]:
+        """校验并稳定去重传入沙箱的环境变量名称。"""
         invalid = [value for value in values if not _ENV_NAME.fullmatch(value)]
         if invalid:
             raise ValueError(f"invalid environment variable names: {invalid}")
@@ -42,19 +49,26 @@ class SandboxSettings(BaseModel):
 
 
 class PathsSettings(BaseModel):
+    """CodeCraft 用户数据路径设置。"""
+
     codecraft_home: Path = Path("~/.codecraft")
 
     @field_validator("codecraft_home")
     @classmethod
     def expand_path(cls, value: Path) -> Path:
+        """展开用户主目录符号，保留相对路径是否解析给调用边界决定。"""
         return value.expanduser()
 
 
 class InstructionSettings(BaseModel):
+    """用户级附加模型指令。"""
+
     user: str | None = None
 
 
 class TurnSettings(BaseModel):
+    """单 Turn 的工具、输出、并发、超时和上下文预算。"""
+
     max_tool_calls: int = Field(default=30, ge=1, le=1000)
     max_tool_output_chars: int = Field(default=80_000, ge=1, le=10_000_000)
     max_tool_output_tokens: int = Field(default=16_384, ge=32, le=1_000_000)
@@ -67,6 +81,14 @@ class TurnSettings(BaseModel):
 
 
 class RuntimeSettings(BaseModel):
+    """配置文件各 section 合并后的强类型 Runtime 设置。
+
+    Example:
+        >>> settings = RuntimeSettings()
+        >>> (settings.model.provider, settings.sandbox.network_access)
+        ('qwen', False)
+    """
+
     model: ModelSettings = Field(default_factory=ModelSettings)
     approval: ApprovalSettings = Field(default_factory=ApprovalSettings)
     sandbox: SandboxSettings = Field(default_factory=SandboxSettings)
@@ -77,6 +99,7 @@ class RuntimeSettings(BaseModel):
 
     @model_validator(mode="after")
     def validate_model_token_budget(self) -> RuntimeSettings:
+        """确保最大输出与安全余量之和小于模型上下文窗口。"""
         reserved = self.model.max_output_tokens + self.turn.context_safety_margin_tokens
         if reserved >= self.model.context_window_tokens:
             raise ValueError(

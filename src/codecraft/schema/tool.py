@@ -9,6 +9,8 @@ from codecraft.schema.event import RuntimeEventType
 
 
 class ToolEffect(StrEnum):
+    """工具可能产生的只读、写入、进程、网络或外部副作用。"""
+
     READ_ONLY = "read_only"
     WORKSPACE_WRITE = "workspace_write"
     PROCESS_EXEC = "process_exec"
@@ -38,6 +40,8 @@ class ToolCall(BaseModel):
 
 
 class ToolRuntimeEvent(BaseModel):
+    """工具结果可附带的受限 Runtime 事件；当前仅允许补丁统计。"""
+
     model_config = ConfigDict(extra="forbid")
 
     type: RuntimeEventType
@@ -46,6 +50,7 @@ class ToolRuntimeEvent(BaseModel):
     @field_validator("type")
     @classmethod
     def validate_tool_event_type(cls, value: RuntimeEventType) -> RuntimeEventType:
+        """阻止工具伪造 Turn、审批、错误等 Runtime 生命周期事件。"""
         if value != RuntimeEventType.PATCH_APPLIED:
             raise ValueError("tool results cannot emit runtime lifecycle events")
         return value

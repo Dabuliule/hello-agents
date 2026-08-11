@@ -17,6 +17,7 @@ class ThreadApprovalReviewer(ApprovalReviewer):
     """
 
     def __init__(self) -> None:
+        """创建 approval ID 到 Future、请求快照的两个同步映射。"""
         self.pending: dict[str, asyncio.Future[ApprovalDecision]] = {}
         self.requests: dict[str, ApprovalRequest] = {}
 
@@ -46,6 +47,7 @@ class ThreadApprovalReviewer(ApprovalReviewer):
         future.set_result(decision)
 
     def list_pending(self) -> list[ApprovalRequest]:
+        """按 Future 登记顺序返回仍等待用户决定的请求快照。"""
         return [
             self.requests[approval_id]
             for approval_id in self.pending

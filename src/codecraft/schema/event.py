@@ -20,6 +20,8 @@ RUNTIME_EVENT_SCHEMA_VERSION: Literal[1] = 1
 
 
 class RuntimeEventType(StrEnum):
+    """Runtime 持久化事件的稳定类型集合。"""
+
     SESSION_STARTED = "session_started"
     SESSION_RESTORED = "session_restored"
 
@@ -47,36 +49,42 @@ class RuntimeEventType(StrEnum):
 
 
 class EventPayload(BaseModel):
-    """Immutable, mapping-compatible payload shared by persisted runtime events."""
+    """持久化事件共用的不可变、拒绝额外字段且兼容映射访问的载荷。"""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     def __getitem__(self, key: str) -> Any:
+        """按字段名读取载荷，未知字段抛 ``KeyError``。"""
         if key not in type(self).model_fields:
             raise KeyError(key)
         return getattr(self, key)
 
     def get(self, key: str, default: Any = None) -> Any:
+        """按映射语义读取字段，未知字段返回 ``default``。"""
         try:
             return self[key]
         except KeyError:
             return default
 
     def __str__(self) -> str:
+        """返回仅含显式字段的 Python 字典文本，便于日志展示。"""
         return str(self.model_dump(mode="python", exclude_unset=True))
 
 
 class EmptyEventPayload(EventPayload):
-    pass
+    """不携带业务数据的 session closed 等事件载荷。"""
 
 
 class SessionStartedEventPayload(EventPayload):
+    """Session 首事件中的完整配置快照和可选 Skill 快照。"""
+
     config: dict[str, Any]
     skills: dict[str, Any] | None = None
 
     @field_validator("config")
     @classmethod
     def validate_config(cls, value: dict[str, Any]) -> dict[str, Any]:
+        """通过 ``SessionConfig`` 校验并规范化可恢复配置快照。"""
         from codecraft.schema.session import SessionConfig
 
         return SessionConfig.model_validate(value).model_dump(mode="json")
@@ -84,38 +92,52 @@ class SessionStartedEventPayload(EventPayload):
     @field_validator("skills")
     @classmethod
     def validate_skills(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
+        """校验可用 Skill 与诊断信息的启动快照。"""
         return _validate_skill_snapshot(value)
 
 
 class SessionRestoredEventPayload(EventPayload):
+    """Session 恢复时重新发现的可选 Skill 快照。"""
+
     skills: dict[str, Any] | None = None
 
     @field_validator("skills")
     @classmethod
     def validate_skills(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
+        """校验恢复事件中的 Skill 快照。"""
         return _validate_skill_snapshot(value)
 
 
 class TurnStartedEventPayload(EventPayload):
+    """记录新 Turn 所消费的输入 ID。"""
+
     input_id: str = Field(min_length=1)
 
 
 class UserMessageEventPayload(EventPayload):
+    """持久化用户输入 ID 与非空文本。"""
+
     input_id: str = Field(min_length=1)
     text: str = Field(min_length=1)
 
 
 class TextEventPayload(EventPayload):
+    """assistant 增量或完整消息的非空文本载荷。"""
+
     text: str = Field(min_length=1)
 
 
 class ToolCallEventPayload(EventPayload):
+    """模型意图或工具开始事件共用的结构化调用载荷。"""
+
     call_id: str = Field(min_length=1)
     name: str = Field(min_length=1)
     arguments: dict[str, Any]
 
 
 class ToolTimingsEventPayload(BaseModel):
+    """工具治理、审批等待、执行、观察器和总耗时的毫秒拆分。"""
+
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     governance: int = Field(ge=0)
@@ -126,6 +148,8 @@ class ToolTimingsEventPayload(BaseModel):
 
 
 class ToolCallFinishedEventPayload(EventPayload):
+    """工具结果、总耗时和可选阶段耗时。"""
+
     call_id: str = Field(min_length=1)
     name: str = Field(min_length=1)
     result: dict[str, Any]
@@ -135,6 +159,7 @@ class ToolCallFinishedEventPayload(EventPayload):
     @field_validator("result")
     @classmethod
     def validate_result(cls, value: dict[str, Any]) -> dict[str, Any]:
+        """通过 ``ToolResult`` 校验并规范化持久化结果。"""
         from codecraft.schema.tool import ToolResult
 
         return ToolResult.model_validate(value).model_dump(mode="json")
@@ -142,12 +167,15 @@ class ToolCallFinishedEventPayload(EventPayload):
     @field_validator("timings_ms")
     @classmethod
     def validate_timings(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
+        """校验可选的工具阶段耗时字典。"""
         if value is None:
             return None
         return ToolTimingsEventPayload.model_validate(value).model_dump(mode="json")
 
 
 class ApprovalRequestedEventPayload(EventPayload):
+    """向用户展示并持久化的一次工具审批请求。"""
+
     approval_id: str = Field(min_length=1)
     session_id: str = Field(min_length=1)
     turn_id: str = Field(min_length=1)
@@ -159,6 +187,8 @@ class ApprovalRequestedEventPayload(EventPayload):
 
 
 class ApprovalDecidedEventPayload(EventPayload):
+    """用户或自动 Reviewer 对某个审批请求的决定。"""
+
     approval_id: str = Field(min_length=1)
     approved: bool
     reviewer: Literal["user", "auto"] = "auto"
@@ -166,6 +196,8 @@ class ApprovalDecidedEventPayload(EventPayload):
 
 
 class PatchAppliedEventPayload(EventPayload):
+    """完整补丁统计或因过大而截断的互斥载荷。"""
+
     call_id: str = Field(min_length=1)
     changed_files: list[str] | None = None
     modified: int | None = Field(default=None, ge=0)
@@ -176,6 +208,7 @@ class PatchAppliedEventPayload(EventPayload):
 
     @model_validator(mode="after")
     def validate_shape(self) -> PatchAppliedEventPayload:
+        """确保完整统计形态与截断占位形态互斥且字段完备。"""
         if self.payload_truncated is True:
             if self.original_payload_chars is None:
                 raise ValueError(
@@ -209,6 +242,8 @@ class PatchAppliedEventPayload(EventPayload):
 
 
 class TokenCountEventPayload(EventPayload):
+    """Runtime 持久化的统一 Token 用量，reasoning/cached 均为子集。"""
+
     input_tokens: int = Field(default=0, ge=0)
     output_tokens: int = Field(default=0, ge=0)
     reasoning_tokens: int = Field(default=0, ge=0)
@@ -218,6 +253,7 @@ class TokenCountEventPayload(EventPayload):
     @model_validator(mode="before")
     @classmethod
     def fill_total_tokens(cls, value: Any) -> Any:
+        """显式 total 缺失时，用 input 与 output 之和补齐浅拷贝。"""
         if isinstance(value, dict) and "total_tokens" not in value:
             normalized = dict(value)
             input_tokens = normalized.get("input_tokens", 0)
@@ -234,12 +270,15 @@ class TokenCountEventPayload(EventPayload):
 
     @model_validator(mode="after")
     def validate_total_tokens(self) -> TokenCountEventPayload:
+        """确认 total 没有重复加上 reasoning 或 cached 子集。"""
         if self.total_tokens != self.input_tokens + self.output_tokens:
             raise ValueError("total_tokens must equal input_tokens + output_tokens")
         return self
 
 
 class ContextCompactedEventPayload(EventPayload):
+    """上下文压缩前后指标、摘要和可恢复 Conversation 快照。"""
+
     summary: str = Field(min_length=1)
     before_tokens: int = Field(ge=0)
     after_tokens: int = Field(ge=0)
@@ -250,12 +289,15 @@ class ContextCompactedEventPayload(EventPayload):
     @field_validator("conversation")
     @classmethod
     def validate_conversation(cls, value: dict[str, Any]) -> dict[str, Any]:
+        """通过 ``Conversation`` 校验压缩后的可恢复快照。"""
         from codecraft.core.conversation import Conversation
 
         return Conversation.model_validate(value).model_dump(mode="json")
 
 
 class ErrorEventPayload(EventPayload):
+    """稳定错误码、可读消息、元数据和可选修复建议。"""
+
     code: str = Field(min_length=1)
     message: str = Field(min_length=1)
     metadata: dict[str, Any]
@@ -263,12 +305,16 @@ class ErrorEventPayload(EventPayload):
 
 
 class TurnFinishedEventPayload(EventPayload):
+    """成功 Turn 的最终答案、工具次数和耗时。"""
+
     answer: str = Field(min_length=1)
     tool_calls: int = Field(ge=0)
     duration_ms: int = Field(ge=0)
 
 
 class TurnAbortedEventPayload(EventPayload):
+    """中止 Turn 的结构化原因、指标和诊断元数据。"""
+
     reason: str = Field(min_length=1)
     message: str = Field(min_length=1)
     tool_calls: int = Field(ge=0)
@@ -318,6 +364,20 @@ _PAYLOAD_MODELS: dict[RuntimeEventType, type[EventPayload]] = {
 
 
 class RuntimeEvent(BaseModel):
+    """可持久化、可恢复且按 seq 排序的不可变 Runtime 事实。
+
+    Example:
+        >>> event = RuntimeEvent(
+        ...     event_id="evt_1",
+        ...     session_id="ses_1",
+        ...     seq=1,
+        ...     type="assistant_message",
+        ...     payload={"text": "done"},
+        ... )
+        >>> (event.type, event.payload["text"])
+        (<RuntimeEventType.ASSISTANT_MESSAGE: 'assistant_message'>, 'done')
+    """
+
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     schema_version: Literal[1] = RUNTIME_EVENT_SCHEMA_VERSION
@@ -332,6 +392,17 @@ class RuntimeEvent(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def validate_payload_for_type(cls, value: Any) -> Any:
+        """按 event type 选择唯一载荷模型，并在持久化前清洗和脱敏。
+
+        Args:
+            value: Pydantic 校验前收到的事件对象或原始字典。
+
+        Returns:
+            字典输入会复制并把 payload 替换成对应的严格模型；其他输入保持原样。
+
+        Raises:
+            ValueError: payload 不是 JSON object，或具体载荷校验失败。
+        """
         if not isinstance(value, dict):
             return value
         event_type_value = value.get("type")
@@ -358,6 +429,7 @@ class RuntimeEvent(BaseModel):
         value: RuntimeEventPayload,
         info: SerializationInfo,
     ) -> dict[str, Any]:
+        """让联合载荷按具体模型序列化，避免 Pydantic 丢失分支字段。"""
         return value.model_dump(
             mode=info.mode,
             include=cast(Any, info.include),
@@ -374,6 +446,19 @@ class RuntimeEvent(BaseModel):
 
 
 def _sanitize_payload(value: Any, *, redact: bool = True) -> dict[str, Any]:
+    """把任意载荷规范为 JSON 兼容字典并按需递归脱敏。
+
+    Args:
+        value: ``EventPayload`` 或待清洗的原始对象。
+        redact: 是否按敏感字段名替换凭据；SessionStarted 配置快照会关闭此步。
+
+    Returns:
+        清洗后的字典；顶层无法表示为字典时返回空字典。
+
+    Example:
+        >>> _sanitize_payload({"api_key": "secret", "count": 1})
+        {'api_key': '[REDACTED]', 'count': 1}
+    """
     if isinstance(value, EventPayload):
         value = value.model_dump(mode="python", exclude_unset=True)
     sanitized = sanitize_json_value(value)
@@ -387,6 +472,17 @@ def _sanitize_payload(value: Any, *, redact: bool = True) -> dict[str, Any]:
 
 
 def _validate_skill_snapshot(value: dict[str, Any] | None) -> dict[str, Any] | None:
+    """严格校验事件中的 Skill metadata/diagnostic 快照。
+
+    Args:
+        value: ``None`` 或只含 available、diagnostics 两个列表的字典。
+
+    Returns:
+        ``None`` 或经具体 Skill 模型规范化的 JSON 字典。
+
+    Raises:
+        ValueError: 字段集合或列表形态不合法。
+    """
     if value is None:
         return None
     from codecraft.skill.models import SkillDiagnostic, SkillMetadata

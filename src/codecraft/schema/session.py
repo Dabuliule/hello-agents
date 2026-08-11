@@ -18,6 +18,8 @@ _ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 class SessionSource(StrEnum):
+    """创建 Session 的 CLI、评测、TUI 或测试入口。"""
+
     CLI_EXEC = "cli_exec"
     CLI_DEMO = "cli_demo"
     CLI_EVAL = "cli_eval"
@@ -26,6 +28,8 @@ class SessionSource(StrEnum):
 
 
 class EvalSessionContext(BaseModel):
+    """评测 Session 与 run、task、attempt 的关联信息。"""
+
     run_id: str = Field(min_length=1)
     task_id: str = Field(min_length=1)
     attempt: int = Field(ge=1)
@@ -81,6 +85,7 @@ class SessionConfig(BaseModel):
     @field_validator("cwd")
     @classmethod
     def validate_cwd(cls, value: Path) -> Path:
+        """展开并解析工作目录，但把存在性检查延迟到执行边界。"""
         return value.expanduser().resolve()
 
     def ensure_runtime_ready(self) -> None:
@@ -91,11 +96,13 @@ class SessionConfig(BaseModel):
     @field_validator("codecraft_home")
     @classmethod
     def normalize_codecraft_home(cls, value: Path) -> Path:
+        """把 CodeCraft 数据目录规范为展开后的绝对路径。"""
         return value.expanduser().resolve()
 
     @field_validator("model_api_key_env")
     @classmethod
     def validate_model_api_key_env(cls, value: str | None) -> str | None:
+        """仅允许合法环境变量标识符，避免把密钥值误填进配置。"""
         if value is not None and not _ENV_NAME.fullmatch(value):
             raise ValueError("model_api_key_env must be an environment variable name")
         return value
@@ -112,6 +119,7 @@ class SessionConfig(BaseModel):
     @field_validator("sandbox_env_allowlist")
     @classmethod
     def validate_sandbox_env_names(cls, values: list[str]) -> list[str]:
+        """校验并按首次出现顺序去重沙箱环境变量 allowlist。"""
         invalid = [value for value in values if not _ENV_NAME.fullmatch(value)]
         if invalid:
             raise ValueError(f"invalid environment variable names: {invalid}")
@@ -122,10 +130,12 @@ class SessionConfig(BaseModel):
     def validate_mcp_servers(
         cls, values: dict[str, MCPServerSettings]
     ) -> dict[str, MCPServerSettings]:
+        """复用 ``MCPSettings`` 校验 server 名称与配置。"""
         return MCPSettings(servers=values).servers
 
     @model_validator(mode="after")
     def validate_model_token_budget(self) -> SessionConfig:
+        """确保固定输出预算和安全余量没有吃完模型上下文窗口。"""
         reserved = self.model_max_output_tokens + self.context_safety_margin_tokens
         if reserved >= self.model_context_window_tokens:
             raise ValueError(

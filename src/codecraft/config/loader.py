@@ -39,6 +39,8 @@ _PROJECT_ALLOWED_FIELDS = {
 
 @dataclass(frozen=True)
 class _ConfigLayer:
+    """一个配置文件路径及其信任来源。"""
+
     path: Path
     source: _ConfigSource
 
@@ -60,6 +62,25 @@ class ConfigOverrides:
         network_access: bool | None = None,
         codecraft_home: Path | None = None,
     ) -> ConfigOverrides:
+        """把显式 CLI 选项转换成只包含已传值的嵌套覆盖层。
+
+        Args:
+            provider: 可选模型 Provider 名称。
+            model: 可选模型名称。
+            approval_policy: 可选审批策略。
+            sandbox_mode: 可选沙箱模式。
+            network_access: 可选网络开关；``False`` 仍是显式覆盖值。
+            codecraft_home: 可选数据目录。
+
+        Returns:
+            可放在所有文件配置之后合并的 ``ConfigOverrides``。
+
+        Example:
+            >>> ConfigOverrides.from_cli(
+            ...     provider="openai", network_access=False
+            ... ).values
+            {'model': {'provider': 'openai'}, 'sandbox': {'network_access': False}}
+        """
         values: dict[str, Any] = {}
         _set_nested(values, ["model", "provider"], provider)
         _set_nested(values, ["model", "name"], model)
@@ -79,6 +100,12 @@ class ConfigLoader:
         cwd: Path | None = None,
         codecraft_home: Path | None = None,
     ) -> None:
+        """固定项目目录和用户配置根目录。
+
+        Args:
+            cwd: 查找项目 ``.codecraft/config.toml`` 的目录；默认进程 cwd。
+            codecraft_home: 用户配置、profiles 的根目录；默认 ``~/.codecraft``。
+        """
         self.cwd = (cwd or Path.cwd()).expanduser().resolve()
         self.codecraft_home = (codecraft_home or Path("~/.codecraft")).expanduser()
 
@@ -89,7 +116,20 @@ class ConfigLoader:
         config_path: Path | None = None,
         overrides: ConfigOverrides | None = None,
     ) -> RuntimeSettings:
-        """合并所有配置层，并校验成 RuntimeSettings。"""
+        """按信任和优先级合并配置层，并校验成 ``RuntimeSettings``。
+
+        Args:
+            profile: ``codecraft_home/profiles`` 下不含扩展名的 profile 名。
+            config_path: 用户显式选择、优先级高于项目配置的 TOML 文件。
+            overrides: 最后应用的命令行覆盖层。
+
+        Returns:
+            经过全部字段和跨字段约束校验的 Runtime 配置。
+
+        Raises:
+            ValueError: 项目配置越权或任意层内容不满足 RuntimeSettings。
+            tomllib.TOMLDecodeError: 配置文件不是合法 TOML。
+        """
         merged = RuntimeSettings().model_dump(mode="python")
         for layer in self._config_layers(profile=profile, config_path=config_path):
             if not layer.path.exists():
@@ -134,6 +174,7 @@ class ConfigLoader:
 
 
 def _read_toml(path: Path) -> dict[str, Any]:
+    """读取一个顶层必须为 table 的 UTF-8 TOML 配置文件。"""
     with path.open("rb") as handle:
         data = tomllib.load(handle)
     if not isinstance(data, dict):
@@ -142,6 +183,11 @@ def _read_toml(path: Path) -> dict[str, Any]:
 
 
 def _validate_project_config(path: Path, values: dict[str, Any]) -> None:
+    """阻止仓库内配置修改审批、沙箱、网络和密钥等安全设置。
+
+    项目文件是不可信仓库内容，只能设置模型非凭据字段、项目指令和 Turn
+    预算。用户显式选择的配置不经过此限制，因为该动作本身提供了授权边界。
+    """
     restricted: list[str] = []
     for section, section_value in values.items():
         allowed_fields = _PROJECT_ALLOWED_FIELDS.get(section)
@@ -167,7 +213,15 @@ def _validate_project_config(path: Path, values: dict[str, Any]) -> None:
 
 
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
-    """递归合并 dict，叶子值由 override 覆盖。"""
+    """递归合并字典，叶子或容器类型变化时由 override 完全覆盖。
+
+    Example:
+        >>> _deep_merge(
+        ...     {"model": {"name": "a", "provider": "qwen"}},
+        ...     {"model": {"name": "b"}},
+        ... )
+        {'model': {'name': 'b', 'provider': 'qwen'}}
+    """
     result = dict(base)
     for key, value in override.items():
         current = result.get(key)
@@ -179,7 +233,14 @@ def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any
 
 
 def _set_nested(values: dict[str, Any], path: list[str], value: Any) -> None:
-    """把 CLI 参数写入嵌套配置 dict，None 表示不覆盖。"""
+    """把 CLI 参数写入嵌套配置字典，``None`` 表示不覆盖。
+
+    Example:
+        >>> values = {}
+        >>> _set_nested(values, ["sandbox", "network_access"], False)
+        >>> values
+        {'sandbox': {'network_access': False}}
+    """
     if value is None:
         return
 

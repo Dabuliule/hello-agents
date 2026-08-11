@@ -13,10 +13,22 @@ REDACTED = "[REDACTED]"
 
 
 def sanitize_text(value: str) -> str:
+    """把无法编码的 Unicode surrogate 替换为安全字符。
+
+    Example:
+        >>> sanitize_text("ok" + chr(0xD800))
+        'ok?'
+    """
     return value.encode("utf-8", errors="replace").decode("utf-8")
 
 
 def sanitize_json_value(value: Any) -> Any:
+    """递归清洗 JSON 风格容器的键和值，并把 tuple 规范为 list。
+
+    Example:
+        >>> sanitize_json_value({"items": ("a", "b")})
+        {'items': ['a', 'b']}
+    """
     if isinstance(value, str):
         return sanitize_text(value)
 
@@ -58,6 +70,7 @@ def redact_sensitive_json_value(value: Any) -> Any:
 
 
 def _is_sensitive_key(key: str) -> bool:
+    """判断字段名是否表示凭据，同时保留环境变量名等描述性字段。"""
     normalized = key.lower()
     if normalized.endswith(("_env", "_field", "_name")):
         return False
