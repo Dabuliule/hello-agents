@@ -10,6 +10,8 @@ EVAL_SUITE_NAME = "codecraft-core-v1"
 
 
 class EvalCheckType(StrEnum):
+    """内置 grader 支持的精确文本、包含关系和 JSON 字段断言。"""
+
     FILE_EQUALS = "file_equals"
     FILE_CONTAINS = "file_contains"
     FILE_NOT_CONTAINS = "file_not_contains"
@@ -18,6 +20,8 @@ class EvalCheckType(StrEnum):
 
 @dataclass(frozen=True)
 class EvalCheck:
+    """一个 workspace 相对路径上的预期值与可选 JSON dotted path。"""
+
     kind: EvalCheckType
     path: str
     expected: Any
@@ -26,6 +30,8 @@ class EvalCheck:
 
 @dataclass(frozen=True)
 class EvalTask:
+    """稳定任务 ID、类别、Prompt、初始文件和全部确定性检查。"""
+
     task_id: str
     title: str
     category: str
@@ -35,7 +41,7 @@ class EvalTask:
 
 
 def get_eval_tasks() -> tuple[EvalTask, ...]:
-    """Return the stable built-in coding-agent evaluation suite."""
+    """返回覆盖创建、定点/多文件编辑、检索、指令遵循和重构的固定套件。"""
     return (
         EvalTask(
             task_id="create-welcome-file",
@@ -338,6 +344,7 @@ def get_eval_tasks() -> tuple[EvalTask, ...]:
 
 
 def seed_workspace(task: EvalTask, workspace: Path) -> None:
+    """在独立 workspace 创建任务声明的全部 UTF-8 初始文件。"""
     workspace.mkdir(parents=True, exist_ok=True)
     for relative, content in task.seed_files.items():
         path = _workspace_path(workspace, relative)
@@ -346,10 +353,16 @@ def seed_workspace(task: EvalTask, workspace: Path) -> None:
 
 
 def evaluate_task(task: EvalTask, workspace: Path) -> list[dict[str, Any]]:
+    """按任务声明顺序执行所有检查并返回可序列化 grader 结果。"""
     return [_evaluate_check(check, workspace) for check in task.checks]
 
 
 def _evaluate_check(check: EvalCheck, workspace: Path) -> dict[str, Any]:
+    """读取真实文件执行一个 check；缺失、编码、JSON/path 错误均判失败。
+
+    模型最终回答不参与 correctness 判定；actual 文本最多保留 500 字符，避免
+    失败报告被整个大文件占满。
+    """
     path = _workspace_path(workspace, check.path)
     actual: Any = None
     error: str | None = None
@@ -387,6 +400,7 @@ def _evaluate_check(check: EvalCheck, workspace: Path) -> dict[str, Any]:
 
 
 def _workspace_path(workspace: Path, relative: str) -> Path:
+    """将 POSIX 相对路径映射到 workspace，并拒绝绝对路径或 ``..`` 逃逸。"""
     pure = PurePosixPath(relative)
     if pure.is_absolute() or ".." in pure.parts:
         raise ValueError(f"eval path must be workspace-relative: {relative}")
@@ -394,6 +408,7 @@ def _workspace_path(workspace: Path, relative: str) -> Path:
 
 
 def _json_value(data: Any, path: str) -> Any:
+    """沿点分 object key 读取 JSON 值，非 object 中间节点明确报错。"""
     value = data
     for part in path.split(".") if path else ():
         if not isinstance(value, dict):
@@ -403,6 +418,7 @@ def _json_value(data: Any, path: str) -> Any:
 
 
 def _preview(value: Any, limit: int = 500) -> Any:
+    """只截断过长字符串 actual；数字、布尔、对象保持原结构。"""
     if not isinstance(value, str) or len(value) <= limit:
         return value
     return value[:limit] + "...[truncated]"

@@ -6,10 +6,12 @@ from typing import Any
 
 
 def render_eval_json(report: dict[str, Any]) -> str:
+    """渲染保留 Unicode、缩进且以换行结束的评测 JSON。"""
     return json.dumps(report, ensure_ascii=False, indent=2) + "\n"
 
 
 def render_eval_html(report: dict[str, Any]) -> str:
+    """渲染成功率、Task/Attempt 表格和 Trace 链接的自包含安全 HTML。"""
     run = report["run"]
     metrics = report["metrics"]
     title = f"CodeCraft Eval {run['run_id']}"
@@ -85,6 +87,7 @@ def render_eval_html(report: dict[str, Any]) -> str:
 
 
 def _metric(label: str, value: Any) -> str:
+    """渲染转义后的单个指标卡。"""
     return (
         f'<div class="metric"><strong>{escape(str(value))}</strong>'
         f'<span class="muted">{escape(label)}</span></div>'
@@ -92,6 +95,7 @@ def _metric(label: str, value: Any) -> str:
 
 
 def _result_row(result: dict[str, Any]) -> str:
+    """渲染 attempt 状态、失败类别、checks、成本与 Trace 链接。"""
     failed_checks = [
         _check_label(check) for check in result["checks"] if not check["passed"]
     ]
@@ -117,6 +121,7 @@ def _result_row(result: dict[str, Any]) -> str:
 
 
 def _task_row(task: dict[str, Any]) -> str:
+    """渲染跨重复次数的 Task 成功率、延迟和总 Token。"""
     success_rate = f"{task['success_rate']:.1f}%"
     return (
         "<tr>"
@@ -132,5 +137,6 @@ def _task_row(task: dict[str, Any]) -> str:
 
 
 def _check_label(check: dict[str, Any]) -> str:
+    """组合文件、可选 JSON path 与 check kind 的紧凑失败标签。"""
     suffix = f".{check['json_path']}" if check.get("json_path") else ""
     return f"{check['path']}{suffix} ({check['kind']})"

@@ -50,7 +50,26 @@ async def run_eval_suite(
     repeat: int = 1,
     on_task_complete: Callable[[int, int, dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
-    """Run fixed tasks sequentially and return a deterministic score report."""
+    """顺序运行固定任务的全部 attempts，并返回可复现聚合报告。
+
+    Args:
+        tasks: task_id 唯一的评测任务。
+        base_config: 提供模型、预算等基础设置；安全/路径字段会按 attempt 覆盖。
+        llm_providers: 真实或测试 Provider Registry。
+        output_dir: 不得含已有 run artifacts 的输出根。
+        repeat: 每个 Task 重复次数。
+        on_task_complete: 每个 attempt 完成后的同步进度回调。
+
+    Returns:
+        含 run、metrics、task summaries 和逐 attempt results 的 schema v2 报告。
+
+    Raises:
+        ValueError: repeat 非正或 task_id 重复。
+        FileExistsError: 输出根含上次评测保留目录/报告。
+
+    Tasks 严格顺序运行，避免模型并发、磁盘压力和 Provider 限流使延迟指标失去
+    可比性；重复 attempt 仍各有独立 workspace、Session ID 和 Trace。
+    """
     if repeat < 1:
         raise ValueError("repeat must be at least 1")
     task_ids = [task.task_id for task in tasks]
@@ -110,6 +129,15 @@ async def _run_task(
     output_dir: Path,
     run_id: str,
 ) -> dict[str, Any]:
+    """在隔离 workspace 运行一次真实 AgentRuntime，并以文件状态判分。
+
+    Session 强制 source=cli_eval、approval=never、workspace_write、network=False，
+    移除 user_instructions，避免本机交互和个人 Prompt 污染基准。只注册文件、
+    patch 与检索工具，不提供 Bash，降低环境差异。
+
+    Runtime 异常被记录但 finally 始终 close；Turn 终态后重新从 Store 读取事件，
+    确保指标和 Trace 基于持久化事实而非暂存队列。
+    """
     workspace = output_dir / "workspaces" / task.task_id / f"attempt-{attempt:02d}"
     seed_workspace(task, workspace)
     session_id = new_id("ses_eval_")
@@ -201,6 +229,7 @@ async def _run_task(
 
 
 def _eval_tool_registry() -> ToolRegistry:
+    """构造不含 Bash/网络/MCP 的确定性读写、patch 和搜索工具集。"""
     return ToolRegistry(
         [
             ReadFileTool(),
@@ -213,6 +242,7 @@ def _eval_tool_registry() -> ToolRegistry:
 
 
 def _ensure_new_run_directory(output_dir: Path) -> None:
+    """拒绝覆盖 .codecraft、workspaces、traces 或既有报告。"""
     reserved = (
         output_dir / ".codecraft",
         output_dir / "workspaces",
@@ -227,6 +257,7 @@ def _ensure_new_run_directory(output_dir: Path) -> None:
 
 
 def _final_status(events: list[RuntimeEvent]) -> str:
+    """反向推导最近 finish/abort/error；完全无终态按 error。"""
     for event in reversed(events):
         if event.type == RuntimeEventType.TURN_FINISHED:
             return str(event.payload.get("status") or "success")
@@ -238,6 +269,7 @@ def _final_status(events: list[RuntimeEvent]) -> str:
 
 
 def _final_answer(events: list[RuntimeEvent]) -> str:
+    """读取最近 TURN_FINISHED answer；未成功完成返回空。"""
     for event in reversed(events):
         if event.type == RuntimeEventType.TURN_FINISHED:
             return str(event.payload.get("answer") or "")

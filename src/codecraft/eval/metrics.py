@@ -16,6 +16,11 @@ TOKEN_FIELDS = (
 
 
 def summarize_events(events: list[RuntimeEvent]) -> dict[str, Any]:
+    """从一次 Session 事件聚合 Tool 终态、错误和标准 Token 字段。
+
+    total_tokens 缺失时只用 input+output 回退，不把 reasoning/cached 再重复相加；
+    布尔、负数和非数字安全归零。
+    """
     tool_results = [
         event for event in events if event.type == RuntimeEventType.TOOL_CALL_FINISHED
     ]
@@ -59,6 +64,11 @@ def classify_failure(
     checks: list[dict[str, Any]],
     tool_failure_count: int,
 ) -> str | None:
+    """按 runtime→model→abort→tool→grader 优先级归类唯一失败类型。
+
+    只有 runtime 无异常、Turn success 且全部 checks 通过才返回 None。分类顺序
+    保证一次 attempt 不会同时计入多个 failure bucket。
+    """
     if (
         runtime_error is None
         and final_status == "success"
@@ -87,6 +97,7 @@ def aggregate_metrics(
     task_count: int,
     repeat: int,
 ) -> dict[str, Any]:
+    """汇总成功率、nearest-rank 延迟、工具/错误、Token 与失败分布。"""
     passed_count = sum(result["status"] == "passed" for result in results)
     evaluation_count = len(results)
     token_usage = {
@@ -119,6 +130,7 @@ def aggregate_metrics(
 
 
 def summarize_tasks(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """按首次任务顺序聚合重复 attempts 的成功率、延迟和总 Token。"""
     grouped: dict[str, list[dict[str, Any]]] = {}
     for result in results:
         grouped.setdefault(result["task_id"], []).append(result)
@@ -151,6 +163,7 @@ def summarize_tasks(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def percentile(values: list[int], percent: int) -> int:
+    """用 nearest-rank 返回整数百分位；空输入返回 0。"""
     if not values:
         return 0
     ordered = sorted(values)
@@ -159,6 +172,7 @@ def percentile(values: list[int], percent: int) -> int:
 
 
 def _abort_reason(events: list[RuntimeEvent]) -> str | None:
+    """反向读取最近 TURN_ABORTED 的 reason。"""
     for event in reversed(events):
         if event.type == RuntimeEventType.TURN_ABORTED:
             reason = event.payload.get("reason")
@@ -167,10 +181,12 @@ def _abort_reason(events: list[RuntimeEvent]) -> str | None:
 
 
 def _non_negative_int(value: Any) -> int:
+    """把非布尔数字转成不小于零的 int，其余返回 0。"""
     if not _is_number(value):
         return 0
     return max(0, int(value))
 
 
 def _is_number(value: Any) -> bool:
+    """判断 int/float 且显式排除 Python 的 bool-int 子类关系。"""
     return not isinstance(value, bool) and isinstance(value, (int, float))
