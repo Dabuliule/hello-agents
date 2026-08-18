@@ -1,3 +1,10 @@
+"""按优先级和信任边界加载 CodeCraft TOML 配置。
+
+覆盖顺序为内置默认值 → 用户配置 → profile → 项目配置 → 显式配置文件 → CLI
+参数，后出现的叶子值覆盖先出现的值。项目配置来自当前仓库，属于不可信输入，
+因此即使优先级较高也只能修改白名单字段；优先级和授权能力是两套独立规则。
+"""
+
 from __future__ import annotations
 
 import tomllib
@@ -92,7 +99,12 @@ class ConfigOverrides:
 
 
 class ConfigLoader:
-    """按默认值、全局配置、profile、项目配置和显式参数加载配置。"""
+    """发现、合并并校验一次 CLI 启动所使用的所有配置层。
+
+    文件不存在时对应层被跳过；文件存在但 TOML、字段或跨字段约束非法时立即
+    失败，不使用静默降级后的部分配置。Loader 返回 ``RuntimeSettings``，CLI
+    bootstrap 随后会把它转换为可持久化的 ``SessionConfig``。
+    """
 
     def __init__(
         self,
@@ -150,7 +162,18 @@ class ConfigLoader:
         profile: str | None,
         config_path: Path | None,
     ) -> list[_ConfigLayer]:
-        """返回带来源的配置层；后面的层覆盖前面的层。"""
+        """返回按低到高优先级排列、带信任来源的配置文件层。
+
+        Args:
+            profile: 可选的用户 profile 名称。
+            config_path: 用户通过 ``--config`` 显式选择的文件。
+
+        Returns:
+            user、可选 profile、project、可选 explicit 组成的有序列表。
+
+        如果显式路径正是项目 ``.codecraft/config.toml``，只把它作为 explicit
+        加载一次。用户的显式选择构成授权，因此该次加载不应用项目字段白名单。
+        """
         project_path = self.cwd / ".codecraft" / "config.toml"
         explicit_path = config_path.expanduser() if config_path else None
         layers = [

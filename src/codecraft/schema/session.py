@@ -36,7 +36,15 @@ class EvalSessionContext(BaseModel):
 
 
 class SessionConfig(BaseModel):
-    """启动或恢复 session 所需的完整运行配置。"""
+    """启动或恢复 Session 所需的完整、可版本化运行配置快照。
+
+    与按 TOML section 组织的 ``RuntimeSettings`` 不同，本模型按执行时消费方式
+    展平字段，并随 ``SESSION_STARTED`` 事件持久化。Resume 使用日志中的快照，
+    不重新读取当前磁盘配置，从而保持原 Session 的模型、权限和预算语义。
+
+    ``extra='forbid'`` 和独立 ``schema_version`` 防止未知字段或未来版本被旧
+    Runtime 部分解释；依赖真实文件系统的 cwd 存在性检查延迟到执行边界。
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -89,7 +97,14 @@ class SessionConfig(BaseModel):
         return value.expanduser().resolve()
 
     def ensure_runtime_ready(self) -> None:
-        """Validate environment-dependent preconditions at an execution boundary."""
+        """在创建或恢复 Thread 前检查依赖当前环境的工作目录条件。
+
+        Raises:
+            ValueError: ``cwd`` 当前不存在或不是目录。
+
+        Pydantic 构造阶段只规范化路径，使历史 SessionConfig 即使指向暂时离线的
+        路径也仍可被读取和诊断；只有真正执行 Agent 时才要求目录可用。
+        """
         if not self.cwd.exists() or not self.cwd.is_dir():
             raise ValueError("cwd must be an existing directory")
 

@@ -1,3 +1,10 @@
+"""配置文件合并阶段使用的强类型设置模型。
+
+这些模型描述 TOML 中按 section 组织的用户配置，并在所有配置层合并后执行字段
+和跨字段校验。它们是创建 Session 前的中间表示；真正会随事件日志持久化、用于
+Resume 的执行快照是 ``schema.session.SessionConfig``。
+"""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -13,7 +20,11 @@ _ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 class ModelSettings(BaseModel):
-    """模型连接标识与上下文、输出 Token 预算。"""
+    """模型连接标识与上下文、输出 Token 预算。
+
+    ``api_key_env`` 只保存环境变量名称，不保存密钥值。上下文窗口和最大输出
+    先做各自范围校验，随后由 ``RuntimeSettings`` 检查它们与安全余量的关系。
+    """
 
     provider: str = "qwen"
     name: str = "qwen-plus"
@@ -83,6 +94,10 @@ class TurnSettings(BaseModel):
 class RuntimeSettings(BaseModel):
     """配置文件各 section 合并后的强类型 Runtime 设置。
 
+    ``ConfigLoader`` 先以本类默认值为基础递归合并各配置层，最后只调用一次
+    ``model_validate``。因此局部 TOML section 可以只覆盖一个叶子字段，同时
+    未知字段和跨 section 的非法预算仍会在统一边界被 Pydantic 拒绝。
+
     Example:
         >>> settings = RuntimeSettings()
         >>> (settings.model.provider, settings.sandbox.network_access)
@@ -99,7 +114,14 @@ class RuntimeSettings(BaseModel):
 
     @model_validator(mode="after")
     def validate_model_token_budget(self) -> RuntimeSettings:
-        """确保最大输出与安全余量之和小于模型上下文窗口。"""
+        """确保模型上下文窗口仍为输入消息保留至少一个 Token 的空间。
+
+        Returns:
+            预算关系合法的当前设置对象。
+
+        Raises:
+            ValueError: 最大输出与安全余量已经占满或超过上下文窗口。
+        """
         reserved = self.model.max_output_tokens + self.turn.context_safety_margin_tokens
         if reserved >= self.model.context_window_tokens:
             raise ValueError(

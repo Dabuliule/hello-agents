@@ -217,7 +217,17 @@ def build_runtime(
 
 
 def build_skill_registry(config: SessionConfig) -> SkillRegistry:
-    """从用户级 codecraft_home/skills 与项目 .codecraft/skills 发现 Skill。"""
+    """发现用户级与项目级 Skill，并合并为当前 Runtime 的唯一 Registry。
+
+    Args:
+        config: 提供 ``codecraft_home`` 和 Session workspace 根的配置快照。
+
+    Returns:
+        已扫描 ``codecraft_home/skills`` 与 ``cwd/.codecraft/skills`` 的 Registry。
+
+    Prompt 目录和 ``load_skill`` 工具必须共享这一对象，否则模型看到的可用 Skill
+    可能与工具实际可加载的 Skill 不一致。
+    """
     return SkillRegistry.discover(
         user_root=config.codecraft_home / "skills",
         project_root=config.cwd / ".codecraft" / "skills",
@@ -225,7 +235,18 @@ def build_skill_registry(config: SessionConfig) -> SkillRegistry:
 
 
 def build_provider_registry(config: SessionConfig) -> LLMProviderRegistry:
-    """注册 OpenAI/Qwen/DeepSeek，并只给当前 Provider 应用配置覆盖。"""
+    """注册全部内置 Provider，并为当前 Session 解析连接配置。
+
+    Args:
+        config: 指定当前 Provider、API Key 环境变量名和可选 base URL 的快照。
+
+    Returns:
+        名称唯一的 OpenAI、Qwen、DeepSeek Provider Registry。
+
+    Runtime 创建 Thread 时按 ``model_provider`` 取一个 Provider。显式 API Key
+    环境变量名只属于当前 Provider；其他 Provider 保留各自默认名称，避免一次
+    Session 的配置误传给不同服务。这里只传递环境变量名，不读取或持久化密钥。
+    """
     return LLMProviderRegistry(
         [
             OpenAIProvider(
@@ -245,13 +266,21 @@ def build_provider_registry(config: SessionConfig) -> LLMProviderRegistry:
 
 
 def provider_api_key_env(config: SessionConfig, provider: str) -> str | None:
-    """非当前 Provider 忽略 Session 的显式 key env，再使用其默认环境名。"""
+    """为 Registry 中一个 Provider 选择显式或默认 API Key 环境变量名。
+
+    当前 Session 选中的 Provider 可以使用 ``model_api_key_env``；其他 Provider
+    必须忽略它并使用自己的默认名称，防止把例如 Qwen 密钥名称传给 OpenAI。
+    """
     configured = config.model_api_key_env if config.model_provider == provider else None
     return model_api_key_env(provider, configured)
 
 
 def model_api_key_env(provider: str, configured: str | None) -> str | None:
-    """返回显式名称，或已知 Provider 的标准 API Key 环境变量。"""
+    """返回显式名称，或已知 Provider 的标准 API Key 环境变量名。
+
+    未知 Provider 且没有显式配置时返回 ``None``，让具体 Provider 在自身配置
+    边界给出可操作错误；本函数始终不读取环境变量的值。
+    """
     if configured:
         return configured
     if provider == "qwen":
@@ -272,6 +301,17 @@ def build_tool_registry(
 
     无 config 的测试/兼容路径使用 ScanRetriever 与显式 ProcessBackend；正常
     Runtime 按配置创建 OS/container 后端，并注册 scan/lexical/symbol。
+
+    Args:
+        config: 可选 Session 快照；缺失时启用不依赖用户目录的兼容工具集。
+        skill_registry: 可选的共享 Skill Registry。
+
+    Returns:
+        包含内置工具、可选 ``load_skill`` 和启用 MCP Provider 的 Tool Registry。
+
+    有配置的生产路径根据 Session 选择真正的沙箱后端，并让 workspace search
+    同时具备实时 scan、SQLite lexical 和 symbol 检索。MCP 先注册为异步
+    Provider，工具发现和连接生命周期由 ``ToolRegistry.start/close`` 管理。
     """
     if config is None:
         context_engine = ContextEngine()
