@@ -61,6 +61,19 @@ def bootstrap_runtime(
 ) -> RuntimeBootstrapResult:
     """从 CLI 选择加载 SessionConfig 并构造匹配的完整 Runtime。
 
+    Args:
+        source: 当前会话来自一次性 CLI、TUI 或其他受支持入口。
+        provider: 可选的 Provider CLI 覆盖。
+        model: 可选的模型 CLI 覆盖。
+        codecraft_home: 用户配置、Session 日志、Skill 和索引的存储根。
+        config_path: 可选的最高优先级 TOML 配置。
+        profile: 可选的用户 profile。
+        approval_policy: 可选的审批策略覆盖。
+        network: 可选的网络能力覆盖。
+
+    Returns:
+        使用同一份解析结果构造的 ``SessionConfig`` 与 ``AgentRuntime`` 对。
+
     Example:
         ``bootstrap_runtime(source=SessionSource.CLI_EXEC, provider=None, ...)``
         会按配置优先级生成新 session_id，并装配 Provider、Tool、MCP 和 Skill。
@@ -94,6 +107,12 @@ def load_session_config(
     当前 ``Path.cwd()`` 同时作为配置发现根和 Session cwd；CLI 的 None 表示
     不覆盖较低层，显式 False 仍可关闭网络。Provider 的 API key env 使用
     用户配置优先、已知 Provider 默认名兜底。
+
+    Returns:
+        包含新 Session ID、权限边界和全部执行预算的持久化配置快照。
+
+    配置在创建 Session 前解析为快照，后续 Turn 不重新读取磁盘配置。这保证
+    同一 Session 的执行语义稳定，也让 Resume 能恢复当时真正使用的规则。
     """
     settings = ConfigLoader(
         cwd=Path.cwd(),
@@ -156,6 +175,19 @@ def build_runtime(
     注入自定义 ToolRegistry 时，如果 Skill 非空就确保存在绑定同一个 Registry
     的 LoadSkillTool；名称已被其他 Tool 占用则拒绝，避免 Prompt 与工具激活源
     不一致。
+
+    Args:
+        config: 已解析且将在 Session 中持久化的配置快照。
+        llm_providers: 可选的自定义 Provider Registry，主要用于测试和嵌入场景。
+        tool_registry: 可选的自定义 Tool Registry。
+        skill_registry: 可选的预构造 Skill Registry。
+
+    Returns:
+        可以创建或恢复 AgentThread 的完整运行时。
+
+    Raises:
+        ValueError: 自定义 Tool Registry 中的 ``load_skill`` 与当前 Skill Registry
+            不一致。该检查防止 Prompt 展示的 Skill 与工具实际加载源发生漂移。
     """
     index = RepositoryIndex(config.codecraft_home / "indexes")
     skills = (

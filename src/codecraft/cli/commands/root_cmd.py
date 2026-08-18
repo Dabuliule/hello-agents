@@ -12,7 +12,14 @@ from codecraft.tui import CodeCraftTUI, TUIThemeMode, resolve_color_scheme
 
 
 def register_root_command(app: typer.Typer) -> None:
-    """注册无子命令时启动交互 TUI 的根 callback。"""
+    """注册无子命令时启动交互 TUI 的根 callback。
+
+    Args:
+        app: 已创建的 CodeCraft Typer 应用。
+
+    根 callback 与 ``exec`` 等子命令共用配置和 Runtime builder。它只负责把
+    终端选项转换成 TUI 启动参数，不实现 Session 调度或 Agent Loop。
+    """
 
     @app.callback(invoke_without_command=True)
     def root_command(
@@ -66,7 +73,12 @@ def register_root_command(app: typer.Typer) -> None:
     ) -> None:
         """验证 resume 选项、装配 CLI_TUI Runtime 并以解析后的主题运行 Textual。
 
-        Typer 已选择子命令时立即返回，避免根 callback 重复启动 TUI。
+        Typer 已选择子命令时立即返回，避免执行 ``codecraft exec`` 等命令时根
+        callback 又启动 TUI。``--resume`` 与 ``--last`` 都会改变恢复目标，因此
+        二者互斥；具体恢复和 Session 执行仍由 TUI 使用同一个 AgentRuntime 完成。
+
+        Raises:
+            typer.BadParameter: 同时提供 ``--resume`` 和 ``--last``。
         """
         if context.invoked_subcommand is not None:
             return

@@ -14,7 +14,14 @@ from codecraft.schema.session import SessionSource
 
 
 def register_exec_command(app: typer.Typer) -> None:
-    """向 Typer 应用注册一次性 ``exec`` Agent 任务。"""
+    """向 Typer 应用注册一次性 ``exec`` Agent 任务。
+
+    Args:
+        app: 已创建的 CodeCraft Typer 应用。
+
+    ``exec`` 是非交互式外壳：负责参数解析、退出码和终端渲染。模型—工具循环
+    始终由 Core Runtime 执行，所以它与 TUI 共享审批、超时和事件语义。
+    """
 
     @app.command("exec")
     def exec_command(
@@ -83,7 +90,25 @@ async def run_exec(
     network: bool | None,
     debug: bool = False,
 ) -> int:
-    """构造 CLI_EXEC Runtime、提交一条任务、渲染至终态并始终关闭资源。"""
+    """构造 CLI_EXEC Runtime、提交一条任务并渲染到 Turn 终态。
+
+    Args:
+        task: 提交给 Agent 的用户任务文本。
+        provider: 可选的 Provider CLI 覆盖。
+        model: 可选的模型 CLI 覆盖。
+        codecraft_home: 配置、Session 和索引存储根。
+        config_path: 可选的最高优先级显式配置文件。
+        profile: 可选的用户 profile。
+        approval_policy: 可选的审批策略覆盖。
+        network: 可选的网络能力覆盖。
+        debug: 是否渲染详细 RuntimeEvent。
+
+    Returns:
+        Turn 成功返回 ``0``；可控启动错误或 Turn 中止返回非零值。
+
+    ``finally`` 始终关闭 Runtime，因为 Provider 客户端和动态 Tool Provider 可能
+    持有异步资源。命令层只消费事件，不直接执行模型调用或工具。
+    """
     from codecraft.cli import app as cli_app
 
     config = cli_app._load_session_config(
