@@ -1,3 +1,5 @@
+"""面向 CLI/TUI 的 Session facade 与 RuntimeEvent 异步队列。"""
+
 from __future__ import annotations
 
 import asyncio
@@ -12,28 +14,41 @@ from codecraft.schema.session import SessionSnapshot
 
 
 class AgentThread:
-    """面向 CLI/UI 的 session facade。
+    """面向 CLI/UI 的 Session facade，不引入第二个持久化身份。
 
-    `AgentThread` 把 Session 的事件总线转成一个异步队列，让调用方可以像读
-    stream 一样消费事件，同时隐藏 session 的调度细节。
+    ``AgentThread`` 把 Session 的事件总线转成 FIFO 异步队列，让调用方可以像
+    消费 stream 一样读取 RuntimeEvent，同时隐藏 Session 的状态锁、Turn task 和
+    Conversation mutation。Thread 是进程内句柄；可恢复身份始终是 ``session_id``。
     """
 
     def __init__(self, session: Session) -> None:
-        """订阅 Session EventBus，并把每个事件捕获进 FIFO 异步队列。"""
+        """订阅 Session EventBus，并把后续事件捕获进 FIFO 异步队列。
+
+        Args:
+            session: 已构造但尚未发出首个公开事件的 Session。
+
+        Runtime 必须在 ``SESSION_STARTED``/``SESSION_RESTORED`` 之前创建 Thread，
+        否则队列会漏掉会话首事件。Queue 保留 EventBus 的发布顺序，并为 UI 消费
+        速度与 Session 事件产生速度提供异步解耦。
+        """
         self.session = session
         self._events: asyncio.Queue[RuntimeEvent] = asyncio.Queue()
         self.session.event_bus.subscribe(self._capture_event)
 
     async def submit(self, input: SessionInput) -> str:
-        """提交消息/中止/审批输入，返回新 Turn ID 或受控操作 ID。"""
+        """提交用户消息、中止或审批输入，并返回原 ``input_id``。
+
+        Thread 不解释输入内容；类型分发、状态检查和 Turn 调度全部委托给 Session。
+        返回 input ID 便于调用方关联请求，Turn ID 则由 Session 启动 Turn 时另行生成。
+        """
         return await self.session.submit(input)
 
     async def next_event(self) -> RuntimeEvent:
-        """等待并取出下一条 RuntimeEvent。"""
+        """等待并取出下一条 RuntimeEvent；没有事件时挂起而不轮询。"""
         return await self._events.get()
 
     async def events(self) -> AsyncIterator[RuntimeEvent]:
-        """持续产出事件，直到收到 SESSION_CLOSED。"""
+        """按发布顺序持续产出事件，收到 ``SESSION_CLOSED`` 后结束迭代。"""
         while True:
             event = await self.next_event()
             yield event

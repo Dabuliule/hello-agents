@@ -1,3 +1,5 @@
+"""统一管理静态工具与需要异步发现的动态工具 Provider。"""
+
 from __future__ import annotations
 
 import asyncio
@@ -11,7 +13,12 @@ from codecraft.tool.provider import AsyncToolProvider, ToolProvider
 
 
 class ToolRegistry:
-    """按 tool name 管理所有可调用 tool。"""
+    """按唯一名称管理当前 Runtime 可以暴露给模型的全部 Tool。
+
+    构造时传入的内置 Tool 会立即进入 ``_tools``，不需要单独启动。MCP 等
+    ``AsyncToolProvider`` 构造时只登记 Provider 本身；它们必须等 ``start()``
+    建立连接、发现远端工具并完成全局重名校验后，工具才会原子加入 Registry。
+    """
 
     def __init__(
         self,
@@ -55,7 +62,15 @@ class ToolRegistry:
             self.register(tool)
 
     def register_async_provider(self, provider: AsyncToolProvider) -> None:
-        """在生命周期开始前登记名称唯一的异步 Provider。"""
+        """在生命周期开始前登记 Provider，但暂不连接或发布其动态工具。
+
+        Args:
+            provider: 具有稳定名称、可异步启动和关闭的工具来源。
+
+        Raises:
+            RuntimeError: Registry 已经开始启动或仍有失败 Provider 等待清理。
+            ValueError: Provider 名称为空或与已登记 Provider 重复。
+        """
         if self._started or self._pending_provider_closes:
             raise RuntimeError(
                 "cannot add an async tool provider after registry lifecycle begins"
@@ -68,10 +83,17 @@ class ToolRegistry:
         self._async_providers[name] = provider
 
     async def start(self) -> None:
-        """串行启动 Provider，全部成功后才原子发布其工具。
+        """完成动态 Provider 初始化，全部成功后才原子发布其工具。
 
         中途失败会按已启动逆序 close；未清理成功的 Provider 留在 pending，
         禁止再次 start，直到 close 重试完成，避免资源泄漏和重复工具曝光。
+
+        对只有内置工具的 Registry，本方法除了把生命周期标记为 started 外几乎
+        是 no-op。对 MCP Registry，它会依次启动 server、完成握手与工具发现，
+        先在临时集合校验所有名称，最后统一写入 ``_tools``。这样模型不会看到
+        “一部分 MCP 已加载、另一部分启动失败”的半成品工具目录。
+
+        本方法幂等；已经成功启动后再次调用会直接返回。
         """
         async with self._lifecycle_lock:
             if self._started:

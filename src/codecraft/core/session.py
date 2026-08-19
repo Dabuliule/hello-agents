@@ -40,9 +40,10 @@ class SessionStatus(StrEnum):
 class Session:
     """一个可持续追加事件的 agent 会话。
 
-    `Session` 是运行时的调度中心：接收输入、串行启动 turn、分发审批决定，
-    并把所有关键状态写成 RuntimeEvent。外层 UI 不直接读取内部状态，而是
-    通过 event stream 观察会话变化。
+    ``Session`` 是运行时的长生命周期状态和调度中心：接收输入、串行启动 Turn、
+    分发审批决定，并把所有关键状态写成 RuntimeEvent。它拥有 Conversation、
+    active Turn task、状态机和事件序号；外层 UI 只通过 AgentThread 输入与事件流
+    交互，不直接修改这些内部状态。
     """
 
     def __init__(
@@ -61,8 +62,21 @@ class Session:
     ) -> None:
         """装配会话状态、依赖、三类锁、输入队列和可选恢复历史。
 
+        Args:
+            config: 当前 Session 固定使用并可持久化的执行配置。
+            session_store: 所有 RuntimeEvent 的 JSONL 持久化边界。
+            llm_provider: 已由 Runtime 按配置选择的模型 Provider。
+            tool_registry: 已完成启动和动态工具发现的 Registry。
+            approval_manager: 可选的共享审批管理器。
+            tool_result_observers: ToolRunner 成功结果的后处理器。
+            event_bus: 可选外部总线；缺失时为该 Session 创建独立 EventBus。
+            conversation: Resume 时重建的历史；新 Session 使用空 Conversation。
+            seq: 已持久化的最后事件序号；新 Session 从零开始。
+            skill_registry: 当前 Runtime 发现的 Skill 集合。
+
         ``seq`` 应等于恢复日志最后事件序号；默认 Reviewer 是能接收 Thread
         旁路审批的 ThreadApprovalReviewer。Session 始终只保存一个 active_turn。
+        构造阶段不启动 Turn，也不发事件，确保 AgentThread 可以先完成订阅。
         """
         self.session_id = config.session_id
         self.config = config
