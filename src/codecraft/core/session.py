@@ -107,7 +107,24 @@ class Session:
         self._closed_event_emitted = False
 
     async def submit(self, input: SessionInput) -> str:
-        """提交用户输入、审批结果或中断请求。"""
+        """按数据面或控制面语义分发一条结构化输入。
+
+        Args:
+            input: 已通过 payload/type 一致性校验的 SessionInput。
+
+        Returns:
+            原样返回 ``input.input_id``，供调用方关联本次提交。
+
+        Raises:
+            RuntimeError: 已关闭 Session 收到用户消息或审批决定。
+            TypeError: input type 与具体 payload 模型不一致。
+            ValueError: 收到未知输入类型。
+
+        USER_MESSAGE 在 ``_state_lock`` 内进入 FIFO 队列，释放锁后尝试启动 Turn；
+        INTERRUPT 和 APPROVAL_DECISION 是当前 Turn 的旁路控制输入，不进入队列。
+        如果审批决定排在用户消息队列中，正在等待该决定的 Turn 将无法结束，形成
+        自我死锁。
+        """
         if input.type == SessionInputType.USER_MESSAGE:
             async with self._state_lock:
                 if self.status == SessionStatus.CLOSED:
@@ -131,7 +148,18 @@ class Session:
         raise ValueError(f"unsupported session input type: {input.type}")
 
     def submit_approval_decision(self, input: SessionInput) -> None:
-        """把用户审批结果交给正在等待的 reviewer。"""
+        """把用户审批结果直接交给正在等待同一 approval ID 的 Reviewer。
+
+        Args:
+            input: payload 必须是 ``ApprovalDecisionPayload`` 的控制输入。
+
+        Raises:
+            TypeError: payload 类型不匹配。
+            RuntimeError: 当前 Reviewer 不支持由 Thread 旁路提交决定。
+
+        本方法不修改输入队列或创建 Turn；Reviewer 内部 Future 被唤醒后，原 active
+        Turn 才能从工具审批等待点继续执行。
+        """
         if not isinstance(input.payload, ApprovalDecisionPayload):
             raise TypeError("approval input has the wrong payload type")
         decision = ApprovalDecision(
@@ -148,7 +176,16 @@ class Session:
         reviewer.decide(decision)
 
     async def start_turn_if_idle(self) -> None:
-        """如果当前空闲，就从输入队列取一条消息启动新 turn。"""
+        """原子取得唯一执行权，从 FIFO 队列取一条消息启动后台 Turn。
+
+        ``_state_lock`` 把检查 IDLE、检查 ``_runner_task``、出队、更新状态和发布
+        Task 变成一个不可交错的临界区。多个并发 submit 即使都调用本方法，也只有
+        第一个持锁者能创建 Turn；其余调用看到 RUNNING 或已有 Task 后直接返回。
+
+        Turn 通过 ``asyncio.create_task`` 在后台运行，因此 submit 不等待模型完成。
+        当前 Task 在 ``_run_turn`` 的 finally 中清理后，会再次调用本方法继续处理
+        队列中的下一条用户消息。
+        """
         async with self._state_lock:
             if self.status != SessionStatus.IDLE or self._runner_task is not None:
                 return
@@ -202,7 +239,11 @@ class Session:
             return event
 
     async def interrupt(self, reason: str) -> None:
-        """取消当前 turn，并等待后台 task 完成清理。"""
+        """幂等取消当前 Turn，并 shield 等待其终态事件和状态清理完成。
+
+        中断是旁路控制操作，不进入用户消息队列。锁内只改变状态并发出 cancel，
+        锁外等待 Task，避免 Turn finally 获取 ``_state_lock`` 时发生死锁。
+        """
         async with self._state_lock:
             if self.status == SessionStatus.CLOSED:
                 return
@@ -230,7 +271,12 @@ class Session:
             self._closed_event_emitted = True
 
     async def wait_until_idle(self) -> None:
-        """等待当前及已排队 turn 全部处理完成。"""
+        """等待当前及已排队 Turn 全部处理完成。
+
+        每轮在锁内读取当前 Task、锁外 shield 等待。Task finally 可能立即启动下一
+        条排队消息，因此方法循环检查，直到 ``_runner_task`` 真正变为 ``None``。
+        ``shield`` 防止等待者自身被取消时顺带取消 Session 正在执行的 Turn。
+        """
         while True:
             async with self._state_lock:
                 task = self._runner_task
@@ -239,7 +285,15 @@ class Session:
             await asyncio.shield(task)
 
     async def _run_turn(self, turn: Turn, user_input: SessionInput) -> None:
-        """包装 turn.run，确保异常也会变成可追踪的事件。"""
+        """在 Session 所有的后台 Task 中限时运行 Turn，并统一收口生命周期。
+
+        Turn 超时、显式取消和普通异常分别转换为稳定的终态事件。``finally`` 在
+        ``_state_lock`` 内仅清理仍属于当前 Task/Turn 的引用，防止过期 Task 覆盖
+        新状态；Session 未关闭时恢复 IDLE，并在锁外调度下一条排队消息。
+
+        Session 在这一层拥有整轮 deadline，所以模型、工具、Observer 和审批等待
+        都不能逃出 ``turn_timeout_seconds``。
+        """
         deadline = asyncio.timeout(turn.context.turn_timeout_seconds)
         try:
             async with deadline:

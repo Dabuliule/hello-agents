@@ -1,3 +1,5 @@
+"""进入 Session 的数据面消息与控制面输入模型。"""
+
 from __future__ import annotations
 
 from datetime import UTC, datetime
@@ -10,7 +12,11 @@ from codecraft.schema.safety import sanitize_text
 
 
 class SessionInputType(StrEnum):
-    """进入 AgentThread 的数据输入与旁路控制输入类型。"""
+    """进入 AgentThread 的数据输入与旁路控制输入类型。
+
+    USER_MESSAGE 按 FIFO 排队并创建新 Turn；INTERRUPT 和 APPROVAL_DECISION 必须
+    直接作用于当前 Turn，不能排在它后面，否则等待审批或取消的 Turn 无法结束。
+    """
 
     USER_MESSAGE = "user_message"
     INTERRUPT = "interrupt"
@@ -69,6 +75,9 @@ SessionInputPayload = UserMessagePayload | InterruptPayload | ApprovalDecisionPa
 
 class SessionInput(BaseModel):
     """带 ID、时间戳和按 type 严格分派 payload 的 Thread 输入。
+
+    ``input_id`` 标识调用方提交的输入，不是 Turn ID。只有 USER_MESSAGE 被 Session
+    从队列取出时才会生成新的 Turn ID；审批与中止输入不会创建 Turn。
 
     Example:
         >>> item = SessionInput.user_message("inp_1", "你好")
