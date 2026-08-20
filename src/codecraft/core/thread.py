@@ -56,11 +56,21 @@ class AgentThread:
                 return
 
     async def interrupt(self, reason: str = "user_interrupt") -> None:
-        """请求幂等中止当前 active Turn。"""
+        """请求幂等中止当前 active Turn，并等待其终态清理完成。
+
+        Args:
+            reason: 写入 ``TURN_ABORTED`` 的稳定取消原因。
+
+        中止只结束当前 Turn；Session 未关闭时仍可处理已排队或后续用户消息。
+        """
         await self.session.interrupt(reason)
 
     async def close(self) -> None:
-        """关闭 Session，并在必要时先中止 active Turn。"""
+        """永久关闭 Session，并在必要时先中止和收口 active Turn。
+
+        返回前 ``SESSION_CLOSED`` 已持久化；关闭后不能再提交用户消息或审批决定。
+        Runtime 拥有的 Provider/Tool 资源仍由 ``AgentRuntime.close`` 单独释放。
+        """
         await self.session.close()
 
     def list_pending_approvals(self) -> list[ApprovalRequest]:

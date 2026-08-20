@@ -256,7 +256,17 @@ class Session:
         await asyncio.shield(task)
 
     async def close(self) -> None:
-        """串行、幂等关闭；先取消并等待 active Turn，再持久化 SESSION_CLOSED。"""
+        """串行、幂等关闭；先收口 active Turn，再持久化 SESSION_CLOSED。
+
+        ``_close_lock`` 保证并发 close 只有一个协程执行关闭协议。锁内先把 status
+        设为 CLOSED，再取得并取消当前 Task；这样 Task finally 不会启动队列中的
+        下一条消息。等待发生在 ``_state_lock`` 外，且使用 shield 保护 Turn 的
+        ``TURN_ABORTED`` 记录和 finally 清理不被等待者取消传播打断。
+
+        ``SESSION_CLOSED`` 只在 active Task 完全结束后发出，因此事件日志中的
+        生命周期顺序稳定为 Turn 终态在前、Session 终态在后。重复调用通过
+        ``_closed_event_emitted`` 直接返回，不会产生多个关闭事件。
+        """
         async with self._close_lock:
             if self._closed_event_emitted:
                 return
