@@ -6,7 +6,8 @@ from pathlib import Path
 from codecraft.approval.manager import ApprovalManager
 from codecraft.approval.policy import ApprovalPolicy
 from codecraft.approval.thread_reviewer import ThreadApprovalReviewer
-from codecraft.config import ConfigLoader, ConfigOverrides
+from codecraft.config import ConfigLoader, ConfigOverrides, ensure_user_config
+from codecraft.config.provider_defaults import default_api_key_env
 from codecraft.core.ids import new_id
 from codecraft.core.runtime import AgentRuntime
 from codecraft.core.session_store import SessionStore
@@ -114,6 +115,10 @@ def load_session_config(
     配置在创建 Session 前解析为快照，后续 Turn 不重新读取磁盘配置。这保证
     同一 Session 的执行语义稳定，也让 Resume 能恢复当时真正使用的规则。
     """
+    # CLI/TUI 第一次真正创建 Session 时给用户落下一份可见默认配置。初始化在
+    # ConfigLoader 之前完成，使它立即参与正常优先级合并；排他创建保证已有文件
+    # 以及并发启动时另一个进程刚写好的文件都不会被覆盖。
+    ensure_user_config(codecraft_home)
     settings = ConfigLoader(
         cwd=Path.cwd(),
         codecraft_home=codecraft_home,
@@ -283,13 +288,7 @@ def model_api_key_env(provider: str, configured: str | None) -> str | None:
     """
     if configured:
         return configured
-    if provider == "qwen":
-        return "DASHSCOPE_API_KEY"
-    if provider == "openai":
-        return "OPENAI_API_KEY"
-    if provider == "deepseek":
-        return "DEEPSEEK_API_KEY"
-    return None
+    return default_api_key_env(provider)
 
 
 def build_tool_registry(

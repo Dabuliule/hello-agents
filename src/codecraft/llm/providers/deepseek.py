@@ -2,6 +2,10 @@ from __future__ import annotations
 
 from typing import Any
 
+from codecraft.config.provider_defaults import (
+    DEEPSEEK_API_KEY_ENV,
+    DEEPSEEK_BASE_URL,
+)
 from codecraft.llm.providers.chat import ChatCompletionsProvider
 
 
@@ -9,14 +13,14 @@ class DeepSeekProvider(ChatCompletionsProvider):
     """通过 OpenAI 兼容端点调用 DeepSeek Chat Completions。"""
 
     name = "deepseek"
-    DEFAULT_BASE_URL = "https://api.deepseek.com"
+    DEFAULT_BASE_URL = DEEPSEEK_BASE_URL
 
     def __init__(
         self,
         *,
         client: Any | None = None,
         api_key: str | None = None,
-        api_key_env: str | None = "DEEPSEEK_API_KEY",
+        api_key_env: str | None = DEEPSEEK_API_KEY_ENV,
         base_url: str | None = None,
     ) -> None:
         """配置 DeepSeek Chat Completions Provider。

@@ -1,4 +1,8 @@
 from codecraft.config.loader import ConfigLoader, ConfigOverrides
+from codecraft.config.initializer import (
+    ensure_user_config,
+    render_default_user_config,
+)
 from codecraft.config.settings import (
     ApprovalSettings,
     InstructionSettings,
@@ -14,6 +18,7 @@ __all__ = [
     "ApprovalSettings",
     "ConfigLoader",
     "ConfigOverrides",
+    "ensure_user_config",
     "InstructionSettings",
     "ModelSettings",
     "MCPServerSettings",
@@ -21,6 +26,7 @@ __all__ = [
     "MCPToolPolicySettings",
     "PathsSettings",
     "RuntimeSettings",
+    "render_default_user_config",
     "SandboxSettings",
     "TurnSettings",
 ]

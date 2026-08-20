@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from codecraft.config.provider_defaults import OPENAI_API_KEY_ENV
 from codecraft.llm.providers.responses import ResponsesProvider
 
 
@@ -15,7 +16,7 @@ class OpenAIProvider(ResponsesProvider):
         *,
         client: Any | None = None,
         api_key: str | None = None,
-        api_key_env: str | None = "OPENAI_API_KEY",
+        api_key_env: str | None = OPENAI_API_KEY_ENV,
         base_url: str | None = None,
     ) -> None:
         """配置 OpenAI Responses API Provider。

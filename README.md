@@ -220,6 +220,12 @@ CLI explicit options / --config
 > built-in defaults
 ```
 
+On the first CLI/TUI startup that creates a new session, CodeCraft creates
+`~/.codecraft/config.toml` from its current defaults if the file is missing. Creation
+is exclusive so concurrent startups are safe, and an existing file is never
+overwritten. Package installation itself does not mutate the home directory. The
+generated file stores only the API-key environment variable name, never its value.
+
 The project file is an untrusted repository input, so it may override only model
 selection and token budgets, instructions, and turn limits. Approval, sandbox,
 runtime paths, provider connection fields, environment forwarding, and MCP server
@@ -227,7 +233,7 @@ commands must come from the user config, a profile, or an explicitly selected
 `--config` file. Passing the project file itself through `--config` is therefore an
 explicit trust decision.
 
-Recommended user-level config:
+The generated user-level config starts with these values:
 
 ```toml
 # ~/.codecraft/config.toml

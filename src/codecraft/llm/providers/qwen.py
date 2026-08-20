@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from codecraft.config.provider_defaults import QWEN_API_KEY_ENV, QWEN_BASE_URL
 from codecraft.llm.providers.chat import ChatCompletionsProvider
 
 
@@ -9,14 +10,14 @@ class QwenProvider(ChatCompletionsProvider):
     """通过 DashScope 兼容端点调用 Qwen Chat Completions。"""
 
     name = "qwen"
-    DEFAULT_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    DEFAULT_BASE_URL = QWEN_BASE_URL
 
     def __init__(
         self,
         *,
         client: Any | None = None,
         api_key: str | None = None,
-        api_key_env: str | None = "DASHSCOPE_API_KEY",
+        api_key_env: str | None = QWEN_API_KEY_ENV,
         base_url: str | None = None,
     ) -> None:
         """配置 Qwen 的 DashScope Chat Completions Provider。
