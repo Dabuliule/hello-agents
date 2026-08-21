@@ -60,8 +60,15 @@ class _ApprovalOutcome:
 class ToolRunner:
     """统一执行 tool call，并把执行过程转成 RuntimeEvent。
 
-    调用顺序是：参数 schema 校验、sandbox effect 检查、approval 检查、真正
-    执行 tool。每一步失败都会变成 ToolResult，而不是让异常直接穿透到 turn。
+    Runner 是模型意图与真实副作用之间的治理边界，固定顺序为：Registry 查找、
+    参数 schema 校验、Sandbox effect 检查、Approval 检查、限时执行、成功结果
+    Observer、输出限额。Sandbox 是不可被审批扩大的硬能力边界；Approval 只决定
+    已在能力范围内的本次操作是否获得用户授权。
+
+    参数、策略、审批、工具超时和普通执行异常都归一化为失败 ToolResult，让模型
+    可以观察失败后修正参数或解释原因，而不是直接终止整个 Turn。任务取消不在这里
+    吞掉：``CancelledError`` 必须向上传播，由 Turn 为已记录批次补齐终态，再由
+    Session 记录 interrupt/turn timeout。
     """
 
     def __init__(
@@ -90,8 +97,9 @@ class ToolRunner:
             context: 当前 Turn 冻结的权限、预算、超时和 workspace 快照。
 
         Yields:
-            必有 TOOL_CALL_STARTED/FINISHED；需审批时夹有 REQUESTED/DECIDED；
-            工具声明的 runtime_events 在 FINISHED 之后且 payload 被限额。
+            正常消费至结束时必有 TOOL_CALL_STARTED/FINISHED；需审批时夹有
+            REQUESTED/DECIDED；工具声明的 runtime_events 在 FINISHED 之后且
+            payload 被限额。外部取消会中断生成器，缺失终态由 Turn 批次收口补齐。
 
         所有预期参数、业务、审批、超时和普通执行异常都变成 ToolResult，使
         Turn 能把失败 observation 交还模型；只有内部“不产结果”不变量会抛出。
@@ -144,7 +152,15 @@ class ToolRunner:
         context: TurnContext,
         state: _ToolRunState,
     ) -> AsyncIterator[ToolRunnerEvent]:
-        """收口准备/执行异常，成功时运行 Observer，最后统一限制输出。"""
+        """把可恢复治理/执行失败收口为 ToolResult，再治理成功结果和输出。
+
+        ``ValidationError``、领域 ``CodecraftError``、Runner 自己的执行 deadline
+        和未知普通异常使用稳定错误码；``CancelledError`` 继承 BaseException，故
+        不会被最后的 ``except Exception`` 误包装成普通工具失败。
+
+        Observer 是非关键后处理，只在原工具成功后运行；其失败只进入诊断，不会
+        倒置已经发生的工具成功事实。所有路径最后都经过统一输出限额。
+        """
         try:
             async for event in self._prepare_and_execute(call, context, state):
                 yield event
@@ -192,10 +208,15 @@ class ToolRunner:
         context: TurnContext,
         state: _ToolRunState,
     ) -> AsyncIterator[ToolRunnerEvent]:
-        """依次取工具、校验参数、检查沙箱、审批并在 deadline 内执行。
+        """依次取工具、校验参数、检查 Sandbox、审批并在 deadline 内执行。
 
         Sandbox 是审批无法覆盖的硬边界，因此 effect 不允许时直接形成
-        sandbox_denied；审批只处理沙箱已经允许但仍需要用户授权的操作。
+        ``sandbox_denied``，既不创建 ApprovalRequest，也不调用工具。审批只处理
+        Sandbox 已允许、但当前 policy 或命令风险要求用户确认的操作。
+
+        ``ToolContext`` 只把冻结的 TurnContext、当前 call、审批结果和命令分类交给
+        工具，不暴露 Registry、Reviewer 或 Session；Bash 等高风险工具会再次检查
+        ``command_decision`` 和 ``approved``，形成执行边界处的纵深防御。
         """
         tool = self.registry.get(call.name)
         args = tool.args_schema.model_validate(call.arguments)
@@ -247,7 +268,12 @@ class ToolRunner:
         evaluation: ApprovalEvaluation,
         state: _ToolRunState,
     ) -> AsyncIterator[ToolRunnerEvent]:
-        """先发请求事件，再限时等待 Reviewer，发决定事件后决定是否继续。"""
+        """按 REQUESTED → 等待 Reviewer → DECIDED 的可审计顺序处理审批。
+
+        同意只把 ``state.approved`` 置 True，真正执行仍回到统一工具路径；拒绝、
+        Reviewer 异常和审批超时都形成失败 ToolResult。任务取消继续向上传播，
+        ThreadApprovalReviewer 的 finally 会同步清理 pending Future。
+        """
         # approval 是可交互边界，先产出请求，再等待 UI 或 reviewer 处理。
         request = self.approval_manager.build_request(
             call=call,
@@ -402,6 +428,7 @@ class ToolRunner:
 
         Observer 只在原工具成功后运行；其超时或异常不会倒置工具成功事实。
         """
+
         async def run(
             observer: ToolResultObserver,
         ) -> tuple[str, dict[str, Any] | None]:

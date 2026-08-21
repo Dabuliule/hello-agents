@@ -25,7 +25,12 @@ class ToolContext(BaseModel):
 
 
 class BaseTool(ABC):
-    """所有内置和扩展 tool 的基类。"""
+    """所有内置和扩展 Tool 的声明与执行合同。
+
+    ``effects`` 和 ``requires_approval`` 是模型执行前的治理声明，不由模型参数决定；
+    Registry 把它们同时暴露给 TurnContext 和 ToolRunner。``arun`` 收到的参数已经
+    通过 schema 校验，ToolContext 只携带冻结权限快照与当前调用的治理结果。
+    """
 
     name: str
     description: str
@@ -45,5 +50,9 @@ class BaseTool(ABC):
 
     @abstractmethod
     async def arun(self, args: BaseModel, context: ToolContext) -> ToolResult:
-        """执行已由 ToolRunner 校验和治理的参数，返回结构化结果。"""
+        """执行已由 ToolRunner 校验和治理的参数，返回结构化 ToolResult。
+
+        实现仍应在真实副作用边界复核自身专属约束，例如路径工具使用
+        WorkspaceGuard、BashTool 检查 CommandDecision；声明式治理不是替代品。
+        """
         ...

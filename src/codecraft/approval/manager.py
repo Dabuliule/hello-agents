@@ -109,8 +109,10 @@ class DenyApprovalReviewer(ApprovalReviewer):
 class ApprovalManager:
     """根据 approval policy 决定 tool call 是否需要用户确认。
 
-    `ApprovalManager` 只负责评估和发起审批；具体由谁批准取决于 reviewer，
-    CLI 场景通常使用 ThreadApprovalReviewer，测试可以使用 AutoApprovalReviewer。
+    ``ApprovalManager`` 只负责风险评估、构造请求和调用 Reviewer，不执行工具，也
+    不授予 Sandbox 能力。具体由谁批准取决于 Reviewer；CLI 场景通常使用
+    ThreadApprovalReviewer，测试可以使用 AutoApprovalReviewer。未注入 Reviewer
+    时默认拒绝，避免服务端或新入口无意中把交互审批降级成自动允许。
     """
 
     def __init__(
@@ -130,11 +132,13 @@ class ApprovalManager:
         args: BaseModel,
         context: TurnContext,
     ) -> ApprovalEvaluation:
-        """结合审批策略、工具副作用和 shell 风险评估一次调用。
+        """结合审批策略、工具副作用和 shell 命令风险评估一次调用。
 
         Bash 始终先经过 ``CommandPolicy``；DENY 与 policy=NEVER 不创建审批，
-        而把命令决定交给 ToolRunner 做硬拒绝或直接执行。其他工具在 UNTRUSTED
-        下按副作用审批，在 ON_REQUEST 下按工具声明审批。
+        而把命令决定交给 BashTool 做硬拒绝、无交互拒绝或直接执行。这里的 NEVER
+        表示“永不弹出审批”，不是“无条件允许”：PROMPT 命令在没有 approved 标记
+        时仍被 BashTool 拒绝。其他工具在 UNTRUSTED 下按副作用审批，在 ON_REQUEST
+        下按工具声明审批；不需要审批只代表治理链可以继续，不代表绕过 Sandbox。
         """
         if call.name == "bash":
             # shell command 的风险和 tool effect 不完全等价，需要交给 CommandPolicy。
@@ -198,7 +202,11 @@ class ApprovalManager:
         )
 
     async def request(self, request: ApprovalRequest) -> ApprovalDecision:
-        """把请求交给 Reviewer，并校验返回决定没有串错 approval ID。"""
+        """把请求交给 Reviewer，并用 approval ID 防止并发决定串单。
+
+        Reviewer 返回错误 ID 属于审批通道失败，ToolRunner 会 fail-closed 为
+        ``approval_error``，而不会把别的请求的允许决定应用到当前 call。
+        """
         decision = await self.reviewer.review(request)
         if decision.approval_id != request.approval_id:
             raise RuntimeError("approval decision does not match its request")

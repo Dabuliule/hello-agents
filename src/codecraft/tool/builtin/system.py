@@ -28,8 +28,10 @@ class BashArgs(ToolArguments):
 class BashTool(BaseTool):
     """在 workspace 内执行 shell command 的内置工具。
 
-    命令是否允许执行由 CommandPolicy 和 approval 状态共同决定；这个工具只
-    负责运行已经通过检查的 command，并截断过长输出。
+    命令先由 ApprovalManager 调用 CommandPolicy 分类，再随 ToolContext 到达这里。
+    BashTool 在真正启动进程前再次拒绝 DENY，以及“需要审批但没有 approved”的
+    PROMPT 命令；因此 approval_policy=never 不会把高风险命令变成自动允许。通过
+    检查后才交给 SandboxBackend，并把输出、退出码和后端错误归一化为 ToolResult。
     """
 
     name = "bash"

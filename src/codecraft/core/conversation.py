@@ -232,11 +232,21 @@ class Conversation(BaseModel):
         max_tokens: int,
         keep_recent_items: int,
     ) -> dict[str, Any] | None:
-        """Replace older complete turns with a deterministic summary.
+        """把较旧的完整 Turns 替换为本地生成的确定性、不可信摘要。
 
-        The latest user turn is always kept intact so function calls and their
-        outputs cannot be separated. If that turn alone exceeds the budget, the
-        caller must reject the request instead of producing an invalid history.
+        Args:
+            max_tokens: 压缩后整个 Conversation 的模型可见 Token 上限。
+            keep_recent_items: 希望保留的最近 item 数；真正切点会向后对齐到 User
+                边界，因此可能少保留上一 Turn，但绝不从 Turn 中间开始。
+
+        Returns:
+            成功时返回压缩前后 Token、移除/保留数量和完整 Conversation 快照；无需
+            压缩或连“最小摘要 + 最新用户 Turn”都放不下时返回 None，原历史不变。
+
+        最新 User 开始的整个 Turn 始终原样保留，使 ToolCall 与 ToolResult 不会被
+        拆开。摘要不调用模型：旧 item 按角色生成稳定文本行，单项最多 400 字符；
+        仍超限时再优先保留较新的完整摘要行。调用方看到 None 后负责中止，而不是
+        构造违反 Provider 工具协议的历史。
         """
         before_tokens = self.context_tokens()
         if before_tokens <= max_tokens or not self.items:
@@ -258,6 +268,8 @@ class Conversation(BaseModel):
             latest_user_index,
             max(0, len(self.items) - keep_recent_items),
         )
+        # 不能直接从 target_index 截断：它可能落在 Assistant/ToolCall/ToolResult
+        # 中间。向后寻找 User 边界会整体移除上一 Turn，并完整保留当前 Turn。
         start_index = next(
             (
                 index
@@ -271,6 +283,8 @@ class Conversation(BaseModel):
         if not removed:
             return None
 
+        # 先在独立 Conversation 中试算；只有确定能装入预算后才替换 self.items，
+        # 因此失败返回不会把实时历史改成一个半压缩状态。
         retained = [item.model_copy(deep=True) for item in self.items[start_index:]]
         summary_text = self._summarize(removed)
         compacted = Conversation(items=retained)
