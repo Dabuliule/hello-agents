@@ -287,6 +287,39 @@ class ConcurrentReadTool(BaseTool):
             self.active -= 1
 
 
+class TrackingValueTool(BaseTool):
+    name = "tracking_value"
+    description = "Record whether execution was reached."
+    args_schema = ValueArgs
+    effects = {ToolEffect.READ_ONLY}
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def arun(self, args: ValueArgs, context: ToolContext) -> ToolResult:
+        self.calls += 1
+        return ToolResult(success=True, content=args.value)
+
+
+class BlockingReadTool(BaseTool):
+    name = "blocking_read"
+    description = "Block until the surrounding turn is interrupted."
+    args_schema = ValueArgs
+    effects = {ToolEffect.READ_ONLY}
+
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+        self.cancelled = asyncio.Event()
+
+    async def arun(self, args: ValueArgs, context: ToolContext) -> ToolResult:
+        self.started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.cancelled.set()
+            raise
+
+
 def test_read_only_tool_batch_runs_concurrently_and_preserves_result_order(tmp_path):
     async def run_test() -> None:
         tool = ConcurrentReadTool()
@@ -330,6 +363,211 @@ def test_read_only_tool_batch_runs_concurrently_and_preserves_result_order(tmp_p
             if isinstance(message, ModelToolResultMessage)
         ]
         assert tool_messages == ["first", "second"]
+
+    asyncio.run(run_test())
+
+
+def test_tool_budget_preflight_rejects_calls_without_dangling_protocol(tmp_path):
+    async def run_test() -> None:
+        tool = TrackingValueTool()
+        provider = MockProvider(
+            [
+                ModelToolCallEvent(
+                    payload={
+                        "call_id": "call_oversized",
+                        "name": tool.name,
+                        "arguments": {"value": "x" * 20_000},
+                    },
+                ),
+                ModelCompletedEvent(),
+            ]
+        )
+        config = make_config(
+            tmp_path,
+            model_context_window_tokens=4096,
+            model_max_output_tokens=512,
+            context_safety_margin_tokens=256,
+        )
+        runtime = AgentRuntime(
+            session_store=SessionStore(config.codecraft_home),
+            llm_providers=LLMProviderRegistry([provider]),
+            tool_registry=ToolRegistry([tool]),
+        )
+        thread = await runtime.create_thread(config)
+
+        await thread.submit(SessionInput.user_message("inp_budget", "run it"))
+        await thread.wait_until_idle()
+        snapshot = await thread.read_snapshot()
+
+        assert tool.calls == 0
+        assert not any(
+            event.type
+            in {
+                RuntimeEventType.MODEL_TOOL_CALL,
+                RuntimeEventType.TOOL_CALL_STARTED,
+                RuntimeEventType.TOOL_CALL_FINISHED,
+            }
+            for event in snapshot.events
+        )
+        aborted = snapshot.events[-1]
+        assert aborted.type == RuntimeEventType.TURN_ABORTED
+        assert aborted.payload["reason"] == "context_limit_exceeded"
+        assert aborted.payload["tool_calls"] == 0
+        assert (
+            aborted.payload["metadata"]["requested_tool_calls"][0]["call_id"]
+            == "call_oversized"
+        )
+        assert (
+            reconstruct_conversation(snapshot.events).build_model_messages()
+            == thread.session.conversation.build_model_messages()
+        )
+
+    asyncio.run(run_test())
+
+
+def test_interrupt_completes_tool_protocol_and_resume_can_continue(tmp_path):
+    async def run_test() -> None:
+        tool = BlockingReadTool()
+        config = make_config(tmp_path, max_parallel_read_tools=1)
+        store = SessionStore(config.codecraft_home)
+        first_provider = MockProvider(
+            [
+                ModelToolCallEvent(
+                    payload={
+                        "call_id": "call_blocking",
+                        "name": tool.name,
+                        "arguments": {"value": "wait"},
+                    },
+                ),
+                ModelToolCallEvent(
+                    payload={
+                        "call_id": "call_never_started",
+                        "name": tool.name,
+                        "arguments": {"value": "queued"},
+                    },
+                ),
+                ModelCompletedEvent(),
+            ]
+        )
+        first_runtime = AgentRuntime(
+            session_store=store,
+            llm_providers=LLMProviderRegistry([first_provider]),
+            tool_registry=ToolRegistry([tool]),
+        )
+        thread = await first_runtime.create_thread(config)
+        await thread.submit(SessionInput.user_message("inp_interrupt", "block"))
+        await asyncio.wait_for(tool.started.wait(), timeout=1)
+
+        await asyncio.wait_for(thread.interrupt("test_interrupt"), timeout=1)
+        snapshot = await thread.read_snapshot()
+
+        assert tool.cancelled.is_set()
+        finished = [
+            event
+            for event in snapshot.events
+            if event.type == RuntimeEventType.TOOL_CALL_FINISHED
+        ]
+        assert [event.payload["call_id"] for event in finished] == [
+            "call_blocking",
+            "call_never_started",
+        ]
+        assert [event.payload["result"]["error"] for event in finished] == [
+            "tool_interrupted",
+            "tool_not_started",
+        ]
+        assert finished[0].payload["result"]["metadata"] == {
+            "outcome_unknown": True,
+            "retry_safe": False,
+            "interruption_reason": "test_interrupt",
+        }
+        assert finished[1].payload["result"]["metadata"] == {
+            "outcome_unknown": False,
+            "retry_safe": True,
+            "interruption_reason": "test_interrupt",
+        }
+        assert snapshot.events[-1].type == RuntimeEventType.TURN_ABORTED
+        assert snapshot.events[-1].payload["reason"] == "test_interrupt"
+        reconstructed = reconstruct_conversation(snapshot.events)
+        assert (
+            reconstructed.build_model_messages()
+            == thread.session.conversation.build_model_messages()
+        )
+
+        second_provider = MockProvider(
+            [
+                ModelMessageDeltaEvent(payload={"text": "continued safely"}),
+                ModelCompletedEvent(),
+            ]
+        )
+        second_runtime = AgentRuntime(
+            session_store=store,
+            llm_providers=LLMProviderRegistry([second_provider]),
+            tool_registry=ToolRegistry([BlockingReadTool()]),
+        )
+        resumed = await second_runtime.resume_thread(config.session_id)
+        assert (await resumed.next_event()).type == RuntimeEventType.SESSION_RESTORED
+        await resumed.submit(SessionInput.user_message("inp_resume", "continue"))
+        await resumed.wait_until_idle()
+
+        assert len(second_provider.calls) == 1
+        resumed_tool_results = [
+            message
+            for message in second_provider.calls[0].messages
+            if isinstance(message, ModelToolResultMessage)
+        ]
+        assert len(resumed_tool_results) == 2
+        assert "tool_interrupted" in resumed_tool_results[0].content
+        assert "tool_not_started" in resumed_tool_results[1].content
+
+    asyncio.run(run_test())
+
+
+def test_turn_timeout_completes_active_tool_protocol(tmp_path):
+    async def run_test() -> None:
+        tool = BlockingReadTool()
+        provider = MockProvider(
+            [
+                ModelToolCallEvent(
+                    payload={
+                        "call_id": "call_timeout",
+                        "name": tool.name,
+                        "arguments": {"value": "wait"},
+                    },
+                ),
+                ModelCompletedEvent(),
+            ]
+        )
+        config = make_config(tmp_path, turn_timeout_seconds=1)
+        runtime = AgentRuntime(
+            session_store=SessionStore(config.codecraft_home),
+            llm_providers=LLMProviderRegistry([provider]),
+            tool_registry=ToolRegistry([tool]),
+        )
+        thread = await runtime.create_thread(config)
+
+        await thread.submit(SessionInput.user_message("inp_timeout_tool", "block"))
+        await thread.wait_until_idle()
+        snapshot = await thread.read_snapshot()
+
+        assert tool.cancelled.is_set()
+        terminal_types = [
+            event.type
+            for event in snapshot.events
+            if event.type
+            in {
+                RuntimeEventType.TOOL_CALL_FINISHED,
+                RuntimeEventType.TURN_ABORTED,
+            }
+        ]
+        assert terminal_types == [
+            RuntimeEventType.TOOL_CALL_FINISHED,
+            RuntimeEventType.TURN_ABORTED,
+        ]
+        assert snapshot.events[-1].payload["reason"] == "turn_timeout"
+        assert (
+            reconstruct_conversation(snapshot.events).build_model_messages()
+            == thread.session.conversation.build_model_messages()
+        )
 
     asyncio.run(run_test())
 
