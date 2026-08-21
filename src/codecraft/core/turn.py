@@ -53,9 +53,10 @@ class _ModelResponse:
 class Turn:
     """一次用户输入对应的模型执行轮次。
 
-    `Turn` 管理从用户消息进入对话、调用模型、执行 tool call，到产出最终
-    assistant 消息的完整循环。它不负责持久化细节，所有外部可见状态都通过
-    session event 发出去。
+    一个 Turn 可以包含多次模型请求：模型要求工具时，Turn 先执行并回填结果，
+    再携带更新后的 Conversation 请求模型，直到得到无 tool call 的最终回复。
+    它负责这条业务循环，不负责后台 Task 的 deadline、取消和状态清理；后者由
+    ``Session._run_turn`` 托管。所有外部可见状态都通过 Session event 发出。
     """
 
     _TOOL_RESULT_OVERHEAD_TOKENS = 64
@@ -87,8 +88,15 @@ class Turn:
     async def run(self, user_input: SessionInput) -> None:
         """运行一次用户输入，直到模型给出最终回复或轮次中止。
 
-        模型可能在一次响应中要求调用工具；工具结果会回填到 conversation，
-        然后继续下一次模型调用，直到没有新的 tool call。
+        Args:
+            user_input: 本 Turn 唯一的 USER_MESSAGE；审批和中止走 Session 控制面。
+
+        模型可能在一次响应中要求调用工具；工具结果会回填到 Conversation，
+        然后 ``continue`` 发起下一次模型请求。准备上下文或工具阶段主动中止时，
+        helper 已记录 ``TURN_ABORTED`` 并以 False/None 通知本方法直接返回；其他
+        异常继续抛给 ``Session._run_turn`` 统一转成 ERROR/终态和清理 Session。
+
+        状态机可以概括为 ``USER → MODEL → (TOOLS → MODEL)* → FINAL``。
         """
         await self._start(user_input)
 
@@ -652,7 +660,12 @@ class Turn:
         )
 
     def _build_context(self) -> TurnContext:
-        """从 SessionConfig 和当时 Tool specs 构造不可变 TurnContext 快照。"""
+        """从 SessionConfig 和当前 Tool specs 构造本 Turn 的最小权限快照。
+
+        Context 只下发模型标识、workspace、审批/沙箱规则、可见工具和执行预算，
+        不把 Provider 密钥变量、SessionStore 或 Runtime 资源交给 ToolRunner。工具
+        目录在 Turn 创建时截取，保证本轮 Prompt 和执行治理使用同一组 specs。
+        """
         config = self.session.config
         return TurnContext(
             session_id=config.session_id,

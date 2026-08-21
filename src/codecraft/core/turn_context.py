@@ -15,7 +15,8 @@ class TurnContext(BaseModel):
 
     SessionConfig 可以在不同 Session 间变化；已运行 Turn 的安全判断必须始终
     使用创建时的同一份事实，因此模型 Prompt、ToolRunner、Approval 和 Sandbox
-    都接收 frozen TurnContext，而不在执行中回读可变配置。
+    都接收 frozen TurnContext，而不在执行中回读可变配置。它也是最小权限 DTO：
+    下游只看到执行所需字段，不获得 Provider 连接信息或 SessionStore 等资源。
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
