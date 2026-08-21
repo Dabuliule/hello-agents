@@ -27,7 +27,7 @@ from codecraft.llm import (
     MockProvider,
     ModelCompletedEvent,
     ModelEvent,
-    ModelMessageCompletedEvent,
+    ModelMessageDeltaEvent,
     ModelRequest,
     ModelToolCallEvent,
     ModelToolResultMessage,
@@ -213,11 +213,11 @@ def test_runtime_compacts_context_and_reconstructs_exact_snapshot(tmp_path):
     async def run_test() -> None:
         provider = MockProvider(
             [
-                ModelMessageCompletedEvent(
+                ModelMessageDeltaEvent(
                     payload={"text": "detail " * 3000},
                 ),
                 ModelCompletedEvent(),
-                ModelMessageCompletedEvent(
+                ModelMessageDeltaEvent(
                     payload={"text": "second answer"},
                 ),
                 ModelCompletedEvent(),
@@ -307,7 +307,7 @@ def test_read_only_tool_batch_runs_concurrently_and_preserves_result_order(tmp_p
                     },
                 ),
                 ModelCompletedEvent(),
-                ModelMessageCompletedEvent(
+                ModelMessageDeltaEvent(
                     payload={"text": "done"},
                 ),
                 ModelCompletedEvent(),
@@ -598,7 +598,7 @@ def test_runtime_caps_tool_results_to_remaining_model_context(tmp_path):
                     },
                 ),
                 ModelCompletedEvent(),
-                ModelMessageCompletedEvent(
+                ModelMessageDeltaEvent(
                     payload={"text": "done"},
                 ),
                 ModelCompletedEvent(),

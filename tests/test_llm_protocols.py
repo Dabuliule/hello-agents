@@ -18,7 +18,6 @@ from codecraft.llm import (
     MockProvider,
     ModelCompletedEvent,
     ModelEvent,
-    ModelMessageCompletedEvent,
     ModelMessageDeltaEvent,
     ModelRequest,
     ModelRole,
@@ -169,7 +168,7 @@ def test_model_message_discriminator_selects_concrete_variant():
 
 
 def test_model_event_is_immutable():
-    event = ModelMessageCompletedEvent(
+    event = ModelMessageDeltaEvent(
         payload={"text": "done"},
     )
 
@@ -182,9 +181,6 @@ def test_model_event_discriminator_selects_concrete_variant():
     events = [
         adapter.validate_python(
             {"type": "message_delta", "payload": {"text": "hello"}}
-        ),
-        adapter.validate_python(
-            {"type": "message_completed", "payload": {"text": "done"}}
         ),
         adapter.validate_python(
             {
@@ -207,7 +203,6 @@ def test_model_event_discriminator_selects_concrete_variant():
 
     assert [type(event) for event in events] == [
         ModelMessageDeltaEvent,
-        ModelMessageCompletedEvent,
         ModelToolCallEvent,
         ModelTokenCountEvent,
         ModelCompletedEvent,
@@ -215,6 +210,10 @@ def test_model_event_discriminator_selects_concrete_variant():
 
     with pytest.raises(ValidationError):
         adapter.validate_python({"type": "completed", "payload": {}})
+    with pytest.raises(ValidationError):
+        adapter.validate_python(
+            {"type": "message_completed", "payload": {"text": "removed"}}
+        )
 
 
 def test_token_count_does_not_add_reasoning_twice():
@@ -627,7 +626,7 @@ def test_mock_provider_requires_explicit_boundaries_and_snapshots_calls():
     with pytest.raises(ValueError, match="without completed"):
         MockProvider(
             [
-                ModelMessageCompletedEvent(
+                ModelMessageDeltaEvent(
                     payload={"text": "unfinished"},
                 )
             ]
@@ -635,7 +634,7 @@ def test_mock_provider_requires_explicit_boundaries_and_snapshots_calls():
 
     provider = MockProvider(
         [
-            ModelMessageCompletedEvent(
+            ModelMessageDeltaEvent(
                 payload={"text": "done"},
             ),
             ModelCompletedEvent(),

@@ -79,16 +79,13 @@ class _ModelEventBase(BaseModel):
 
 
 class ModelMessageDeltaEvent(_ModelEventBase):
-    """模型流式产生的一段非空文本。"""
+    """模型产生的一个有序非空文本 part。
+
+    流式上游可以产生多个小 part；非流式完整响应由 Provider adapter 转换为一个
+    大 part。消费者必须等 ``ModelCompletedEvent`` 后才能把累积文本视为成功结果。
+    """
 
     type: Literal["message_delta"] = "message_delta"
-    payload: ModelTextPayload
-
-
-class ModelMessageCompletedEvent(_ModelEventBase):
-    """非流式响应一次性产生的完整非空文本。"""
-
-    type: Literal["message_completed"] = "message_completed"
     payload: ModelTextPayload
 
 
@@ -114,7 +111,6 @@ class ModelCompletedEvent(_ModelEventBase):
 
 ModelEvent = Annotated[
     ModelMessageDeltaEvent
-    | ModelMessageCompletedEvent
     | ModelToolCallEvent
     | ModelTokenCountEvent
     | ModelCompletedEvent,

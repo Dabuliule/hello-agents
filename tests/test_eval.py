@@ -12,7 +12,7 @@ from codecraft.llm import (
     LLMProviderRegistry,
     MockProvider,
     ModelCompletedEvent,
-    ModelMessageCompletedEvent,
+    ModelMessageDeltaEvent,
     ModelTokenCountEvent,
     ModelToolCallEvent,
 )
@@ -158,7 +158,7 @@ def test_eval_command_runs_task_and_writes_reports(tmp_path, monkeypatch):
                     "total_tokens": 23,
                 },
             ),
-            ModelMessageCompletedEvent(
+            ModelMessageDeltaEvent(
                 payload={"text": "Created welcome.txt."},
             ),
             ModelCompletedEvent(),
@@ -191,7 +191,7 @@ def test_eval_command_runs_task_and_writes_reports(tmp_path, monkeypatch):
                     "total_tokens": 23,
                 },
             ),
-            ModelMessageCompletedEvent(
+            ModelMessageDeltaEvent(
                 payload={"text": "Created welcome.txt."},
             ),
             ModelCompletedEvent(),
@@ -339,7 +339,7 @@ def test_eval_duplicate_task_prints_friendly_error(tmp_path):
 def test_eval_command_reports_failed_deterministic_checks(tmp_path, monkeypatch):
     provider = MockProvider(
         [
-            ModelMessageCompletedEvent(
+            ModelMessageDeltaEvent(
                 payload={"text": "Done without editing files."},
             ),
             ModelCompletedEvent(),

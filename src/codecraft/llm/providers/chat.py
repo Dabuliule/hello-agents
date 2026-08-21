@@ -12,7 +12,6 @@ from codecraft.llm.base import (
 from codecraft.llm.events import (
     ModelCompletedEvent,
     ModelEvent,
-    ModelMessageCompletedEvent,
     ModelMessageDeltaEvent,
     ModelTokenCountEvent,
     ModelToolCallEvent,
@@ -487,8 +486,8 @@ class ChatCompletionsProvider(OpenAIClientProvider):
             response: OpenAI 兼容 SDK 的完整响应对象，或具有相同字段的字典。
 
         Returns:
-            按完整文本、可选 Token 用量、工具调用和成功终止标志排列的事件
-            列表。空文本不会产生消息事件。
+            按单个文本 part、可选 Token 用量、工具调用和成功终止标志排列的
+            事件列表。空文本不会产生消息事件。
 
         Raises:
             LLMProtocolError: choice 数量、索引、文本、工具调用、usage 或结束原因
@@ -516,7 +515,7 @@ class ChatCompletionsProvider(OpenAIClientProvider):
             ...     }
             ... )
             >>> [event.type for event in events]
-            ['message_completed', 'token_count', 'completed']
+            ['message_delta', 'token_count', 'completed']
             >>> events[0].payload.text
             '你好'
         """
@@ -538,7 +537,7 @@ class ChatCompletionsProvider(OpenAIClientProvider):
                 raise LLMProtocolError("chat message content must be text")
             if content:
                 events.append(
-                    ModelMessageCompletedEvent(
+                    ModelMessageDeltaEvent(
                         payload={"text": content},
                     )
                 )

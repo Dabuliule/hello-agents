@@ -8,7 +8,6 @@ from codecraft.llm.base import (
 from codecraft.llm.events import (
     ModelCompletedEvent,
     ModelEvent,
-    ModelMessageCompletedEvent,
     ModelMessageDeltaEvent,
     ModelTokenCountEvent,
     ModelToolCallEvent,
@@ -37,7 +36,6 @@ __all__ = [
     "DeepSeekProvider",
     "ModelCompletedEvent",
     "ModelEvent",
-    "ModelMessageCompletedEvent",
     "ModelMessageDeltaEvent",
     "ModelMessage",
     "ModelRole",

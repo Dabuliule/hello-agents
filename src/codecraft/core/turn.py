@@ -16,7 +16,6 @@ from codecraft.llm.base import LLMProtocolError
 from codecraft.llm.base import ModelRequest
 from codecraft.llm.events import (
     ModelCompletedEvent,
-    ModelMessageCompletedEvent,
     ModelMessageDeltaEvent,
     ModelTokenCountEvent,
     ModelToolCallEvent,
@@ -43,11 +42,15 @@ class TurnStatus(StrEnum):
 
 @dataclass
 class _ModelResponse:
-    """一次 Provider stream 中累积的增量文本、完整文本与 Tool calls。"""
+    """一次已成功闭合 Provider stream 的文本与 Tool calls 临时累加器。
+
+    Token usage 会立即转成 RuntimeEvent，不参与后续分支判断，因此不保存在这里。
+    所有 Provider 文本都表示为一个或多个有序 parts，等确认整个响应成功后再合并
+    进 Conversation；非流式上游响应由 adapter 转换为单个 part。
+    """
 
     assistant_parts: list[str] = field(default_factory=list)
     tool_calls: list[ToolCall] = field(default_factory=list)
-    completed_message: str | None = None
 
 
 class Turn:
@@ -146,7 +149,21 @@ class Turn:
             self._active_skills[skill.metadata.name] = skill
 
     async def _consume_model_response(self, request: ModelRequest) -> _ModelResponse:
-        """消费标准事件流直到显式 ModelCompleted；EOF 前缺终态视为协议错误。"""
+        """消费一次 Provider 事件流，只在显式成功终态后返回累积响应。
+
+        Args:
+            request: 由当前 Prompt、Tool specs 和输出预算构成的不可变请求。
+
+        Returns:
+            已收集文本和 ToolCall 的 ``_ModelResponse``。ToolCall 在整个响应确认
+            完成前不会执行，避免使用提前断流留下的不完整意图。
+
+        Raises:
+            LLMProtocolError: 迭代器在 ``ModelCompletedEvent`` 前结束。普通 EOF
+                不能当成功，因为网络断流与正常闭合在传输层可能表现相同。
+            ModelProviderError: Provider 报告的配置、网络或上游协议错误会原样上抛，
+                再由 ``Session._run_turn`` 转成 Runtime ERROR/终态事件。
+        """
         response = _ModelResponse()
         async for model_event in self.session.llm_provider.stream(request):
             if isinstance(model_event, ModelCompletedEvent):
@@ -157,16 +174,16 @@ class Turn:
     async def _handle_model_event(
         self,
         response: _ModelResponse,
-        model_event: ModelMessageDeltaEvent
-        | ModelMessageCompletedEvent
-        | ModelTokenCountEvent
-        | ModelToolCallEvent,
+        model_event: ModelMessageDeltaEvent | ModelTokenCountEvent | ModelToolCallEvent,
     ) -> None:
-        """穷举分发四类非终态 ModelEvent，未知联合成员触发类型不变量。"""
+        """穷举处理三类非终态事件，并维持文本协议不变量。
+
+        文本 part 会立即广播以支持 UI 显示，同时在本地累积；usage 只发审计事件；
+        ToolCall 等待 stream 闭合后批量执行。``ModelCompletedEvent`` 已由外层循环
+        处理，不进入本方法。
+        """
         if isinstance(model_event, ModelMessageDeltaEvent):
             await self._handle_message_delta(response, model_event)
-        elif isinstance(model_event, ModelMessageCompletedEvent):
-            await self._handle_completed_message(response, model_event)
         elif isinstance(model_event, ModelTokenCountEvent):
             await self._handle_token_count(model_event)
         elif isinstance(model_event, ModelToolCallEvent):
@@ -179,10 +196,7 @@ class Turn:
         response: _ModelResponse,
         model_event: ModelMessageDeltaEvent,
     ) -> None:
-        """累计文本 delta 并即时发 ASSISTANT_MESSAGE_DELTA；终态后禁止再流。"""
-        if response.completed_message is not None:
-            raise LLMProtocolError("message delta arrived after a completed message")
-
+        """累计一个有序文本 part，并即时发 ASSISTANT_MESSAGE_DELTA。"""
         delta = model_event.payload.text
         response.assistant_parts.append(delta)
         await self.session.emit(
@@ -190,25 +204,6 @@ class Turn:
             {"text": delta},
             turn_id=self.turn_id,
         )
-
-    async def _handle_completed_message(
-        self,
-        response: _ModelResponse,
-        model_event: ModelMessageCompletedEvent,
-    ) -> None:
-        """接收非流式完整消息，拒绝与 delta 混用并立即落盘 Conversation。"""
-        if response.assistant_parts or response.completed_message is not None:
-            raise LLMProtocolError(
-                "provider mixed streamed and completed message events"
-            )
-
-        response.completed_message = model_event.payload.text
-        await self.session.emit(
-            RuntimeEventType.ASSISTANT_MESSAGE,
-            {"text": response.completed_message},
-            turn_id=self.turn_id,
-        )
-        self.session.conversation.append_assistant_message(response.completed_message)
 
     async def _handle_token_count(self, model_event: ModelTokenCountEvent) -> None:
         """把 Provider 归一化 usage 原样持久化为 TOKEN_COUNT。"""
@@ -220,10 +215,7 @@ class Turn:
 
     async def _process_tool_calls(self, response: _ModelResponse) -> bool:
         """先收口同响应文本，再检查总调用预算、记录 calls 并执行批次。"""
-        await self._flush_streamed_message(
-            response.assistant_parts,
-            response.completed_message,
-        )
+        await self._flush_streamed_message(response.assistant_parts)
         if (
             self.tool_call_count + len(response.tool_calls)
             > self.context.max_tool_calls
@@ -249,23 +241,19 @@ class Turn:
         )
 
     async def _final_answer(self, response: _ModelResponse) -> str:
-        """把流式片段合并成一次完整消息，拒绝无文本且无工具的成功终态。"""
-        completed_message = response.completed_message
-        if completed_message is None:
-            completed_message = "".join(response.assistant_parts)
-            if completed_message:
-                await self.session.emit(
-                    RuntimeEventType.ASSISTANT_MESSAGE,
-                    {"text": completed_message},
-                    turn_id=self.turn_id,
-                )
-                self.session.conversation.append_assistant_message(completed_message)
-
-        if not completed_message:
+        """把文本 parts 合并并持久化，拒绝无文本且无工具的成功终态。"""
+        answer = "".join(response.assistant_parts)
+        if not answer:
             raise LLMProtocolError(
                 "model completed without an assistant message or tool call"
             )
-        return completed_message
+        await self.session.emit(
+            RuntimeEventType.ASSISTANT_MESSAGE,
+            {"text": answer},
+            turn_id=self.turn_id,
+        )
+        self.session.conversation.append_assistant_message(answer)
+        return answer
 
     async def finish(self, answer: str) -> None:
         """持久化 answer、调用数和耗时后，将 Turn 标记 FINISHED。"""
@@ -283,23 +271,19 @@ class Turn:
     async def _flush_streamed_message(
         self,
         assistant_parts: list[str],
-        completed_message: str | None,
     ) -> str | None:
-        """Tool call 前把此前 delta 合成单条 Assistant 历史；完整事件不重复写。"""
-        if completed_message is not None:
-            return completed_message
-
-        streamed_message = "".join(assistant_parts)
-        if not streamed_message:
+        """Tool call 前把本响应文本 parts 合成单条 Assistant 历史。"""
+        assistant_message = "".join(assistant_parts)
+        if not assistant_message:
             return None
 
         await self.session.emit(
             RuntimeEventType.ASSISTANT_MESSAGE,
-            {"text": streamed_message},
+            {"text": assistant_message},
             turn_id=self.turn_id,
         )
-        self.session.conversation.append_assistant_message(streamed_message)
-        return streamed_message
+        self.session.conversation.append_assistant_message(assistant_message)
+        return assistant_message
 
     async def _record_tool_calls(self, calls: list[ToolCall]) -> None:
         """逐个先持久化 MODEL_TOOL_CALL，再按 Provider 顺序批量追加历史。"""

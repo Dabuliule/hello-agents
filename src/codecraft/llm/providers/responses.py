@@ -13,7 +13,6 @@ from codecraft.llm.base import (
 from codecraft.llm.events import (
     ModelCompletedEvent,
     ModelEvent,
-    ModelMessageCompletedEvent,
     ModelMessageDeltaEvent,
     ModelTokenCountEvent,
     ModelToolCallEvent,
@@ -180,14 +179,14 @@ class ResponsesProvider(OpenAIClientProvider):
             ...     {"status": "completed", "output_text": "你好", "output": []}
             ... )
             >>> [event.type for event in events]
-            ['message_completed', 'completed']
+            ['message_delta', 'completed']
         """
         self._validate_status(response)
         events: list[ModelEvent] = []
         text = self._response_text(response)
         if text:
             events.append(
-                ModelMessageCompletedEvent(
+                ModelMessageDeltaEvent(
                     payload={"text": text},
                 )
             )

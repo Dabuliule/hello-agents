@@ -83,7 +83,12 @@ class ModelRequest(BaseModel):
 
 
 class LLMProvider(ABC):
-    """模型供应商适配器的统一生命周期与流式接口。"""
+    """模型供应商适配器的统一生命周期与流式接口。
+
+    Provider 只产生供应商无关的成功事件，配置、传输和协议失败通过异常报告。
+    每个成功 stream 必须显式产出末尾 ``ModelCompletedEvent``；迭代器普通 EOF
+    不能代表成功，因为它也可能来自网络断流或上游响应不完整。
+    """
 
     name: str
 
@@ -99,7 +104,8 @@ class LLMProvider(ABC):
 
         Returns:
             可由 ``async for`` 消费的 ``ModelEvent`` 异步迭代器。失败通过
-            ``ModelProviderError`` 子类抛出，不编码成成功事件。
+            ``ModelProviderError`` 子类抛出，不编码成成功事件；成功响应必须以
+            ``ModelCompletedEvent`` 闭合。
         """
         ...
 

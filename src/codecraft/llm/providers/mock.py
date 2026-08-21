@@ -7,8 +7,6 @@ from codecraft.llm.base import LLMProtocolError, LLMProvider, ModelRequest
 from codecraft.llm.events import (
     ModelCompletedEvent,
     ModelEvent,
-    ModelMessageCompletedEvent,
-    ModelMessageDeltaEvent,
 )
 
 
@@ -31,12 +29,13 @@ class MockProvider(LLMProvider):
             script: 使用 ``ModelCompletedEvent`` 划分模型调用边界的事件列表。
 
         Raises:
-            ValueError: 某段响应缺少或重复 completed，或混用增量与完整文本。
+            ValueError: 某段响应缺少或重复 completed。
 
         Example:
+            >>> from codecraft.llm.events import ModelMessageDeltaEvent
             >>> provider = MockProvider(
             ...     [
-            ...         ModelMessageCompletedEvent(payload={"text": "done"}),
+            ...         ModelMessageDeltaEvent(payload={"text": "done"}),
             ...         ModelCompletedEvent(),
             ...     ]
             ... )
@@ -114,7 +113,7 @@ class MockProvider(LLMProvider):
 
     @staticmethod
     def _validate_response(response: tuple[ModelEvent, ...]) -> None:
-        """校验一段 Mock 响应具有唯一终止标志和单一文本模式。
+        """校验一段 Mock 响应具有唯一且位于末尾的终止标志。
 
         Args:
             response: 已按 completed 边界切出的单次响应。
@@ -123,7 +122,7 @@ class MockProvider(LLMProvider):
             ``None``。
 
         Raises:
-            ValueError: completed 缺失、重复或不在末尾，或 delta 与完整文本混用。
+            ValueError: completed 缺失、重复或不在末尾。
 
         Example:
             >>> MockProvider._validate_response((ModelCompletedEvent(),))
@@ -132,10 +131,3 @@ class MockProvider(LLMProvider):
             raise ValueError("each mock response must end with completed")
         if sum(isinstance(event, ModelCompletedEvent) for event in response) != 1:
             raise ValueError("each mock response must contain one completed event")
-
-        if any(isinstance(event, ModelMessageDeltaEvent) for event in response) and any(
-            isinstance(event, ModelMessageCompletedEvent) for event in response
-        ):
-            raise ValueError(
-                "a mock response cannot mix message deltas and a completed message"
-            )

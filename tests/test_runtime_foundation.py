@@ -34,7 +34,6 @@ from codecraft.llm import (
     LLMProviderRegistry,
     ModelCompletedEvent,
     ModelEvent,
-    ModelMessageCompletedEvent,
     ModelMessageDeltaEvent,
     ModelMessage,
     ModelRequest,
@@ -1756,7 +1755,7 @@ def test_llm_provider_stream_contract(tmp_path):
             self,
             request: ModelRequest,
         ) -> AsyncIterator[ModelEvent]:
-            yield ModelMessageCompletedEvent(
+            yield ModelMessageDeltaEvent(
                 payload={"text": request.messages[0].content},
             )
             yield ModelCompletedEvent()
@@ -1792,10 +1791,48 @@ def test_llm_provider_stream_contract(tmp_path):
     events = asyncio.run(collect())
 
     assert [event.type for event in events] == [
-        "message_completed",
+        "message_delta",
         "completed",
     ]
     assert events[0].payload.text == "hello"
+
+
+def test_runtime_does_not_commit_text_from_unclosed_provider_stream(tmp_path):
+    class IncompleteProvider(LLMProvider):
+        name = "mock"
+
+        async def stream(
+            self,
+            request: ModelRequest,
+        ) -> AsyncIterator[ModelEvent]:
+            yield ModelMessageDeltaEvent(payload={"text": "unconfirmed answer"})
+
+    async def run_test() -> None:
+        config = make_config(tmp_path)
+        runtime = AgentRuntime(
+            session_store=SessionStore(config.codecraft_home),
+            llm_providers=LLMProviderRegistry([IncompleteProvider()]),
+            tool_registry=ToolRegistry(),
+        )
+        thread = await runtime.create_thread(config)
+
+        await thread.submit(SessionInput.user_message("inp_test", "hello"))
+        await thread.wait_until_idle()
+
+        snapshot = await thread.read_snapshot()
+        event_types = [event.type for event in snapshot.events]
+        assert RuntimeEventType.ASSISTANT_MESSAGE_DELTA in event_types
+        assert RuntimeEventType.ASSISTANT_MESSAGE not in event_types
+        assert event_types[-2:] == [
+            RuntimeEventType.ERROR,
+            RuntimeEventType.TURN_ABORTED,
+        ]
+        assert [
+            message.role
+            for message in thread.session.conversation.build_model_messages()
+        ] == [ModelRole.USER]
+
+    asyncio.run(run_test())
 
 
 def test_openai_provider_converts_response_to_model_events(tmp_path):
@@ -1874,7 +1911,7 @@ def test_openai_provider_converts_response_to_model_events(tmp_path):
         assert client.responses.kwargs["max_output_tokens"] == 8192
         assert client.responses.kwargs["tools"][0]["name"] == "read_file"
         assert [event.type for event in events] == [
-            "message_completed",
+            "message_delta",
             "token_count",
             "tool_call",
             "completed",
@@ -2800,7 +2837,7 @@ def test_agent_thread_next_event_sees_session_started_and_turn_events(tmp_path):
                 [
                     MockProvider(
                         script=[
-                            ModelMessageCompletedEvent(
+                            ModelMessageDeltaEvent(
                                 payload={"text": "done"},
                             ),
                             ModelCompletedEvent(),
@@ -2831,7 +2868,7 @@ def test_runtime_resume_reconstructs_conversation_without_replaying_turn(tmp_pat
         store = SessionStore(config.codecraft_home)
         first_provider = MockProvider(
             script=[
-                ModelMessageCompletedEvent(
+                ModelMessageDeltaEvent(
                     payload={"text": "first answer"},
                 ),
                 ModelCompletedEvent(),
@@ -2848,7 +2885,7 @@ def test_runtime_resume_reconstructs_conversation_without_replaying_turn(tmp_pat
 
         second_provider = MockProvider(
             script=[
-                ModelMessageCompletedEvent(
+                ModelMessageDeltaEvent(
                     payload={"text": "second answer"},
                 ),
                 ModelCompletedEvent(),
@@ -2935,7 +2972,7 @@ def test_runtime_resume_reconstructs_tool_call_and_result_history(tmp_path):
                     },
                 ),
                 ModelCompletedEvent(),
-                ModelMessageCompletedEvent(
+                ModelMessageDeltaEvent(
                     payload={"text": "first answer"},
                 ),
                 ModelCompletedEvent(),
@@ -2952,7 +2989,7 @@ def test_runtime_resume_reconstructs_tool_call_and_result_history(tmp_path):
 
         second_provider = MockProvider(
             script=[
-                ModelMessageCompletedEvent(
+                ModelMessageDeltaEvent(
                     payload={"text": "second answer"},
                 ),
                 ModelCompletedEvent(),
@@ -2999,7 +3036,7 @@ def test_runtime_injects_system_instructions_before_conversation(tmp_path):
         )
         provider = MockProvider(
             script=[
-                ModelMessageCompletedEvent(
+                ModelMessageDeltaEvent(
                     payload={"text": "answer"},
                 ),
                 ModelCompletedEvent(),
@@ -3051,7 +3088,7 @@ def test_runtime_loads_scoped_instructions_after_accessing_nested_path(tmp_path)
                     },
                 ),
                 ModelCompletedEvent(),
-                ModelMessageCompletedEvent(
+                ModelMessageDeltaEvent(
                     payload={"text": "done"},
                 ),
                 ModelCompletedEvent(),
@@ -3128,7 +3165,7 @@ def test_runtime_resume_uses_context_compaction_summary(tmp_path):
         )
         provider = MockProvider(
             script=[
-                ModelMessageCompletedEvent(
+                ModelMessageDeltaEvent(
                     payload={"text": "after compact"},
                 ),
                 ModelCompletedEvent(),
@@ -3171,7 +3208,7 @@ def test_runtime_allows_final_answer_after_reaching_tool_call_limit(tmp_path):
                     },
                 ),
                 ModelCompletedEvent(),
-                ModelMessageCompletedEvent(
+                ModelMessageDeltaEvent(
                     payload={"text": "The file says: tool loop works"},
                 ),
                 ModelCompletedEvent(),
@@ -3196,6 +3233,7 @@ def test_runtime_allows_final_answer_after_reaching_tool_call_limit(tmp_path):
             RuntimeEventType.MODEL_TOOL_CALL,
             RuntimeEventType.TOOL_CALL_STARTED,
             RuntimeEventType.TOOL_CALL_FINISHED,
+            RuntimeEventType.ASSISTANT_MESSAGE_DELTA,
             RuntimeEventType.ASSISTANT_MESSAGE,
             RuntimeEventType.TURN_FINISHED,
         ]
@@ -3234,7 +3272,7 @@ def test_runtime_preserves_streamed_assistant_text_before_tool_call(tmp_path):
                     },
                 ),
                 ModelCompletedEvent(),
-                ModelMessageCompletedEvent(
+                ModelMessageDeltaEvent(
                     payload={"text": "The file says: tool loop works"},
                 ),
                 ModelCompletedEvent(),
@@ -3262,6 +3300,7 @@ def test_runtime_preserves_streamed_assistant_text_before_tool_call(tmp_path):
             RuntimeEventType.MODEL_TOOL_CALL,
             RuntimeEventType.TOOL_CALL_STARTED,
             RuntimeEventType.TOOL_CALL_FINISHED,
+            RuntimeEventType.ASSISTANT_MESSAGE_DELTA,
             RuntimeEventType.ASSISTANT_MESSAGE,
             RuntimeEventType.TURN_FINISHED,
         ]
@@ -3296,7 +3335,7 @@ def test_runtime_records_failed_unknown_tool(tmp_path):
                     },
                 ),
                 ModelCompletedEvent(),
-                ModelMessageCompletedEvent(
+                ModelMessageDeltaEvent(
                     payload={"text": "Missing tool was reported."},
                 ),
                 ModelCompletedEvent(),
@@ -3342,7 +3381,7 @@ def test_runtime_executes_write_file_tool_call(tmp_path):
                     },
                 ),
                 ModelCompletedEvent(),
-                ModelMessageCompletedEvent(
+                ModelMessageDeltaEvent(
                     payload={"text": "Wrote generated.txt"},
                 ),
                 ModelCompletedEvent(),
@@ -3370,6 +3409,7 @@ def test_runtime_executes_write_file_tool_call(tmp_path):
             RuntimeEventType.MODEL_TOOL_CALL,
             RuntimeEventType.TOOL_CALL_STARTED,
             RuntimeEventType.TOOL_CALL_FINISHED,
+            RuntimeEventType.ASSISTANT_MESSAGE_DELTA,
             RuntimeEventType.ASSISTANT_MESSAGE,
             RuntimeEventType.TURN_FINISHED,
         ]
@@ -3403,7 +3443,7 @@ def test_runtime_emits_patch_applied_event(tmp_path):
                     },
                 ),
                 ModelCompletedEvent(),
-                ModelMessageCompletedEvent(
+                ModelMessageDeltaEvent(
                     payload={"text": "Patched note.txt"},
                 ),
                 ModelCompletedEvent(),
@@ -3430,6 +3470,7 @@ def test_runtime_emits_patch_applied_event(tmp_path):
             RuntimeEventType.TOOL_CALL_STARTED,
             RuntimeEventType.TOOL_CALL_FINISHED,
             RuntimeEventType.PATCH_APPLIED,
+            RuntimeEventType.ASSISTANT_MESSAGE_DELTA,
             RuntimeEventType.ASSISTANT_MESSAGE,
             RuntimeEventType.TURN_FINISHED,
         ]
@@ -3452,7 +3493,7 @@ def test_runtime_executes_bash_tool_call(tmp_path):
                     },
                 ),
                 ModelCompletedEvent(),
-                ModelMessageCompletedEvent(
+                ModelMessageDeltaEvent(
                     payload={"text": "Ran pwd"},
                 ),
                 ModelCompletedEvent(),
@@ -3494,7 +3535,7 @@ def test_tool_runner_emits_approval_events_and_runs_approved_prompt_command(tmp_
                     },
                 ),
                 ModelCompletedEvent(),
-                ModelMessageCompletedEvent(
+                ModelMessageDeltaEvent(
                     payload={"text": "Approval path exercised"},
                 ),
                 ModelCompletedEvent(),
@@ -3527,6 +3568,7 @@ def test_tool_runner_emits_approval_events_and_runs_approved_prompt_command(tmp_
             RuntimeEventType.APPROVAL_REQUESTED,
             RuntimeEventType.APPROVAL_DECIDED,
             RuntimeEventType.TOOL_CALL_FINISHED,
+            RuntimeEventType.ASSISTANT_MESSAGE_DELTA,
             RuntimeEventType.ASSISTANT_MESSAGE,
             RuntimeEventType.TURN_FINISHED,
         ]
@@ -3549,7 +3591,7 @@ def test_tool_runner_denies_rejected_workspace_write(tmp_path):
                     },
                 ),
                 ModelCompletedEvent(),
-                ModelMessageCompletedEvent(
+                ModelMessageDeltaEvent(
                     payload={"text": "Write was denied"},
                 ),
                 ModelCompletedEvent(),
@@ -3595,7 +3637,7 @@ def test_thread_approval_decision_allows_pending_tool_call(tmp_path):
                     },
                 ),
                 ModelCompletedEvent(),
-                ModelMessageCompletedEvent(
+                ModelMessageDeltaEvent(
                     payload={"text": "Write approved"},
                 ),
                 ModelCompletedEvent(),
@@ -3659,7 +3701,7 @@ def test_thread_approval_decision_denies_pending_tool_call(tmp_path):
                     },
                 ),
                 ModelCompletedEvent(),
-                ModelMessageCompletedEvent(
+                ModelMessageDeltaEvent(
                     payload={"text": "Write denied"},
                 ),
                 ModelCompletedEvent(),

@@ -19,7 +19,6 @@ from codecraft.llm import (
     MockProvider,
     ModelCompletedEvent,
     ModelEvent,
-    ModelMessageCompletedEvent,
     ModelMessageDeltaEvent,
     ModelToolCallEvent,
 )
@@ -174,7 +173,7 @@ def _demo_script() -> list[ModelEvent]:
             },
         ),
         ModelCompletedEvent(),
-        ModelMessageCompletedEvent(
+        ModelMessageDeltaEvent(
             payload={
                 "text": (
                     "The governed workflow has finished. The tool result, approval "

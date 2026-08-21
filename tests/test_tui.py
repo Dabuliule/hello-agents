@@ -17,7 +17,6 @@ from codecraft.llm import (
     LLMProviderRegistry,
     MockProvider,
     ModelCompletedEvent,
-    ModelMessageCompletedEvent,
     ModelMessageDeltaEvent,
     ModelRequest,
     ModelTokenCountEvent,
@@ -56,7 +55,7 @@ class RecoveringProvider(LLMProvider):
                 payload={"text": "partial answer"},
             )
             raise LLMProviderError("transient provider failure")
-        yield ModelMessageCompletedEvent(
+        yield ModelMessageDeltaEvent(
             payload={"text": "recovered answer"},
         )
         yield ModelCompletedEvent()
@@ -177,7 +176,7 @@ def test_tui_slash_menu_filters_commands_and_activates_selected_skill(tmp_path):
         )
         provider = MockProvider(
             [
-                ModelMessageCompletedEvent(
+                ModelMessageDeltaEvent(
                     payload={"text": "skill applied"},
                 ),
                 ModelCompletedEvent(),
@@ -602,7 +601,7 @@ def test_tui_inline_approval_controls_side_effect(tmp_path):
                     },
                 ),
                 ModelCompletedEvent(),
-                ModelMessageCompletedEvent(
+                ModelMessageDeltaEvent(
                     payload={"text": "File created."},
                 ),
                 ModelCompletedEvent(),
@@ -696,7 +695,7 @@ def test_tui_trace_screen_inspects_persisted_events(tmp_path):
         config = _config(tmp_path)
         provider = MockProvider(
             [
-                ModelMessageCompletedEvent(
+                ModelMessageDeltaEvent(
                     payload={"text": "trace answer"},
                 ),
                 ModelCompletedEvent(),
@@ -768,7 +767,7 @@ def test_tui_browses_resumes_and_continues_session(tmp_path):
 
         provider = MockProvider(
             [
-                ModelMessageCompletedEvent(
+                ModelMessageDeltaEvent(
                     payload={"text": "continued answer"},
                 ),
                 ModelCompletedEvent(),

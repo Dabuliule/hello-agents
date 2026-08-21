@@ -16,7 +16,7 @@ from codecraft.llm import (
     MockProvider,
     ModelCompletedEvent,
     ModelEvent,
-    ModelMessageCompletedEvent,
+    ModelMessageDeltaEvent,
     ModelRequest,
     ModelToolCallEvent,
     QwenProvider,
@@ -61,7 +61,7 @@ class BlockingThenCompleteProvider(LLMProvider):
                 self.cancelled.set()
                 raise
         else:
-            yield ModelMessageCompletedEvent(
+            yield ModelMessageDeltaEvent(
                 payload={"text": "continued after interrupt"},
             )
             yield ModelCompletedEvent()
@@ -202,7 +202,7 @@ def test_runtime_executes_all_tool_calls_from_one_model_response(tmp_path):
                     },
                 ),
                 ModelCompletedEvent(),
-                ModelMessageCompletedEvent(
+                ModelMessageDeltaEvent(
                     payload={"text": "read both files"},
                 ),
                 ModelCompletedEvent(),
@@ -316,7 +316,7 @@ def test_runtime_rejects_over_budget_tool_batch_without_partial_execution(tmp_pa
     "script",
     [
         [
-            ModelMessageCompletedEvent(
+            ModelMessageDeltaEvent(
                 payload={"text": "unterminated"},
             )
         ],

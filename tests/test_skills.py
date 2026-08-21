@@ -10,7 +10,7 @@ from codecraft.llm import (
     LLMProviderRegistry,
     MockProvider,
     ModelCompletedEvent,
-    ModelMessageCompletedEvent,
+    ModelMessageDeltaEvent,
     ModelToolCallEvent,
 )
 from codecraft.schema.event import RuntimeEventType
@@ -276,11 +276,11 @@ def test_runtime_progressively_loads_skill_for_current_turn_only(tmp_path):
                     },
                 ),
                 ModelCompletedEvent(),
-                ModelMessageCompletedEvent(
+                ModelMessageDeltaEvent(
                     payload={"text": "review completed"},
                 ),
                 ModelCompletedEvent(),
-                ModelMessageCompletedEvent(
+                ModelMessageDeltaEvent(
                     payload={"text": "new turn completed"},
                 ),
                 ModelCompletedEvent(),
@@ -378,7 +378,7 @@ def test_skill_activation_survives_tool_result_truncation(tmp_path):
                     },
                 ),
                 ModelCompletedEvent(),
-                ModelMessageCompletedEvent(
+                ModelMessageDeltaEvent(
                     payload={"text": "loaded after truncation"},
                 ),
                 ModelCompletedEvent(),
@@ -431,7 +431,7 @@ def test_runtime_returns_stable_error_for_unknown_skill(tmp_path):
                     },
                 ),
                 ModelCompletedEvent(),
-                ModelMessageCompletedEvent(
+                ModelMessageDeltaEvent(
                     payload={"text": "continued after the failed load"},
                 ),
                 ModelCompletedEvent(),
@@ -476,7 +476,7 @@ def test_explicit_skill_mentions_activate_before_the_first_model_request(tmp_pat
         )
         provider = MockProvider(
             script=[
-                ModelMessageCompletedEvent(
+                ModelMessageDeltaEvent(
                     payload={"text": "explicit skill applied"},
                 ),
                 ModelCompletedEvent(),

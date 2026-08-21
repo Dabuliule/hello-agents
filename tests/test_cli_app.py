@@ -16,7 +16,6 @@ from codecraft.llm import (
     LLMProviderRegistry,
     MockProvider,
     ModelCompletedEvent,
-    ModelMessageCompletedEvent,
     ModelMessageDeltaEvent,
     ModelToolCallEvent,
 )
@@ -482,7 +481,7 @@ def test_exec_command_runs_runtime_and_prints_answer(tmp_path, monkeypatch):
                 [
                     MockProvider(
                         [
-                            ModelMessageCompletedEvent(
+                            ModelMessageDeltaEvent(
                                 payload={"text": "exec answer"},
                             ),
                             ModelCompletedEvent(),
@@ -520,7 +519,7 @@ def test_exec_command_runs_runtime_and_prints_answer(tmp_path, monkeypatch):
     )
     assert sessions_result.exit_code == 0
     assert "Recent Sessions" in sessions_result.output
-    assert "5" in sessions_result.output
+    assert "6" in sessions_result.output
 
 
 def test_exec_command_renders_markdown_assistant_message(tmp_path, monkeypatch):
@@ -531,7 +530,7 @@ def test_exec_command_renders_markdown_assistant_message(tmp_path, monkeypatch):
                 [
                     MockProvider(
                         [
-                            ModelMessageCompletedEvent(
+                            ModelMessageDeltaEvent(
                                 payload={
                                     "text": (
                                         "这是一个为 **AI Agent / Agent Engineer / "
@@ -705,7 +704,7 @@ max_parallel_read_tools = 2
                 [
                     MockProvider(
                         [
-                            ModelMessageCompletedEvent(
+                            ModelMessageDeltaEvent(
                                 payload={"text": "configured answer"},
                             ),
                             ModelCompletedEvent(),
@@ -796,7 +795,7 @@ def test_exec_command_prints_bash_approval_details(tmp_path, monkeypatch):
                                 },
                             ),
                             ModelCompletedEvent(),
-                            ModelMessageCompletedEvent(
+                            ModelMessageDeltaEvent(
                                 payload={"text": "Command was not run."},
                             ),
                             ModelCompletedEvent(),
