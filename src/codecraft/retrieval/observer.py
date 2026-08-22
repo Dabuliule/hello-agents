@@ -12,7 +12,13 @@ from codecraft.schema.tool import ToolCall, ToolResult
 
 
 class WorkspaceIndexObserver:
-    """在成功写文件或打补丁后，增量刷新已存在的仓库索引。"""
+    """在成功 write_file/apply_patch 后增量刷新已存在的仓库索引。
+
+    Observer 只消费工具返回的结构化实际变更路径，不根据调用参数猜测副作用；索引未
+    预先构建或后处理失败也不能反向判定原文件写入失败。Bash 等通用进程工具没有可靠
+    changed_files 协议，因此不在此自动刷新，其外部修改由查询新鲜度检查和 Scan 降级
+    尽力兜底。
+    """
 
     name = "workspace_index"
 

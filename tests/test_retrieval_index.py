@@ -17,6 +17,7 @@ from codecraft.retrieval import (
     RepositoryIndex,
     RetrievalRequest,
     ScanRetriever,
+    SymbolRetriever,
     WorkspaceIndexObserver,
 )
 from codecraft.retrieval.chunking import TreeSitterChunker
@@ -229,6 +230,34 @@ def test_context_engine_falls_back_when_index_match_is_stale(tmp_path):
     assert response.retriever == "scan"
     assert response.fallback_from == "lexical"
     assert response.matches[0].path == "src/auth/service.py"
+
+
+def test_context_engine_auto_uses_scan_when_optional_index_was_not_built(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "agent.py").write_text("class Agent: pass\n", encoding="utf-8")
+    index = RepositoryIndex(tmp_path / "indexes")
+    engine = ContextEngine(
+        [ScanRetriever(), LexicalRetriever(index), SymbolRetriever(index)]
+    )
+
+    response = asyncio.run(
+        engine.retrieve(
+            RetrievalRequest(
+                query="Agent",
+                root=workspace,
+                workspace_root=workspace,
+                mode="content",
+            ),
+            retriever_name="auto",
+        )
+    )
+
+    assert response.retriever == "scan"
+    assert response.route_reason == "identifier"
+    assert response.attempted_retrievers == ("symbol", "lexical", "scan")
+    assert response.matches[0].path == "agent.py"
+    assert not index.database_path(workspace).exists()
 
 
 def test_context_engine_falls_back_when_only_some_index_matches_are_stale(tmp_path):

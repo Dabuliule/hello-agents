@@ -10,7 +10,13 @@ from codecraft.retrieval.router import QueryRouter
 
 
 class ContextEngine:
-    """Retrieval boundary used by tools and future query routing."""
+    """统一扫描、词法和符号检索的路由与降级边界。
+
+    Retriever 只负责一种检索实现；Engine 决定显式选择、Auto 顺序尝试和不可用降级，
+    并把 retriever、路由原因与完整尝试链写回标准响应。它不持久化索引，也不把多个
+    Retriever 的结果混合打分：Auto 遇到首个非空成功结果就停止，保证行为可解释且
+    延迟有界。
+    """
 
     def __init__(
         self,

@@ -37,7 +37,12 @@ class RetrievalPlan:
 
 
 class QueryRouter:
-    """Build a deterministic, sequential retrieval plan from query shape."""
+    """只按查询形态生成确定性顺序计划，不调用模型或执行检索。
+
+    路由是低成本 heuristic，不做语义分类：标识符优先 symbol，自然语言优先 lexical，
+    路径和精确短语优先 scan；大小写敏感内容绕开不支持该语义的 FTS5。真正的索引
+    可用性和空结果处理留给 ContextEngine，因此缺少索引不会让 Auto 查询失败。
+    """
 
     def route(self, request: RetrievalRequest) -> RetrievalPlan:
         """根据 mode、路径特征、标识符和自然语言形态生成确定性计划。

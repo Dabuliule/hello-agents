@@ -81,7 +81,16 @@ class _IndexRow(TypedDict):
 
 
 class RepositoryIndex:
-    """按 workspace 隔离的 SQLite FTS5、代码块与符号持久索引。"""
+    """按 workspace 隔离的 SQLite FTS5、代码块与符号持久索引。
+
+    该索引完全本地、没有 embedding 或向量数据库：Tree-sitter 负责语法块与符号，
+    SQLite FTS5 负责 unicode61 分词和 BM25 排序。workspace 绝对路径的 SHA-256 前缀
+    只用于选择独立数据库目录，库内 metadata 仍保存并验证完整根路径，避免哈希目录被
+    误用于另一个仓库。
+
+    索引是可丢弃的性能层，不是真实源码来源。查询会用当前 stat 过滤普通陈旧命中，
+    ContextEngine 在索引不存在、不兼容或命中陈旧时降级到实时 ScanRetriever。
+    """
 
     def __init__(self, index_root: Path, *, chunker: TreeSitterChunker | None = None):
         """设置索引存储根，并可注入 Chunker 以便测试或替换切分策略。"""
@@ -117,6 +126,10 @@ class RepositoryIndex:
         快路径先比较 ``mtime_ns + size``；时间变化后再比较 SHA-256，内容
         未变时只更新元数据。文本变化才重新分块并在同一事务替换文件、FTS
         和符号记录。二进制或超大文件会从旧索引删除，避免返回过期内容。
+
+        ``mtime_ns + size`` 是本地开发性能优化，不是强内容一致性证明：若外部程序既
+        保持字节数又把 mtime 精确改回旧值，快路径可能漏掉变化。需要强一致性的服务端
+        场景应始终计算内容摘要或接入文件系统变更序列。
 
         Args:
             workspace_root: 要建立或更新索引的仓库根。

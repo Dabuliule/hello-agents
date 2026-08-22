@@ -30,7 +30,12 @@ def register_index_command(app: typer.Typer) -> None:
             ),
         ] = 1_000_000,
     ) -> None:
-        """验证目录，在线程中 sync RepositoryIndex，并映射用法/运行错误码。"""
+        """验证目录，在线程中增量同步本地 SQLite 索引并打印可诊断统计。
+
+        ``codecraft index`` 是可选的显式预热，不是运行 Agent 的前置条件；没有数据库时
+        workspace_search 会降级为实时扫描。同步属于阻塞的目录遍历、解析和 SQLite I/O，
+        因而放进工作线程，避免以后从已有事件循环复用命令逻辑时阻塞异步任务。
+        """
         workspace = path.expanduser().resolve()
         console = make_console()
         if not workspace.is_dir():

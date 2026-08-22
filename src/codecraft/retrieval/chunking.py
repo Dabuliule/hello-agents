@@ -75,7 +75,13 @@ _SYMBOL_NODES = {
 
 
 class TreeSitterChunker:
-    """优先沿顶层符号边界、必要时按重叠行窗口切分源文件。"""
+    """优先沿顶层符号边界、必要时按重叠行窗口切分源文件。
+
+    Python、JavaScript、TypeScript/TSX 和 Go 使用 Tree-sitter；其他后缀仍会作为普通
+    文本按行窗口进入 FTS，但没有 symbol 记录。分块只用最外层符号避免 class/method
+    区间重叠，符号表则保留嵌套定义，使“内容检索的块边界”和“名称检索的定义粒度”
+    可以分别优化。
+    """
 
     def __init__(self, *, max_lines: int = 120, overlap_lines: int = 12) -> None:
         """配置每块最大行数及相邻长块的重叠行数。
