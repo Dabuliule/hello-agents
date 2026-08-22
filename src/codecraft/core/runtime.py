@@ -9,13 +9,17 @@ from typing import Any
 
 from codecraft.approval.manager import ApprovalManager
 from codecraft.core.event_bus import EventBus
-from codecraft.core.reconstruction import reconstruct_conversation
+from codecraft.core.reconstruction import (
+    IncompleteToolCall,
+    reconstruct_session_state,
+)
 from codecraft.core.session import Session
 from codecraft.core.session_store import SessionStore
 from codecraft.core.thread import AgentThread
 from codecraft.llm.registry import LLMProviderRegistry
 from codecraft.schema.event import RuntimeEventType
 from codecraft.schema.session import SessionConfig, SessionSnapshot, SessionSummary
+from codecraft.schema.tool import ToolResult
 from codecraft.skill import SkillRegistry
 from codecraft.tool.registry import ToolRegistry
 from codecraft.tool.observer import ToolResultObserver
@@ -107,16 +111,37 @@ class AgentRuntime:
         return thread
 
     async def resume_thread(self, session_id: str) -> AgentThread:
-        """根据 session 日志恢复 thread，并重建模型 conversation。"""
+        """按身份加载一次 Snapshot，再恢复可继续提交输入的 Thread。
+
+        SessionStore 负责验证日志；``resume_snapshot`` 负责重新装配当前进程资源。旧事件
+        只用于状态投影，不会作为命令重新调度，因此历史模型请求和工具调用不会重放。
+        """
         snapshot = await self.session_store.resume(session_id)
         return await self.resume_snapshot(snapshot)
 
     async def resume_snapshot(self, snapshot: SessionSnapshot) -> AgentThread:
-        """从已加载的快照恢复 thread，避免重复读取同一份 session 日志。"""
+        """从已验证 Snapshot 投影 Conversation，并续接原 Session 事件流。
+
+        Args:
+            snapshot: SessionStore 已验证的原始配置与有序事件。
+
+        Returns:
+            已订阅 EventBus，队列首项为新 ``SESSION_RESTORED`` 的 AgentThread。
+
+        Raises:
+            ValueError: 持久化 cwd 已不可用、Provider 不存在，或 Conversation 快照无效。
+            CodecraftError: 当前 Tool Provider 无法启动或 restored 事件无法持久化。
+
+        恢复沿用创建时的 SessionConfig 规则，但 Provider/Tool/Skill 都由当前 Runtime
+        Registry 重新连接；这既不复活旧进程资源，也不假设外部环境未变化。
+        ``reconstruct_conversation`` 只投影模型可见历史，不执行旧 Turn。新 Session 从
+        日志最后 seq 接号，并在 Thread 先订阅后追加一个 SESSION_RESTORED，保证 UI 不
+        漏事件且多次恢复仍留下审计痕迹。
+        """
         snapshot.config.ensure_runtime_ready()
         llm_provider = self.llm_providers.get(snapshot.config.model_provider)
         await self.tool_registry.start()
-        conversation = reconstruct_conversation(snapshot.events)
+        reconstructed = reconstruct_session_state(snapshot.events)
 
         session = Session(
             config=snapshot.config,
@@ -127,7 +152,7 @@ class AgentRuntime:
             event_bus=self.event_bus,
             tool_result_observers=self.tool_result_observers,
             skill_registry=self.skill_registry,
-            conversation=conversation,
+            conversation=reconstructed.conversation,
             seq=snapshot.events[-1].seq if snapshot.events else 0,
         )
         thread = AgentThread(session)
@@ -136,7 +161,63 @@ class AgentRuntime:
             RuntimeEventType.SESSION_RESTORED,
             {"skills": skill_snapshot} if skill_snapshot else None,
         )
+        await self._repair_incomplete_tool_calls(
+            session,
+            reconstructed.incomplete_tool_calls,
+        )
         return thread
+
+    @staticmethod
+    async def _repair_incomplete_tool_calls(
+        session: Session,
+        incomplete_calls: tuple[IncompleteToolCall, ...],
+    ) -> None:
+        """持久化硬崩溃遗留 calls 的保守终态，并同步修复模型历史。
+
+        已出现 TOOL_CALL_STARTED 的调用可能已经完成外部副作用，只是结果没有成功
+        落盘，因此只能标记 outcome_unknown 且禁止自动重试。仅记录了模型意图的调用
+        可以确定尚未进入 ToolRunner，仍补成失败结果，但标明 retry_safe=True 供后续
+        模型或用户显式决定，而不是在 Resume 内自动执行。
+
+        每个结果先通过 Session.emit 追加到原 JSONL，再修改 Conversation。若中途失败，
+        本次 Resume 不会返回部分可用 Thread；下次扫描会跳过已有终态，只继续修复剩余
+        calls，因此协议天然可重入。
+        """
+        for call in incomplete_calls:
+            if call.started:
+                content = (
+                    "Tool outcome is unknown because the previous process stopped "
+                    "before recording a result."
+                )
+                error = "tool_outcome_unknown"
+            else:
+                content = "Tool was not started before the previous process stopped."
+                error = "tool_not_started"
+            result = ToolResult(
+                success=False,
+                content=content,
+                error=error,
+                metadata={
+                    "outcome_unknown": call.started,
+                    "retry_safe": not call.started,
+                    "interruption_reason": "session_recovery",
+                },
+            )
+            await session.emit(
+                RuntimeEventType.TOOL_CALL_FINISHED,
+                {
+                    "call_id": call.call_id,
+                    "name": call.name,
+                    "result": result.model_dump(mode="json"),
+                    "duration_ms": 0,
+                },
+                turn_id=call.turn_id,
+            )
+            session.conversation.append_tool_result(
+                call.call_id,
+                call.name,
+                result.model_content(),
+            )
 
     async def resume_last(self, cwd: Path | None = None) -> AgentThread:
         """恢复可选 cwd 范围内最近修改且有效的 Session。"""

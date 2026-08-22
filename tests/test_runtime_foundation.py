@@ -2932,8 +2932,10 @@ def test_runtime_resume_reconstructs_conversation_without_replaying_turn(tmp_pat
         restored = await resumed.next_event()
         await resumed.submit(SessionInput.user_message("inp_two", "second"))
         await resumed.wait_until_idle()
+        continued_snapshot = await resumed.read_snapshot()
 
         assert restored.type == RuntimeEventType.SESSION_RESTORED
+        assert restored.seq == 7
         assert len(first_provider.calls) == 1
         assert len(second_provider.calls) == 1
         assert [
@@ -2943,6 +2945,180 @@ def test_runtime_resume_reconstructs_conversation_without_replaying_turn(tmp_pat
             "first",
             "first answer",
             "second",
+        ]
+        assert [event.seq for event in continued_snapshot.events] == list(range(1, 13))
+        assert [
+            event.type
+            for event in continued_snapshot.events
+            if event.type == RuntimeEventType.SESSION_RESTORED
+        ] == [RuntimeEventType.SESSION_RESTORED]
+
+    asyncio.run(run_test())
+
+
+def test_runtime_resume_repairs_incomplete_tool_calls_without_reexecution(tmp_path):
+    async def run_test() -> None:
+        config = make_config(tmp_path)
+        store = SessionStore(config.codecraft_home)
+        await store.create_session(config)
+
+        events = [
+            RuntimeEvent(
+                event_id="evt_started",
+                session_id=config.session_id,
+                seq=1,
+                type=RuntimeEventType.SESSION_STARTED,
+                payload={"config": config.model_dump(mode="json")},
+            ),
+            RuntimeEvent(
+                event_id="evt_user",
+                session_id=config.session_id,
+                turn_id="turn_crashed",
+                seq=2,
+                type=RuntimeEventType.USER_MESSAGE,
+                payload={"input_id": "inp_crashed", "text": "run tools"},
+            ),
+            RuntimeEvent(
+                event_id="evt_call_not_started",
+                session_id=config.session_id,
+                turn_id="turn_crashed",
+                seq=3,
+                type=RuntimeEventType.MODEL_TOOL_CALL,
+                payload={
+                    "call_id": "call_not_started",
+                    "name": "write_external",
+                    "arguments": {"value": "one"},
+                },
+            ),
+            RuntimeEvent(
+                event_id="evt_call_started",
+                session_id=config.session_id,
+                turn_id="turn_crashed",
+                seq=4,
+                type=RuntimeEventType.MODEL_TOOL_CALL,
+                payload={
+                    "call_id": "call_started",
+                    "name": "write_external",
+                    "arguments": {"value": "two"},
+                },
+            ),
+            RuntimeEvent(
+                event_id="evt_tool_started",
+                session_id=config.session_id,
+                turn_id="turn_crashed",
+                seq=5,
+                type=RuntimeEventType.TOOL_CALL_STARTED,
+                payload={
+                    "call_id": "call_started",
+                    "name": "write_external",
+                    "arguments": {"value": "two"},
+                },
+            ),
+            RuntimeEvent(
+                event_id="evt_call_done",
+                session_id=config.session_id,
+                turn_id="turn_crashed",
+                seq=6,
+                type=RuntimeEventType.MODEL_TOOL_CALL,
+                payload={
+                    "call_id": "call_done",
+                    "name": "read_done",
+                    "arguments": {},
+                },
+            ),
+            RuntimeEvent(
+                event_id="evt_tool_done",
+                session_id=config.session_id,
+                turn_id="turn_crashed",
+                seq=7,
+                type=RuntimeEventType.TOOL_CALL_FINISHED,
+                payload={
+                    "call_id": "call_done",
+                    "name": "read_done",
+                    "result": ToolResult(success=True, content="done").model_dump(
+                        mode="json"
+                    ),
+                    "duration_ms": 1,
+                },
+            ),
+        ]
+        for event in events:
+            await store.append_event(event)
+
+        provider = MockProvider(
+            script=[
+                ModelMessageDeltaEvent(payload={"text": "continued safely"}),
+                ModelCompletedEvent(),
+            ]
+        )
+        runtime = AgentRuntime(
+            session_store=store,
+            llm_providers=LLMProviderRegistry([provider]),
+            # Historic tool names intentionally do not exist in the new process:
+            # Resume must synthesize terminal observations, never execute them.
+            tool_registry=ToolRegistry(),
+        )
+        resumed = await runtime.resume_thread(config.session_id)
+        restored = await resumed.next_event()
+        not_started = await resumed.next_event()
+        outcome_unknown = await resumed.next_event()
+
+        assert restored.type == RuntimeEventType.SESSION_RESTORED
+        assert [not_started.payload["call_id"], outcome_unknown.payload["call_id"]] == [
+            "call_not_started",
+            "call_started",
+        ]
+        assert not_started.payload["result"]["error"] == "tool_not_started"
+        assert not_started.payload["result"]["metadata"] == {
+            "outcome_unknown": False,
+            "retry_safe": True,
+            "interruption_reason": "session_recovery",
+        }
+        assert outcome_unknown.payload["result"]["error"] == "tool_outcome_unknown"
+        assert outcome_unknown.payload["result"]["metadata"] == {
+            "outcome_unknown": True,
+            "retry_safe": False,
+            "interruption_reason": "session_recovery",
+        }
+        assert provider.calls == []
+
+        await resumed.submit(SessionInput.user_message("inp_continue", "continue"))
+        await resumed.wait_until_idle()
+
+        assert len(provider.calls) == 1
+        recovered_results = [
+            message
+            for message in provider.calls[0].messages
+            if isinstance(message, ModelToolResultMessage)
+        ]
+        assert [message.tool_call_id for message in recovered_results] == [
+            "call_done",
+            "call_not_started",
+            "call_started",
+        ]
+        assert "tool_not_started" in recovered_results[1].content
+        assert "tool_outcome_unknown" in recovered_results[2].content
+
+        second_runtime = AgentRuntime(
+            session_store=store,
+            llm_providers=LLMProviderRegistry([MockProvider()]),
+            tool_registry=ToolRegistry(),
+        )
+        await second_runtime.resume_thread(config.session_id)
+        persisted = await store.load_events(config.session_id)
+        recovery_results = [
+            event
+            for event in persisted
+            if event.type == RuntimeEventType.TOOL_CALL_FINISHED
+            and event.payload["result"]["metadata"].get("interruption_reason")
+            == "session_recovery"
+        ]
+
+        # A second Resume appends only SESSION_RESTORED; already closed calls are
+        # not repaired again.
+        assert [event.payload["call_id"] for event in recovery_results] == [
+            "call_not_started",
+            "call_started",
         ]
 
     asyncio.run(run_test())

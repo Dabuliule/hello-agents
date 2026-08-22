@@ -210,10 +210,25 @@ class Session:
         payload: dict[str, Any] | None = None,
         turn_id: str | None = None,
     ) -> RuntimeEvent:
-        """持久化并广播一个 RuntimeEvent。
+        """把一个 Runtime 事实按 ``seq`` 顺序先持久化、再广播。
 
-        seq 是 session 日志的顺序号；写入失败时回滚 seq，避免后续事件出现
-        不连续的编号。
+        Args:
+            event_type: 决定严格 payload 模型的稳定事件类型。
+            payload: 会在 ``RuntimeEvent`` 构造时清洗、脱敏并验证的业务载荷。
+            turn_id: 产生该事件的可选 Turn；Session 级事件不设置。
+
+        Returns:
+            已获得事件 ID、Session 内序号和 UTC 时间戳的不可变事件。
+
+        Raises:
+            SessionError: JSONL 追加失败，且该序号会回滚供下一次 emit 重用。
+            asyncio.CancelledError: 追加已经开始时，会等它落盘并完成对应广播后传播。
+            Exception: EventBus handler 失败时原样传播；事件此时已经持久化，序号不能
+                回滚，否则下一次事件会与日志中已有序号冲突。
+
+        ``_emit_lock`` 覆盖分配 seq、append 和 broadcast 整段，而不只保护整数自增。
+        这样两个并发生产者不能让后一个事件先落盘或先被 UI 看见。持久化是事实来源，
+        EventBus 只是实时投影，所以必须 append 成功后再 broadcast。
         """
         async with self._emit_lock:
             self.seq += 1

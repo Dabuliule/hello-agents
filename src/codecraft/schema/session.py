@@ -176,7 +176,12 @@ class SessionSummary(BaseModel):
 
 
 class SessionSnapshot(BaseModel):
-    """恢复 session 时读取到的配置和事件日志。"""
+    """SessionStore 验证后交给 Runtime 的配置与有序事件传输对象。
+
+    Snapshot 不是独立持久化文件，也不包含活跃 Task、Provider 连接或可执行工具状态；
+    它只是一次 JSONL 读取结果。Runtime 会从 events 投影 Conversation，并按最后 seq
+    继续追加同一个 Session 日志。
+    """
 
     config: SessionConfig
     events: list[RuntimeEvent]

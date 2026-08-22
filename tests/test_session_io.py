@@ -98,6 +98,70 @@ def test_session_store_serializes_concurrent_appends(tmp_path):
     asyncio.run(run_test())
 
 
+def test_session_emit_serializes_append_and_broadcast_as_one_ordered_step(
+    tmp_path, monkeypatch
+):
+    async def run_test() -> None:
+        config = _config(tmp_path)
+        store = SessionStore(config.codecraft_home)
+        await store.create_session(config)
+        event_bus = EventBus()
+        broadcast: list[int] = []
+
+        async def capture(event: RuntimeEvent) -> None:
+            broadcast.append(event.seq)
+
+        event_bus.subscribe(capture)
+        session = Session(
+            config=config,
+            session_store=store,
+            llm_provider=MockProvider([]),
+            tool_registry=ToolRegistry(),
+            event_bus=event_bus,
+        )
+        first_append_entered = asyncio.Event()
+        release_first_append = asyncio.Event()
+        append_attempts: list[int] = []
+        original_append = store.append_event
+
+        async def block_first_append(event: RuntimeEvent) -> None:
+            append_attempts.append(event.seq)
+            if event.seq == 1:
+                first_append_entered.set()
+                await release_first_append.wait()
+            await original_append(event)
+
+        monkeypatch.setattr(store, "append_event", block_first_append)
+        first = asyncio.create_task(
+            session.emit(
+                RuntimeEventType.USER_MESSAGE,
+                {"input_id": "inp_one", "text": "one"},
+            )
+        )
+        await first_append_entered.wait()
+        second = asyncio.create_task(
+            session.emit(
+                RuntimeEventType.USER_MESSAGE,
+                {"input_id": "inp_two", "text": "two"},
+            )
+        )
+        await asyncio.sleep(0)
+
+        # The second producer cannot allocate/append seq=2 while seq=1 is between
+        # persistence and broadcast inside the same emit critical section.
+        assert append_attempts == [1]
+        assert broadcast == []
+
+        release_first_append.set()
+        emitted = await asyncio.gather(first, second)
+
+        assert [event.seq for event in emitted] == [1, 2]
+        assert [event.seq for event in await store.load_events("ses_io")] == [1, 2]
+        assert broadcast == [1, 2]
+
+    asyncio.run(run_test())
+
+
 def test_session_emit_broadcasts_a_persisted_event_before_cancellation(
     tmp_path, monkeypatch
 ):

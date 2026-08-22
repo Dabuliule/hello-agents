@@ -45,6 +45,16 @@ class SessionStore:
 
     每个 session 对应一个按日期分目录的 `.jsonl` 文件。恢复会话时不保存额外
     快照，而是重新读取事件日志并校验 seq 连续性。
+
+    这是单 Runtime 进程内的 append-only 存储，不是多进程数据库：每文件
+    ``asyncio.Lock`` 只能防止本实例调度的线程写入互相穿插，不能协调另一个进程或
+    另一个 SessionStore 实例。调用方 ``Session.emit`` 负责分配并串行化 seq；Store
+    不在写入时排序，读取时才把版本、事件结构、session_id 和连续 seq 作为信任边界
+    重新校验。
+
+    每条 append 会 flush Python 用户态缓冲，但没有调用 fsync，因此保证写入完成后
+    当前系统可见，不宣称机器断电级 durability。JSONL 换取了简单追加、逐行诊断和
+    事件重放能力，代价是 Resume 需要从头扫描日志。
     """
 
     SESSION_SCAN_CONCURRENCY = 8
@@ -78,7 +88,21 @@ class SessionStore:
         return path
 
     async def append_event(self, event: RuntimeEvent) -> None:
-        """追加单个事件到 session 日志，同时避免阻塞 runtime event loop。"""
+        """在线程池把一个已排序事件追加成独立 JSONL 行。
+
+        Args:
+            event: 已由 Session 分配 seq 并通过领域模型验证的不可变事件。
+
+        Raises:
+            SessionError: 定位文件、编码或追加失败；metadata 保留 Session、事件类型、
+                seq、路径和底层原因，供 Turn 归一化为可诊断错误事件。
+            asyncio.CancelledError: 调用者取消发生在写入途中时，先等待不可撤销的线程
+                append 完成，再传播取消，避免调用方误以为磁盘没有这条事件。
+
+        每文件锁只保证本 Store 实例内一次写完一整行，并保留获得锁的顺序；它不会按
+        seq 重排或校验。磁盘 I/O 使用 ``to_thread``，避免慢文件系统阻塞 Runtime 的
+        event loop。
+        """
         path = self._path_for_session(event.session_id)
         line = event.model_dump_json()
         append_lock = self._append_locks.setdefault(path, asyncio.Lock())
@@ -403,7 +427,22 @@ class SessionStore:
         )
 
     async def resume(self, session_id: str) -> SessionSnapshot:
-        """从事件日志恢复 session 配置和历史事件。"""
+        """把一个可恢复 JSONL 日志读取为配置与完整事件快照。
+
+        Args:
+            session_id: 文件名、首事件配置和每条 RuntimeEvent 都必须一致的身份。
+
+        Returns:
+            首条 ``SESSION_STARTED`` 中的原始 SessionConfig，以及从 seq=1 开始严格
+            连续的全部事件。
+
+        Raises:
+            SessionRestoreError: 文件不存在、日志为空、首事件/配置无效，或任一事件的
+                编码、JSON、schema、session_id、seq 校验失败。
+
+        本方法只做不产生副作用的加载与验证，不启动 Provider、不重放工具，也不修改
+        原日志。Conversation 投影和新的 ``SESSION_RESTORED`` 事件由 AgentRuntime 负责。
+        """
         path = self._path_for_session(session_id)
         result = await asyncio.to_thread(
             self._read_session_file,
@@ -511,7 +550,11 @@ class SessionStore:
 
     @staticmethod
     def _append_line(path: Path, line: str) -> None:
-        """以二进制 append 写入一条 UTF-8 JSONL 并 flush 用户态缓冲。"""
+        """以二进制 append 写入一条 UTF-8 JSONL，并 flush 用户态缓冲。
+
+        二进制模式避免文本层换行转换；末尾固定补一个换行，恢复时便可逐条定位坏记录。
+        ``flush`` 不等于 ``fsync``：它没有承诺断电后数据一定仍在持久介质上。
+        """
         with path.open("ab") as handle:
             handle.write(f"{line}\n".encode())
             handle.flush()
@@ -522,7 +565,11 @@ class SessionStore:
         line: str,
         lock: asyncio.Lock,
     ) -> None:
-        """用每文件 asyncio.Lock 串行化线程池 append，维持事件顺序。"""
+        """用每文件 asyncio.Lock 串行化本实例的线程池 append。
+
+        锁必须包住 ``to_thread`` 的整个等待期；若只保护线程创建，两个后台线程仍可能
+        同时写同一文件。这里的顺序是获得锁的顺序，业务 seq 顺序由 Session.emit 保证。
+        """
         async with lock:
             await asyncio.to_thread(self._append_line, path, line)
 
