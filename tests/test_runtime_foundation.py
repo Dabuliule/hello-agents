@@ -544,6 +544,17 @@ def test_command_policy_shell_control_and_expansion_require_approval(command):
     assert decision.requires_approval is True
 
 
+def test_command_policy_preserves_quote_context_for_shell_expansion():
+    policy = CommandPolicy()
+
+    # 单引号和转义把 $ 变成 rg 的字面 pattern；双引号允许 shell 展开。
+    assert policy.classify("rg '$HOME'").risk == CommandRisk.SAFE
+    assert policy.classify(r"rg \$HOME").risk == CommandRisk.SAFE
+    decision = policy.classify('rg "$HOME"')
+    assert decision.risk == CommandRisk.PROMPT
+    assert decision.reason == "shell expansion requires approval"
+
+
 @pytest.mark.parametrize(
     "command",
     [
@@ -887,10 +898,31 @@ def test_instruction_loader_bounds_large_files(tmp_path):
 
 
 def test_workspace_guard_rejects_path_escape(tmp_path):
-    guard = WorkspaceGuard(tmp_path)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside = tmp_path / "outside.txt"
+    outside.write_text("secret", encoding="utf-8")
+    escaped_link = workspace / "escaped-link.txt"
+    escaped_link.symlink_to(outside)
+    guard = WorkspaceGuard(workspace)
 
-    with pytest.raises(Exception, match="outside workspace"):
+    with pytest.raises(WorkspaceAccessError, match="outside workspace"):
         guard.resolve_read_path("../outside.txt")
+    with pytest.raises(WorkspaceAccessError, match="outside workspace"):
+        guard.resolve_read_path(str(outside))
+    with pytest.raises(WorkspaceAccessError, match="outside workspace"):
+        guard.resolve_read_path("escaped-link.txt")
+
+
+def test_workspace_guard_allows_missing_write_target_inside_workspace(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    guard = WorkspaceGuard(workspace)
+
+    resolved = guard.resolve_write_path("new/nested.txt")
+
+    assert resolved == workspace / "new" / "nested.txt"
+    assert not resolved.exists()
 
 
 def test_read_file_and_list_files_tools(tmp_path):

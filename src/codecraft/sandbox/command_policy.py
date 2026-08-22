@@ -18,7 +18,12 @@ class CommandRisk(StrEnum):
 
 
 class CommandDecision(BaseModel):
-    """命令判级、可解释原因和是否进入用户审批的结果。"""
+    """命令判级、可解释原因和是否进入用户审批的稳定结果。
+
+    ``risk`` 用于审计和 BashTool 的最终硬拒绝；``requires_approval`` 直接驱动
+    ApprovalManager。当前 SAFE/DENY 都不弹窗，前者可继续、后者由工具拒绝；只有
+    PROMPT 请求用户决定，避免把“是否询问”和“是否允许”混成一个布尔值。
+    """
 
     risk: CommandRisk
     reason: str
@@ -106,17 +111,29 @@ _DOUBLE_SHELL_OPERATORS = frozenset(
 
 
 class CommandPolicy:
-    """Classify shell commands with a small, fail-closed read-only allowlist.
+    """用小型只读白名单和 fail-closed 规则静态判定 shell 命令风险。
 
-    A command is safe only when its complete argv matches a rule below. Unknown
-    arguments and shell evaluation features require approval; opaque command or
-    process substitution is denied. The sandbox remains the execution boundary.
+    只有完整 argv 命中白名单才是 SAFE；未知命令、未知参数、控制运算符和普通变量/
+    glob 展开至少 PROMPT；命令替换、进程替换、无法可靠解包的 wrapper 和宽泛
+    ``rm -rf`` 直接 DENY。策略只做保守静态判级，不执行 shell，也不声称理解全部
+    shell 语义；真正的文件、网络和进程边界仍由 SandboxBackend 强制。
+
+    判级采用白名单而不是“危险词黑名单”：同一可执行文件的 flag、重定向、wrapper
+    或后续 segment 都可能改变副作用，只有核对完整形状才能给出无需审批的 SAFE。
     """
 
     def classify(
         self, command: str, *, network_access: bool = False
     ) -> CommandDecision:
-        """返回一条 shell 命令的风险、原因和审批要求。
+        """返回整条 shell 文本的最严格风险、原因和审批要求。
+
+        Args:
+            command: 模型请求执行的原始 shell 文本，不在判级期间展开或执行。
+            network_access: Runtime 是否具备网络能力；具备能力仍不等于免审批。
+
+        Returns:
+            SAFE、PROMPT 或 DENY 的稳定 ``CommandDecision``。网络命令在能力关闭时
+            DENY，能力开启时仍为 PROMPT；用户批准也不能把 DENY 变成允许。
 
         Example:
             >>> CommandPolicy().classify("pwd").risk
@@ -140,7 +157,9 @@ class CommandPolicy:
         """扫描整条 shell 文本并聚合每个 segment 的最严格决定。
 
         命令/进程替换直接 DENY；控制运算符和普通 expansion 至少 PROMPT；
-        任一 segment DENY 会压过其他结果。只有单段且完整命中只读白名单才 SAFE。
+        任一 segment DENY 会压过其他结果。聚合顺序固定为
+        ``substitution → segment DENY → expanded rm -rf → operator → expansion``；
+        只有单段且完整命中只读白名单才 SAFE。
         """
         scan = _scan_shell(command)
         if scan.has_substitution:
@@ -218,7 +237,11 @@ class CommandPolicy:
         wrapper_depth: int,
         has_expansion: bool,
     ) -> CommandDecision:
-        """判定一个已 shlex 拆分命令的 wrapper、破坏性、网络与白名单规则。"""
+        """按 wrapper、破坏性、网络、精确白名单顺序判定一个 argv。
+
+        wrapper 必须先解包，否则 ``env sudo``、``sh -c 'rm -rf /'`` 会只看到外层
+        可执行文件；硬拒绝先于网络和白名单，默认分支则保守落到 PROMPT。
+        """
         wrapper_decision = self._classify_indirection(
             parts,
             network_access=network_access,
@@ -299,7 +322,11 @@ class CommandPolicy:
         wrapper_depth: int,
         has_expansion: bool,
     ) -> CommandDecision | None:
-        """识别赋值、env/command/exec 和 shell -c 间接调用并递归判级。"""
+        """识别赋值、env/command/exec 和 shell -c 间接调用并递归判级。
+
+        能可靠还原实际 argv/脚本文本时继续递归，不能还原时直接 DENY；深度上限
+        防止恶意嵌套消耗和利用解析差异绕过内层危险命令检查。
+        """
         assignment_count = self._leading_assignment_count(parts)
         if assignment_count:
             inner_parts = parts[assignment_count:]
@@ -382,7 +409,11 @@ class CommandPolicy:
     def _elevate_wrapper_decision(
         decision: CommandDecision, wrapper: str
     ) -> CommandDecision:
-        """保留 DENY，否则因间接执行把决定统一提升为需审批。"""
+        """保留内层 DENY，否则因间接执行把 SAFE/PROMPT 统一提升为 PROMPT。
+
+        即使 ``env LANG=C pwd`` 的内层 argv 是只读白名单，wrapper 仍会改变环境、
+        PATH 查找或 shell 启动语义，因此不继承 SAFE。
+        """
         if decision.risk == CommandRisk.DENY:
             return decision
         return CommandDecision(
@@ -660,7 +691,13 @@ class CommandPolicy:
 
 
 class _ShellScanner:
-    """不执行 shell 的单遍词法扫描器，用于发现控制语法和动态求值。"""
+    """不执行 shell 的单遍词法扫描器，用于发现控制语法和动态求值。
+
+    Scanner 保留单/双引号与转义语境，识别真正生效的 ``$``、反引号、glob、管道、
+    重定向和换行，再把各命令段交给 shlex 拆 argv。不能只使用 shlex：去掉引号后，
+    单引号中的字面量 ``'$HOME'`` 与双引号中的展开 ``"$HOME"`` 将难以区分。
+    这只是保守词法器而非完整 shell parser；无法证明安全的形状不会进入 SAFE。
+    """
 
     def __init__(self, command: str) -> None:
         """初始化引号、转义、当前位置和累计结果状态。"""
