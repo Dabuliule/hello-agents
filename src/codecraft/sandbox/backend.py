@@ -19,7 +19,13 @@ class SandboxBackendType(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class SandboxExecutionRequest:
-    """后端执行所需命令、路径、安全模式、预算和环境白名单快照。"""
+    """一次后端执行所需命令、能力、预算和环境策略的不可变快照。
+
+    BashTool 在治理完成后构造本对象；各后端必须把同一份 workspace/cwd、模式、
+    网络开关和预算翻译成自身隔离机制，不能重新读取可能已变化的 Runtime 配置。
+    ``allow_workspace_path_entries`` 只允许已审批命令使用 workspace 内 PATH 项，
+    避免免审批只读命令被仓库中的同名可执行文件替换。
+    """
 
     command: str
     cwd: Path
@@ -41,7 +47,12 @@ class SandboxExecutionRequest:
 
 @dataclass(frozen=True, slots=True)
 class SandboxExecutionResult:
-    """不假定成功的原始进程输出、终态、截断和后端诊断。"""
+    """不假定成功的原始进程输出、终态、截断和后端诊断。
+
+    命令正常启动但返回非零仍是 Result；只有沙箱自身无法启动、验证或建立隔离时
+    才抛 ``SandboxBackendError``。BashTool 据此区分 command_failed 与
+    sandbox_backend_error，而不会把用户命令失败误报成基础设施故障。
+    """
 
     exit_code: int | None
     stdout: bytes
@@ -58,7 +69,11 @@ class SandboxBackendError(RuntimeError):
 
 
 class SandboxBackend:
-    """所有命令隔离实现必须遵循的异步后端接口。"""
+    """宿主进程、原生 OS 和容器执行实现共同遵循的异步接口。
+
+    ``name`` 用于配置和审计，``isolation`` 明确声明实际边界；统一接口只保证请求/
+    结果协议一致，不代表每个实现都提供同等级隔离，Process 后端会明确报告 none。
+    """
 
     name: str
     isolation: str

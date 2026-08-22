@@ -231,6 +231,8 @@ def sandbox_environment(
 
     未审批命令会从 PATH 移除 workspace 内、相对和无效条目，防止仓库中的
     假 ``git``/``python`` 覆盖系统工具；临时 HOME/TMP/cache 可在只读根下写。
+    这只减少环境泄密和命令 shadowing，不限制进程读取绝对路径或访问网络，后者
+    必须由 Seatbelt/Bubblewrap/Docker 等实际隔离后端完成。
     """
     names = _SAFE_ENV_NAMES | frozenset(
         validated_environment_names(request.env_allowlist)
@@ -255,7 +257,12 @@ def sandbox_environment(
 
 
 def _sandbox_path(value: str, *, workspace_root: Path) -> str:
-    """Drop PATH entries that allow a workspace-local executable to shadow tools."""
+    """移除可让 workspace 本地程序覆盖系统工具的 PATH 项。
+
+    同时比较词法路径与解析 symlink 后的真实路径：前者拒绝“路径位于 workspace、
+    symlink 目标在外部”，后者拒绝“外部 PATH symlink 反向指入 workspace”。相对/
+    空项也丢弃，因为它们会随 cwd 改变解析目标。
+    """
     lexical_root = Path(os.path.abspath(workspace_root.expanduser()))
     resolved_root = workspace_root.expanduser().resolve(strict=False)
     selected: list[str] = []

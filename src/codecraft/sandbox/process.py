@@ -20,7 +20,13 @@ from codecraft.sandbox.backend import (
 
 
 class ProcessSandboxBackend(SandboxBackend):
-    """Explicit host-process execution without an OS isolation boundary."""
+    """显式选择的宿主机进程执行器，不提供 OS 文件系统或网络隔离。
+
+    它仍复用 cwd 校验、最小环境、临时 HOME、输出上限、超时和进程组清理，解决
+    凭据误传、输出撑爆内存和取消后遗留子进程等执行卫生问题；但命令仍拥有当前
+    用户在宿主机上的权限，``network_access=False`` 在这里也只是上游策略事实，
+    不能阻止未知程序直接创建网络连接。因此生产 AUTO 不会静默降级到本后端。
+    """
 
     name = SandboxBackendType.PROCESS.value
     isolation = "none"
@@ -29,7 +35,8 @@ class ProcessSandboxBackend(SandboxBackend):
         """以净化环境和独立进程组在宿主机执行，不提供 OS 隔离。
 
         该后端仍验证 cwd、限制时间/输出并重定向临时 HOME，但 metadata 明确
-        标记 ``isolation=none``；它只应由用户显式配置。
+        标记 ``isolation=none``。CommandPolicy/Approval 可以降低误操作概率，不能
+        把宿主进程执行变成强隔离；它只应由用户知情地显式配置。
         """
         _, cwd = workspace_path(request)
         with tempfile.TemporaryDirectory(prefix="codecraft-process-") as temp:

@@ -28,7 +28,12 @@ _DOCKER_PROCESS_GRACE_SECONDS = 1.0
 
 
 class DockerSandboxConfig(BaseModel):
-    """固定镜像及 CPU、内存、进程数、tmpfs 的容器硬资源限制。"""
+    """固定镜像及 CPU、内存、进程数、tmpfs 的容器资源上限。
+
+    配置在 Session 创建前由 Pydantic 限界，避免零/负预算或异常大配额进入 docker
+    argv。镜像只接受单个非 option reference；Backend 还使用 ``--pull never``，
+    因而执行不会隐式联网更新镜像，环境可复现性和镜像准备责任都留给用户/CI。
+    """
 
     image: str = Field(default="codecraft-sandbox:py311", min_length=1)
     cpus: float = Field(default=1.0, gt=0, le=32)
@@ -46,7 +51,13 @@ class DockerSandboxConfig(BaseModel):
 
 
 class DockerSandboxBackend(SandboxBackend):
-    """使用无特权、只读根和资源限制 Docker 容器的隔离后端。"""
+    """每条 Bash 命令使用一个无特权、只读根、资源封顶的临时容器。
+
+    宿主只挂载 workspace；READ_ONLY 使用只读 bind，其余模式使用可写 bind，包含
+    DANGER_FULL_ACCESS 也不会暴露宿主根。容器始终 drop capabilities、禁止提权并
+    以宿主 UID/GID 运行。Docker daemon 是独立生命周期边界，所以 timeout/cancel
+    除了终止 CLI 进程，还必须按唯一名称强制删除可能仍在运行的容器。
+    """
 
     name = SandboxBackendType.DOCKER.value
     isolation = "container"
@@ -128,8 +139,9 @@ class DockerSandboxBackend(SandboxBackend):
         """构造不拉镜像、只读根、资源封顶、drop capabilities 的 docker argv。
 
         workspace 映射到固定 ``/workspace``；READ_ONLY 使用 readonly bind，
-        其余模式仅让 workspace 可写。环境变量只按名称从宿主传递，不把值
-        拼接进命令；包含逗号的宿主路径因 mount grammar 歧义而拒绝。
+        其余模式仅让 workspace 可写，DANGER_FULL_ACCESS 也不挂宿主根。容器镜像根
+        始终 ``--read-only``，只有限额 tmpfs 提供临时写空间。环境变量只按名称从
+        宿主传递，不把值拼接进命令；包含逗号的宿主路径因 mount grammar 歧义拒绝。
         """
         mount, container_cwd = _workspace_mount(request)
         command = [
@@ -181,7 +193,11 @@ class DockerSandboxBackend(SandboxBackend):
         return command
 
     async def _force_remove(self, container_name: str) -> None:
-        """启动 ``docker rm --force`` 并在五秒内尽力收口清理进程。"""
+        """启动 ``docker rm --force`` 并在五秒内尽力删除 daemon 侧容器。
+
+        ``--rm`` 依赖容器正常退出；communicate 超时会先杀 docker CLI 进程，却不能
+        证明 daemon 已停止容器，因此仍需按预先生成的唯一名称执行显式强删。
+        """
         try:
             cleanup = await asyncio.create_subprocess_exec(
                 self.executable,
@@ -207,7 +223,11 @@ class DockerSandboxBackend(SandboxBackend):
             raise
 
     async def _force_remove_resiliently(self, container_name: str) -> None:
-        """让删除任务在调用方取消期间仍优先完成，吞掉非关键清理错误。"""
+        """让删除任务在调用方取消期间仍优先完成，吞掉非关键清理错误。
+
+        清理是 best-effort：Docker daemon 不可用时无法做出绝对删除保证；但外层取消
+        不会直接取消本清理 Task，避免最常见的“用户中止导致容器泄漏”。
+        """
         cleanup = asyncio.create_task(self._force_remove(container_name))
         try:
             await finish_task_before_cancelling(cleanup)
@@ -234,7 +254,12 @@ async def _bounded_process_wait(process: asyncio.subprocess.Process) -> None:
 def _workspace_mount(
     request: SandboxExecutionRequest,
 ) -> tuple[tuple[str, str, str], str]:
-    """把宿主 workspace/cwd 映射成容器挂载三元组与 /workspace cwd。"""
+    """把宿主 workspace/cwd 映射成唯一 bind 与容器内 cwd。
+
+    先用公共 ``workspace_path`` 拒绝 cwd 逃逸，再保留 cwd 相对根的 POSIX parts，
+    因而宿主 ``<root>/src`` 稳定映射成 ``/workspace/src``。只有 READ_ONLY 把 bind
+    标为 ro；其他模式的扩大范围仍被“只挂一个 workspace”这条后端硬边界截断。
+    """
     root, resolved_cwd = workspace_path(request)
     access = "ro" if request.sandbox_mode == SandboxMode.READ_ONLY else "rw"
     relative = resolved_cwd.relative_to(root)

@@ -52,6 +52,8 @@ def test_docker_backend_enforces_runtime_boundaries(tmp_path, monkeypatch):
     assert result.metadata["backend"] == "docker"
     assert (tmp_path / "sandbox-output.txt").read_text(encoding="utf-8") == "sandbox-ok"
     assert "/workspace\n" in output
+    if hasattr(os, "getuid"):
+        assert f"uid={os.getuid()}\n" in output
     assert "network=none" in output
     assert "allowed=forwarded" in output
     assert "blocked=unset" in output

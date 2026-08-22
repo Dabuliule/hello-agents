@@ -21,7 +21,13 @@ from codecraft.sandbox.policy import SandboxMode
 
 
 class SeatbeltSandboxBackend(SandboxBackend):
-    """macOS process sandbox backed by the built-in Seatbelt runtime."""
+    """通过 macOS ``sandbox-exec``/Seatbelt profile 限制写入和网络的 OS 后端。
+
+    Profile 从 ``allow default`` 开始，再按请求追加 file-write/network deny 与精确
+    allow：READ_ONLY 只允许临时目录和 /dev/null 写，WORKSPACE_WRITE 再开放
+    workspace，DANGER_FULL_ACCESS 不限制文件写。默认允许宿主文件读取，因此该后端
+    主要保护完整性而非隐藏宿主敏感文件；CommandPolicy/Approval 仍不能替代机密隔离。
+    """
 
     name = SandboxBackendType.SEATBELT.value
     isolation = "os"
@@ -77,11 +83,12 @@ class SeatbeltSandboxBackend(SandboxBackend):
         *,
         temp_root: Path,
     ) -> list[str]:
-        """生成参数化 Seatbelt profile 与 shell argv。
+        """把 SandboxMode/网络能力翻译成参数化 Seatbelt profile 与 shell argv。
 
         非 full-access 先拒绝所有 file-write，再仅开放 /dev/null、临时目录，
         WORKSPACE_WRITE 额外开放 workspace；network_access=False 拒绝网络。
-        路径通过 ``-D`` 参数传入，避免直接插进 profile 文本。
+        路径通过 ``-D`` 参数传入而不是拼进 profile 语法，避免特殊字符改变规则。
+        ``allow default`` 意味着 read-only/workspace-write 仍可读取宿主其他路径。
         """
         root, _ = workspace_path(request)
         policy = ["(version 1)", "(allow default)"]

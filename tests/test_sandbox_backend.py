@@ -132,6 +132,8 @@ def test_docker_command_applies_isolation_and_resource_limits(tmp_path, monkeypa
     assert "--read-only" in command
     assert command[command.index("--cap-drop") + 1] == "ALL"
     assert "no-new-privileges" in command
+    if hasattr(os, "getuid") and hasattr(os, "getgid"):
+        assert command[command.index("--user") + 1] == f"{os.getuid()}:{os.getgid()}"
     assert f"type=bind,source={workspace},target=/workspace" in command
     assert command[command.index("SAFE_TOKEN") - 1] == "--env"
     assert "SAFE_TOKEN=secret" not in command
@@ -180,6 +182,19 @@ def test_docker_command_mounts_single_workspace(tmp_path):
     )
 
     assert command.count("--mount") == 1
+
+
+def test_docker_full_access_still_exposes_only_writable_workspace(tmp_path):
+    command = DockerSandboxBackend().build_command(
+        _request(tmp_path, sandbox_mode=SandboxMode.DANGER_FULL_ACCESS),
+        container_name="codecraft-full-access",
+    )
+
+    assert "--read-only" in command
+    assert command.count("--mount") == 1
+    mount = command[command.index("--mount") + 1]
+    assert mount == f"type=bind,source={tmp_path},target=/workspace"
+    assert ",readonly" not in mount
 
 
 def test_docker_backend_executes_without_host_shell(tmp_path, monkeypatch):
@@ -433,6 +448,35 @@ def test_bubblewrap_command_uses_os_namespaces_and_bind_mounts(tmp_path):
     )
     assert command[command.index("--chdir") + 1] == str(cwd)
     assert command[-4:] == ["--", "/bin/sh", "-lc", "pytest -q"]
+
+
+def test_native_backends_map_full_access_and_enabled_network(tmp_path):
+    temp_root = tmp_path / "temp"
+    temp_root.mkdir()
+    request = _request(
+        tmp_path,
+        sandbox_mode=SandboxMode.DANGER_FULL_ACCESS,
+        network_access=True,
+    )
+
+    seatbelt_command = SeatbeltSandboxBackend().build_command(
+        request,
+        temp_root=temp_root,
+    )
+    seatbelt_profile = seatbelt_command[seatbelt_command.index("-p") + 1]
+    assert "(deny file-write*)" not in seatbelt_profile
+    assert "(deny network*)" not in seatbelt_profile
+    assert not any(
+        argument.startswith("-DWRITABLE_ROOT=") for argument in seatbelt_command
+    )
+
+    bubblewrap_command = BubblewrapSandboxBackend().build_command(
+        request,
+        temp_root=temp_root,
+    )
+    assert "--unshare-net" not in bubblewrap_command
+    root_mount = bubblewrap_command.index("--bind")
+    assert bubblewrap_command[root_mount : root_mount + 3] == ["--bind", "/", "/"]
 
 
 def test_auto_backend_prefers_native_os_sandbox(monkeypatch):
