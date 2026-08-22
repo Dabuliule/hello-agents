@@ -68,7 +68,9 @@ async def run_eval_suite(
         FileExistsError: 输出根含上次评测保留目录/报告。
 
     Tasks 严格顺序运行，避免模型并发、磁盘压力和 Provider 限流使延迟指标失去
-    可比性；重复 attempt 仍各有独立 workspace、Session ID 和 Trace。
+    可比性；重复 attempt 仍各有独立 workspace、Session ID 和 Trace。这里的可复现
+    指 fixture、权限、工具、grader 和调度条件稳定，不保证远端 LLM 输出确定；repeat
+    用于观察波动，当前报告不计算 pass@k 或置信区间。
     """
     if repeat < 1:
         raise ValueError("repeat must be at least 1")
@@ -136,7 +138,8 @@ async def _run_task(
     patch 与检索工具，不提供 Bash，降低环境差异。
 
     Runtime 异常被记录但 finally 始终 close；Turn 终态后重新从 Store 读取事件，
-    确保指标和 Trace 基于持久化事实而非暂存队列。
+    确保指标和 Trace 基于持久化事实而非暂存队列。模型 answer 仅进报告供诊断，
+    correctness 由 Turn 终态与 workspace checks 共同决定。
     """
     workspace = output_dir / "workspaces" / task.task_id / f"attempt-{attempt:02d}"
     seed_workspace(task, workspace)

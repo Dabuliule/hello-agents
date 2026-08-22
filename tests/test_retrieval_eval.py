@@ -6,6 +6,12 @@ import json
 from typer.testing import CliRunner
 
 from codecraft.cli.app import app
+from codecraft.retrieval.benchmark import (
+    _precision_at_k,
+    _recall_at_k,
+    _reciprocal_rank,
+    _unique_paths,
+)
 from codecraft.retrieval import (
     get_retrieval_cases,
     render_retrieval_html,
@@ -14,6 +20,25 @@ from codecraft.retrieval import (
 )
 
 runner = CliRunner()
+
+
+def test_retrieval_metrics_rank_unique_paths_in_first_seen_order():
+    matches = [
+        {"path": "src/auth/service.py", "line": 1},
+        {"path": "src/auth/service.py", "line": 8},
+        {"path": "src/unrelated.py", "line": 2},
+        {"path": 42, "line": 3},
+        "invalid",
+    ]
+
+    retrieved = _unique_paths(matches)
+    relevant = {"src/auth/service.py", "src/auth/permissions.py"}
+
+    assert retrieved == ["src/auth/service.py", "src/unrelated.py"]
+    assert _recall_at_k(retrieved, relevant, 1) == 0.5
+    assert _reciprocal_rank(retrieved, relevant) == 1.0
+    # 当前报告使用“实际可见结果”作分母：Top-5 只返回两条时精度为 1/2。
+    assert _precision_at_k(retrieved, relevant, 5) == 0.5
 
 
 def test_retrieval_suite_has_stable_multi_language_cases(tmp_path):

@@ -14,7 +14,8 @@ def render_retrieval_html(report: dict[str, Any]) -> str:
     """把报告摘要渲染成无外部资源的可分享 HTML 页面。
 
     所有来自 report 的字符串进入 HTML 前均经过 escape，避免查询、用例名称
-    或指标内容成为可执行标记。
+    或指标内容成为可执行标记。HTML 展示 case 聚合结果；JSON 仍保留每一次
+    repeat 的完整路由、候选成本和排名明细，排障时应以 JSON 为准。
     """
     run = report["run"]
     metrics = report["metrics"]

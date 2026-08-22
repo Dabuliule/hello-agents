@@ -97,6 +97,26 @@ def test_eval_metrics_derive_tokens_and_classify_failures():
     assert percentile([40, 10, 30, 20], 95) == 40
     assert (
         classify_failure(
+            events=[],
+            runtime_error=None,
+            final_status="success",
+            checks=[{"passed": True}],
+            tool_failure_count=0,
+        )
+        is None
+    )
+    assert (
+        classify_failure(
+            events=[aborted_event],
+            runtime_error="ConnectionError: unavailable",
+            final_status="aborted",
+            checks=[{"passed": False}],
+            tool_failure_count=1,
+        )
+        == "runtime_error"
+    )
+    assert (
+        classify_failure(
             events=[aborted_event],
             runtime_error=None,
             final_status="aborted",

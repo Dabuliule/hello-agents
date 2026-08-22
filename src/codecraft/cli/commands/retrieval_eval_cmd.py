@@ -37,7 +37,7 @@ class RetrievalEvalStrategy(StrEnum):
 
 
 def register_retrieval_eval_command(app: typer.Typer) -> None:
-    """注册固定语料检索 benchmark 子命令。"""
+    """注册不加载 Provider、只评测公开检索工具的固定语料子命令。"""
 
     @app.command("retrieval-eval")
     def retrieval_eval_command(
@@ -98,7 +98,11 @@ async def run_retrieval_eval(
     strategy: RetrievalEvalStrategy,
     format: RetrievalEvalFormat,
 ) -> int:
-    """运行 benchmark、按选择写报告并打印质量和延迟摘要。"""
+    """运行 benchmark、按选择写报告并打印质量和延迟摘要。
+
+    返回 ``2`` 表示目标目录已有评测产物；正常完成返回 ``0``。检索失败等
+    非预期异常继续向上传播，避免把不完整报告伪装成一次有效基线。
+    """
     console = make_console()
     cases = get_retrieval_cases()
     console.print(

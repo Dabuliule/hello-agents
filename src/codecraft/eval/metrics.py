@@ -67,7 +67,9 @@ def classify_failure(
     """按 runtime→model→abort→tool→grader 优先级归类唯一失败类型。
 
     只有 runtime 无异常、Turn success 且全部 checks 通过才返回 None。分类顺序
-    保证一次 attempt 不会同时计入多个 failure bucket。
+    保证一次 attempt 不会同时计入多个 failure bucket：基础设施异常优先于模型协议，
+    模型错误优先于普通 abort；Turn 已成功但曾有工具失败时归 tool_failure，最后才是
+    “模型宣称完成但 workspace outcome 不符”的 grader_failure。
     """
     if (
         runtime_error is None

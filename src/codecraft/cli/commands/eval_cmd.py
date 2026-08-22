@@ -134,7 +134,9 @@ async def run_eval(
     """选择 Task、强制安全配置、运行评测并写 JSON/HTML 报告。
 
     返回 0 表示全部 attempts 通过，1 表示至少一个失败，2 表示选择/输出目录
-    用法错误；每次 attempt 的进度即时写到 Console。
+    用法错误；每次 attempt 的进度即时写到 Console。Eval 沿用用户选择的模型和
+    预算，但固定 approval=never、network=false；真正工具集还会在 Runner 中收窄为
+    不含 Bash/MCP 的文件、Patch 与 Scan Search，减少环境和外部副作用噪声。
     """
     from codecraft.cli import app as cli_app
 

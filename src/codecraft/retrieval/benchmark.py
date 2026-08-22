@@ -45,6 +45,14 @@ async def run_retrieval_benchmark(
 ) -> dict[str, Any]:
     """用公开 workspace_search 工具重复运行固定语料并汇总质量/成本。
 
+    这里刻意经过 ``WorkspaceSearchTool.arun``，而不是直接调用某个 Retriever，
+    使参数校验、WorkspaceGuard、路由/降级和 ToolResult 格式也进入评测范围。
+    整条路径不创建 AgentRuntime、不加载模型，也不消耗模型 API Token。
+
+    所有 case/repeat 顺序读取同一个不可变 workspace。repeat 主要增加延迟样本，
+    对确定性检索器重复相同 query 不会产生新的相关性证据，也不能当作独立的
+    模型成功率试验；文件系统页缓存还可能让后续样本比首次调用更热。
+
     Args:
         cases: 唯一 case_id 的确定性评测用例。
         output_dir: 必须没有既有 run artifacts 的新运行目录。
@@ -143,7 +151,11 @@ async def _run_case(
     *,
     strategy: str,
 ) -> dict[str, Any]:
-    """执行单次 case，测量工具延迟并计算排名和扫描成本指标。"""
+    """执行单次 case，按唯一文件路径计算排名并记录工具成本。
+
+    一个文件可能返回多条行级 snippet；排名指标先按首次出现顺序折叠路径，
+    防止同一文件的多次文本命中挤占 Top-K 并虚增相关文件数量。
+    """
     call = ToolCall(
         call_id=new_id("call_retrieval_"),
         name=tool.name,
@@ -248,7 +260,12 @@ def _reciprocal_rank(retrieved: list[str], relevant: set[str]) -> float:
 
 
 def _precision_at_k(retrieved: list[str], relevant: set[str], k: int) -> float:
-    """计算实际可见的前 k 条中相关路径比例。"""
+    """计算实际返回的前 k 条中相关路径比例。
+
+    分母是 ``min(len(retrieved), k)``，结果不足 k 条时不补无关项。因此这是
+    “可见结果精度”，数值不能直接和固定使用 ``relevant / k`` 的严格 P@K
+    benchmark 横向比较；报告同时记录 zero-result 和 irrelevant-path 数辅助解读。
+    """
     visible = retrieved[:k]
     if not visible:
         return 0.0
@@ -256,7 +273,12 @@ def _precision_at_k(retrieved: list[str], relevant: set[str], k: int) -> float:
 
 
 def _aggregate_metrics(results: list[dict[str, Any]]) -> dict[str, Any]:
-    """汇总所有重复结果的质量、最近秩、延迟、资源和路由分布。"""
+    """汇总所有重复结果的质量、最近秩、延迟、资源和路由分布。
+
+    ``mean_*`` 和 percentile 可用于不同 repeat 数的 run 间比较；zero-result、
+    irrelevant-path、total-scanned-bytes 等总量会随 repeat 线性增长，比较时必须
+    同时查看 ``evaluation_count``，不能只看绝对值。
+    """
     count = len(results)
     latencies = [float(result["latency_ms"]) for result in results]
     return {

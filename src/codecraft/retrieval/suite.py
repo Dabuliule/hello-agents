@@ -9,7 +9,13 @@ RETRIEVAL_SUITE_NAME = "codecraft-repository-retrieval-v1"
 
 @dataclass(frozen=True)
 class RetrievalCase:
-    """固定语料上的查询、类别、相关路径与检索作用域期望。"""
+    """固定语料上的查询及路径级相关性标注。
+
+    ``relevant_paths`` 相当于检索评测里的 qrels：它声明哪些文件与查询相关，
+    不评价同一文件内某个 snippet 的行号或文本质量。``path`` 和 ``mode`` 则
+    进入真实 ``workspace_search`` 参数，用于覆盖目录作用域及路径/内容检索。
+    dataclass 冻结后，一次 run 内的 repeat 都共享同一份不可变评测契约。
+    """
 
     case_id: str
     category: str
@@ -150,6 +156,10 @@ def get_retrieval_cases() -> tuple[RetrievalCase, ...]:
 
 def seed_retrieval_workspace(workspace: Path) -> None:
     """创建评测使用的固定 Python/TS/Go/配置/文档语料和忽略项。
+
+    语料完全由代码生成，不依赖调用者当前仓库，因此不同机器和不同检索策略
+    面对的是同一组字节。benchmark 只读该 workspace，repeat 可以安全共享它；
+    这和会修改文件、必须为每次 attempt 重新 seed 的 Agent Eval 不同。
 
     Example:
         ``seed_retrieval_workspace(tmp_path / "workspace")`` 会创建

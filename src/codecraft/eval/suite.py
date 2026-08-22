@@ -30,7 +30,12 @@ class EvalCheck:
 
 @dataclass(frozen=True)
 class EvalTask:
-    """稳定任务 ID、类别、Prompt、初始文件和全部确定性检查。"""
+    """稳定任务 ID、类别、Prompt、初始文件和全部确定性检查。
+
+    Task 同时声明输入 fixture 与客观 outcome contract，不使用模型最终回答或另一个
+    LLM judge 判分。checks 应同时覆盖目标变化和关键不变量；例如更新版本号时也检查
+    README 未被误改，避免“完成主目标但产生无关破坏”被计为通过。
+    """
 
     task_id: str
     title: str

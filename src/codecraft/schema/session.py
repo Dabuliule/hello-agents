@@ -28,7 +28,11 @@ class SessionSource(StrEnum):
 
 
 class EvalSessionContext(BaseModel):
-    """评测 Session 与 run、task、attempt 的关联信息。"""
+    """持久化到 SessionConfig 的 run、task、attempt 评测关联键。
+
+    它让独立 JSONL/Trace 可以回连聚合报告，不混入通用 metadata 字典；Resume 或离线
+    诊断因此仍能知道事件属于哪次评测，但该字段不参与 Agent Prompt。
+    """
 
     run_id: str = Field(min_length=1)
     task_id: str = Field(min_length=1)
