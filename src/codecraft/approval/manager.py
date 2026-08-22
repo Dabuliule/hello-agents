@@ -65,7 +65,22 @@ class ApprovalDecision(BaseModel):
 
 
 class ApprovalReviewer(ABC):
-    """同步策略或交互式审批通道必须实现的异步接口。"""
+    """同步策略或交互式审批通道实现的两阶段审批接口。
+
+    ``prepare`` 必须同步完成接收决定所需的登记；调用方只有在它返回后才能发布
+    APPROVAL_REQUESTED。``review`` 随后等待或立即生成决定，``cancel`` 则覆盖
+    事件发布失败、timeout 和 Turn 取消等所有提前退出路径。
+    """
+
+    @abstractmethod
+    def prepare(self, request: ApprovalRequest) -> None:
+        """在审批事件对外可见前同步建立接收决定所需的状态。"""
+        ...
+
+    @abstractmethod
+    def cancel(self, request: ApprovalRequest) -> None:
+        """幂等清理已准备但不再需要的审批状态。"""
+        ...
 
     @abstractmethod
     async def review(self, request: ApprovalRequest) -> ApprovalDecision:
@@ -82,6 +97,12 @@ class AutoApprovalReviewer(ApprovalReviewer):
         self.reason = reason
         self.requests: list[ApprovalRequest] = []
 
+    def prepare(self, request: ApprovalRequest) -> None:
+        """自动 Reviewer 不接收外部决定，无需建立等待状态。"""
+
+    def cancel(self, request: ApprovalRequest) -> None:
+        """自动 Reviewer 没有待清理的交互状态。"""
+
     async def review(self, request: ApprovalRequest) -> ApprovalDecision:
         """记录请求并立即返回固定决定。"""
         self.requests.append(request)
@@ -96,6 +117,12 @@ class DenyApprovalReviewer(ApprovalReviewer):
     def __init__(self) -> None:
         """创建空的请求审计列表。"""
         self.requests: list[ApprovalRequest] = []
+
+    def prepare(self, request: ApprovalRequest) -> None:
+        """固定拒绝 Reviewer 不接收外部决定，无需建立等待状态。"""
+
+    def cancel(self, request: ApprovalRequest) -> None:
+        """固定拒绝 Reviewer 没有待清理的交互状态。"""
 
     async def review(self, request: ApprovalRequest) -> ApprovalDecision:
         """记录请求并以稳定原因拒绝。"""
@@ -211,6 +238,14 @@ class ApprovalManager:
         if decision.approval_id != request.approval_id:
             raise RuntimeError("approval decision does not match its request")
         return decision
+
+    def prepare(self, request: ApprovalRequest) -> None:
+        """让 Reviewer 在 APPROVAL_REQUESTED 发布前同步进入可决定状态。"""
+        self.reviewer.prepare(request)
+
+    def cancel(self, request: ApprovalRequest) -> None:
+        """幂等清理 Reviewer 为本次请求建立的等待状态。"""
+        self.reviewer.cancel(request)
 
     @staticmethod
     def build_reviewer_failure_decision(

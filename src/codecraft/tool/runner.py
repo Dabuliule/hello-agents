@@ -268,37 +268,42 @@ class ToolRunner:
         evaluation: ApprovalEvaluation,
         state: _ToolRunState,
     ) -> AsyncIterator[ToolRunnerEvent]:
-        """按 REQUESTED → 等待 Reviewer → DECIDED 的可审计顺序处理审批。
+        """按 prepare → REQUESTED → 等待 → DECIDED 的顺序处理审批。
 
         同意只把 ``state.approved`` 置 True，真正执行仍回到统一工具路径；拒绝、
         Reviewer 异常和审批超时都形成失败 ToolResult。任务取消继续向上传播，
-        ThreadApprovalReviewer 的 finally 会同步清理 pending Future。
+        外层 finally 会同步清理 Reviewer 为请求准备的状态。
         """
-        # approval 是可交互边界，先产出请求，再等待 UI 或 reviewer 处理。
         request = self.approval_manager.build_request(
             call=call,
             context=context,
             evaluation=evaluation,
         )
-        yield ToolRunnerEvent(
-            RuntimeEventType.APPROVAL_REQUESTED,
-            request.model_dump(mode="json"),
-        )
+        # 先登记再发布：UI 看见 REQUESTED 时，decide() 一定已经有 Future 可唤醒。
+        self.approval_manager.prepare(request)
+        try:
+            yield ToolRunnerEvent(
+                RuntimeEventType.APPROVAL_REQUESTED,
+                request.model_dump(mode="json"),
+            )
 
-        outcome = await self._review_approval(
-            request,
-            timeout_seconds=context.approval_timeout_seconds,
-        )
-        state.approval_wait_ms = outcome.wait_ms
-        yield ToolRunnerEvent(
-            RuntimeEventType.APPROVAL_DECIDED,
-            outcome.decision.model_dump(mode="json"),
-        )
-        if outcome.decision.approved:
-            state.approved = True
-            return
+            outcome = await self._review_approval(
+                request,
+                timeout_seconds=context.approval_timeout_seconds,
+            )
+            state.approval_wait_ms = outcome.wait_ms
+            yield ToolRunnerEvent(
+                RuntimeEventType.APPROVAL_DECIDED,
+                outcome.decision.model_dump(mode="json"),
+            )
+            if outcome.decision.approved:
+                state.approved = True
+                return
 
-        state.result = self._approval_denied_result(call, outcome)
+            state.result = self._approval_denied_result(call, outcome)
+        finally:
+            # 也覆盖 REQUESTED 的持久化/广播失败，以及消费者提前关闭生成器。
+            self.approval_manager.cancel(request)
 
     async def _review_approval(
         self,

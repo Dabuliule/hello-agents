@@ -3688,6 +3688,110 @@ def test_thread_approval_decision_allows_pending_tool_call(tmp_path):
     asyncio.run(run_test())
 
 
+def test_thread_can_decide_as_soon_as_approval_event_is_published(tmp_path):
+    async def run_test() -> None:
+        reviewer = ThreadApprovalReviewer()
+        event_bus = EventBus()
+        provider = MockProvider(
+            script=[
+                ModelToolCallEvent(
+                    payload={
+                        "call_id": "call_immediate_approval",
+                        "name": "write_file",
+                        "arguments": {
+                            "path": "immediately-approved.txt",
+                            "content": "ready before publish",
+                        },
+                    },
+                ),
+                ModelCompletedEvent(),
+                ModelMessageDeltaEvent(payload={"text": "Write approved"}),
+                ModelCompletedEvent(),
+            ]
+        )
+        config = make_config(tmp_path).model_copy(
+            update={"approval_policy": ApprovalPolicy.ON_REQUEST}
+        )
+        runtime = AgentRuntime(
+            session_store=SessionStore(config.codecraft_home),
+            llm_providers=LLMProviderRegistry([provider]),
+            tool_registry=ToolRegistry([WriteFileTool()]),
+            approval_manager=ApprovalManager(reviewer=reviewer),
+            event_bus=event_bus,
+        )
+        thread = await runtime.create_thread(config)
+
+        async def decide_during_publish(event: RuntimeEvent) -> None:
+            if event.type != RuntimeEventType.APPROVAL_REQUESTED:
+                return
+            await thread.submit(
+                SessionInput.approval_decision(
+                    "inp_immediate_approval",
+                    approval_id=event.payload["approval_id"],
+                    approved=True,
+                    reason="approved immediately",
+                )
+            )
+
+        # AgentThread 已先订阅；这个 handler 模拟 UI 收到事件后立即回传决定。
+        event_bus.subscribe(decide_during_publish)
+        await thread.submit(SessionInput.user_message("inp_test", "write now"))
+        await thread.wait_until_idle()
+        snapshot = await thread.read_snapshot()
+
+        assert (tmp_path / "immediately-approved.txt").read_text(
+            encoding="utf-8"
+        ) == "ready before publish"
+        assert snapshot.events[-1].type == RuntimeEventType.TURN_FINISHED
+        assert reviewer.list_pending() == []
+
+    asyncio.run(run_test())
+
+
+def test_approval_prepare_is_cleaned_when_request_publish_fails(tmp_path):
+    async def run_test() -> None:
+        reviewer = ThreadApprovalReviewer()
+        event_bus = EventBus()
+        provider = MockProvider(
+            script=[
+                ModelToolCallEvent(
+                    payload={
+                        "call_id": "call_failed_publish",
+                        "name": "write_file",
+                        "arguments": {"path": "never.txt", "content": "never"},
+                    },
+                ),
+                ModelCompletedEvent(),
+            ]
+        )
+        config = make_config(tmp_path).model_copy(
+            update={"approval_policy": ApprovalPolicy.ON_REQUEST}
+        )
+        runtime = AgentRuntime(
+            session_store=SessionStore(config.codecraft_home),
+            llm_providers=LLMProviderRegistry([provider]),
+            tool_registry=ToolRegistry([WriteFileTool()]),
+            approval_manager=ApprovalManager(reviewer=reviewer),
+            event_bus=event_bus,
+        )
+        thread = await runtime.create_thread(config)
+
+        async def fail_request_publish(event: RuntimeEvent) -> None:
+            if event.type == RuntimeEventType.APPROVAL_REQUESTED:
+                raise RuntimeError("approval UI unavailable")
+
+        event_bus.subscribe(fail_request_publish)
+        await thread.submit(SessionInput.user_message("inp_test", "write never"))
+        await thread.wait_until_idle()
+        snapshot = await thread.read_snapshot()
+
+        assert not (tmp_path / "never.txt").exists()
+        assert reviewer.list_pending() == []
+        assert snapshot.events[-1].type == RuntimeEventType.TURN_ABORTED
+
+    asyncio.run(run_test())
+
+
 def test_thread_approval_decision_denies_pending_tool_call(tmp_path):
     async def run_test() -> None:
         reviewer = ThreadApprovalReviewer()
