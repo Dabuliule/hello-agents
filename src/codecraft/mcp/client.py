@@ -45,7 +45,12 @@ class _StartedMCP:
 
 
 class MCPStdioProvider(AsyncToolProvider):
-    """拥有一个 stdio MCP 子进程/Session 并将远程工具适配进 Registry。"""
+    """拥有一个宿主 stdio MCP 子进程/Session 并将远程工具适配进 Registry。
+
+    Provider 负责生命周期、握手、发现预算和协议适配；它不为 server 建立 Docker
+    或原生沙箱。ToolRegistry 发布后的审批/effect 检查发生在每次工具调用边界，
+    不能约束一个已经运行的 server 进程，因此配置来源必须先经过用户信任校验。
+    """
 
     def __init__(
         self,

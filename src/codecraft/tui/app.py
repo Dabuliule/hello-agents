@@ -47,7 +47,12 @@ MAX_RESTORED_TOOL_EVENTS = 200
 
 
 class CodeCraftTUI(App[None]):
-    """Textual 交互客户端：驱动 Runtime、渲染事件并回送消息/审批。"""
+    """Textual 单会话视图：驱动 Runtime、渲染事件并回送消息/审批。
+
+    一个 App 实例只持有一个当前 ``AgentThread``；切换/并排管理多个活跃 Session
+    尚未成为 UI 能力。这不是 Runtime 的单 Session 限制：不同 CLI 进程或嵌入式
+    调用仍可各自创建 Thread。恢复列表只是选择启动目标，不会让后台会话继续运行。
+    """
 
     TITLE = "CodeCraft"
     BINDINGS = [

@@ -57,6 +57,10 @@ class DockerSandboxBackend(SandboxBackend):
     DANGER_FULL_ACCESS 也不会暴露宿主根。容器始终 drop capabilities、禁止提权并
     以宿主 UID/GID 运行。Docker daemon 是独立生命周期边界，所以 timeout/cancel
     除了终止 CLI 进程，还必须按唯一名称强制删除可能仍在运行的容器。
+
+    Backend 不维护 warm pool：每次 execute 都执行 ``docker run --rm``，换取命令
+    间无容器状态泄漏和简单清理语义，代价是启动延迟且无法复用容器内依赖缓存。
+    它只承载 BashTool；内置文件工具仍在宿主进程中由 WorkspaceGuard 约束路径。
     """
 
     name = SandboxBackendType.DOCKER.value

@@ -30,7 +30,13 @@ class MCPToolPolicySettings(BaseModel):
 
 
 class MCPServerSettings(BaseModel):
-    """一个 stdio MCP 进程、发现预算和工具治理策略。"""
+    """一个受信任 stdio MCP 宿主进程、发现预算和调用治理策略。
+
+    配置 ``command`` 就授权 CodeCraft 在宿主机启动该程序；env allowlist 只减少
+    主动继承的环境变量，不是 OS 沙箱。effects、requires_approval 和 tool 覆盖
+    约束的是发现后通过 ToolRunner 发起的调用，无法撤销 server 进程自身已有的
+    文件系统或网络权限。因此安全敏感 server 应由用户自行容器化后再配置。
+    """
 
     enabled: bool = True
     transport: str = "stdio"

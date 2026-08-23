@@ -316,7 +316,14 @@ class SessionStore:
         *,
         include_invalid: bool = False,
     ) -> list[SessionSummary]:
-        """列出 session 摘要，可按 cwd 过滤。"""
+        """列出 session 摘要，可按 cwd 过滤并选择暴露损坏日志。
+
+        默认跳过无法恢复的文件，避免一个坏 JSONL 让整个 Session 选择器不可用；
+        ``include_invalid`` 仅在不按 cwd 过滤时返回文件级诊断，因为无效日志的
+        cwd 本身不可信。这里刻意不删除、截断或自动修复文件：Store 无法判断尾部
+        损坏是断电残留、人工编辑还是仍在写入的另一进程，保留原始证据比猜测性
+        清理更安全。未来的 prune/repair 应作为显式、可审计的独立操作实现。
+        """
         summaries: list[SessionSummary] = []
         cwd_resolved = cwd.expanduser().resolve() if cwd else None
 
